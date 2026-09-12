@@ -189,6 +189,37 @@ export const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         component: ClipSoundInput
     },
+    autoClipsSection: {
+        type: OptionType.COMPONENT,
+        component: () => (
+            <SettingsSection
+                title="End-of-call clips"
+                note="One saved without being asked, at the moment a call would otherwise end - and so it almost never needs the buffer running first."
+            />
+        )
+    },
+    autoClipOnCallEnd: {
+        type: OptionType.BOOLEAN,
+        description: "Save a short clip automatically when you leave a call or Discord closes while the buffer is running. It catches the moments nobody thinks to mark - the final play, the last words, the wipeout right as the round ends - from the tail of the clip buffer, without a key press",
+        default: false
+    },
+    autoClipEndLength: {
+        type: OptionType.SLIDER,
+        description: "Seconds of the call's end to keep in that automatic clip. Capped at the buffer length: you cannot save more than is buffered",
+        markers: [5, 10, 15, 30, 45, 60],
+        default: 30,
+        stickToMarkers: true
+    },
+    autoClipEndIncludeMic: {
+        type: OptionType.BOOLEAN,
+        description: "Include your own microphone in the end-of-call clip. Off leaves you out of it, as if you had muted yourself on the voice channel panel",
+        default: true
+    },
+    autoClipEndToasts: {
+        type: OptionType.BOOLEAN,
+        description: "Tell you over Discord that one was taken",
+        default: true
+    },
     interfaceSection: {
         type: OptionType.COMPONENT,
         component: () => (

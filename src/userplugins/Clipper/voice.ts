@@ -136,6 +136,17 @@ function avatarOf(userId: string, size = 128): string {
 }
 
 /**
+ * The voice channel this client is currently in, or undefined when not in one.
+ *
+ * Mirrors `currentVoiceChannel` but exported so other modules can tell whether
+ * a call is still active without reconstructing the store calls. A missing
+ * value (null or an exception) is treated as "not in a call".
+ */
+export function voiceChannelId(): string | undefined {
+    return currentVoiceChannel();
+}
+
+/**
  * Everyone in the voice channel, this client included.
  *
  * Ordered by name so the panel does not reshuffle itself every time someone

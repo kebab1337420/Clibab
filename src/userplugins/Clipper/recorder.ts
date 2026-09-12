@@ -33,6 +33,7 @@ import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
 import { toast } from "./toasts";
+import { voiceChannelId } from "./voice";
 import { errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
 import { shiftTracks, toMeta, voiceActivity, type VoiceFileMeta, voiceParticipants,type VoiceTrack } from "./voice";
 import { voiceBuffers } from "./voiceRecord";
@@ -304,9 +305,75 @@ class ClipRecorder {
      * to as near nothing as this side can get. The poll stays underneath it,
      * because a missed event is silent and a missed tick is not.
      */
-    private onVoiceStates = () => this.grantConsent();
+    private onVoiceStates = () => {
+        this.grantConsent();
+        this.onCallStateChange();
+    };
+
+    /**
+     * Fires on every `VOICE_STATE_UPDATES`, which is the dispatcher event that
+     * Discord emits when a call starts or ends - including the one that happens
+     * when the client itself leaves a voice channel. The buffer is checked
+     * against that transition, and an end-of-call clip is taken when the call
+     * ends while the buffer is running and the setting is on.
+     *
+     * Two guards keep it cheap and quiet:
+     *  - the buffer has to be the one this call armed (tracked with
+     *    `voiceLastChannel`, set on `start` and cleared on `stop`), so a buffer
+     *    that was started outside of a call never saves one on its own;
+     *  - `autoClipPending` blocks re-entry during the async save, since the
+     *    shutdown sequence can fire several voice events in quick succession
+     *    (leave the channel, then Discord tearing the renderer down).
+     */
+    private onCallStateChange(): void {
+        if (!settings.store.autoClipOnCallEnd) {
+            this.voiceLastChannel = voiceChannelId();
+            return;
+        }
+
+        const nowInCall = voiceChannelId();
+        const wasInCall = this.voiceLastChannel;
+        this.voiceLastChannel = nowInCall;
+
+        // Not a call end: either still in the same call, or not in one to begin
+        // with (so there was no call whose tail to rescue).
+        if (!wasInCall || nowInCall) return;
+
+        // Only act while the buffer is genuinely running. If a save is already
+        // in flight (state "saving"), the keybind clip covers this moment and
+        // clobbering it by stopping the buffer mid-write would throw that clip
+        // away - let the running save finish, and rely on the 5.3.0 idle reset
+        // to clean up the buffer afterward.
+        if (this.state !== "recording") return;
+        if (this.autoClipPending) return;
+        this.autoClipPending = true;
+
+        // The clip sound and the toast travel with `save`, but the end-of-call
+        // moment is its own thing, so label it for the overlay and the log.
+        logger.info("Taking an end-of-call clip");
+        toast("Saving the end of the call", Toasts.Type.MESSAGE);
+
+        // The call has ended, so the buffer has nothing left to serve: after the
+        // clip is taken, stop the capture too - otherwise it rolls on into an
+        // empty voice channel and keeps arming the native helper (the exact
+        // leak the 5.3.0 idle reset exists to stop). `save` sets state back
+        // to "recording", so `stop` is what actually ends the buffer.
+        void this.save(settings.store.autoClipEndLength)
+            .then(() => this.stop())
+            .finally(() => {
+                this.autoClipPending = false;
+            });
+    }
     /** Whether the subscription above is currently attached. */
     private consentBound = false;
+    /**
+     * Last known voice channel id, remembered so a leaving event can be
+     * spotted even though the store is already empty by the time the handler
+     * runs. The start of an auto end-of-call clip leans on this transition.
+     */
+    private voiceLastChannel: string | undefined = undefined;
+    /** Blocks re-entry while the end-of-call clip save is in flight. */
+    private autoClipPending = false;
     /** Poll that writes down what the client is holding. See `watchMemory`. */
     private memoryTicker: ReturnType<typeof setInterval> | null = null;
     private nativeResetTicker: ReturnType<typeof setInterval> | null = null;
@@ -666,6 +733,11 @@ class ClipRecorder {
 
             this.setState("recording");
             toast(`Clip buffer running - last ${settings.store.clipLength}s kept`, Toasts.Type.SUCCESS);
+
+            // Remember the call the buffer is now serving, so a leaving event
+            // can tell it was a call that ended rather than a buffer started
+            // outside of one. Reset on stop, in `cleanup`.
+            this.voiceLastChannel = voiceChannelId();
 
             // A game launched after the buffer moves the capture onto its screen.
             this.followGame();
@@ -1514,6 +1586,11 @@ class ClipRecorder {
         this.header = null;
         this.chunks = [];
         this.marks = [];
+
+        // A stop ends the call window the end-of-call clip reads from: forget
+        // it so the next buffer starts the question over.
+        this.voiceLastChannel = undefined;
+        this.autoClipPending = false;
 
         // The next buffer is a new evening: a stop and a start within two
         // minutes of an automatic clip should not swallow its first highlight.
