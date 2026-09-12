@@ -27,7 +27,7 @@ import { gainOf, MIC_CHANNEL, type MixerLevel, readMixer, SYSTEM_CHANNEL, voiceL
 import { probeAudioTracks } from "./mp4";
 import { muxNativeAudio } from "./mux";
 import type { CaptureSource } from "./native";
-import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, saveNativeClip, setRecordUser, watchRecording } from "./nativeClips";
+import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, setOnIdleCallback, saveNativeClip, setRecordUser, watchRecording } from "./nativeClips";
 import { hasVideoTrack } from "./nativeTracks";
 import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
@@ -1502,6 +1502,7 @@ class ClipRecorder {
         this.nativeResetTicker = null;
         if (this.nativeResetTimeout) clearTimeout(this.nativeResetTimeout);
         this.nativeResetTimeout = null;
+        setOnIdleCallback(null);
         this.nativeArmToken++;
 
         if (this.native || this.nativeArmInFlight) {
@@ -2024,6 +2025,18 @@ class ClipRecorder {
         this.nativeFailures = 0;
         if (this.nativeResetTicker) clearInterval(this.nativeResetTicker);
         this.nativeResetTicker = setInterval(() => this.resetNative(), NATIVE_RESET_MS);
+
+        /*
+         * React to the helper bridge going idle, instead of only on the 30-minute
+         * timer: `clips-bridge-idle-shutdown` is Discord telling this plugin that
+         * the native helper process has nothing to do, which is the same moment it
+         * would start holding its capture session and audio/video handles idle -
+         * and that is the leak that grew the renderer to ~170 MB/hour and got it
+         * OOM-relaunched every 2-3 hours. Tearing the capture down and back up
+         * right then keeps the helper process from lingering. The JS buffer keeps
+         * recording through the one-second native teardown underneath.
+         */
+        setOnIdleCallback(() => this.resetNative());
 
         /*
          * The same message either way, because the difference does not concern

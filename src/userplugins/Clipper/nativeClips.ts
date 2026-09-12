@@ -543,6 +543,24 @@ function detailOf(args: any[]): string {
         .join(" ");
 }
 
+/**
+ * Hook fired when the engine signals the clips helper bridge has gone idle.
+ *
+ * `clips-bridge-idle-shutdown` is Discord's own early-warning that the helper
+ * process behind the native clip engine has nothing to do - it is about to tear
+ * the capture session it has been holding down for this whole recording. The
+ * permanent listener below calls any callback installed here so a long-running
+ * buffer can tear its capture down and re-arm it on the spot, instead of letting
+ * the helper sit idle-but-attached and leak ~170 MB an hour until the renderer
+ * dies on OOM. Installed by `arm` and cleared by `disarm`.
+ */
+let onIdle: (() => void) | null = null;
+
+/** Install or clear the callback fired by the `clips-bridge-idle-shutdown` event. */
+export function setOnIdleCallback(cb: (() => void) | null): void {
+    onIdle = cb;
+}
+
 /** Installs the listeners once, so the engine's last word is always on hand. */
 function listen(): void {
     const found = engine();
@@ -564,6 +582,7 @@ function listen(): void {
              */
             if (event === READY) confirmed = args[0] !== false;
             if (event === ENDED) noteEnded();
+            if (event === IDLE) onIdle?.();
             logEvent(event, args);
         });
     }
