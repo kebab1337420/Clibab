@@ -33,9 +33,8 @@ import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
 import { toast } from "./toasts";
-import { voiceChannelId } from "./voice";
+import { shiftTracks, toMeta, voiceActivity, voiceChannelId, voiceParticipants, type VoiceFileMeta, type VoiceTrack } from "./voice";
 import { errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
-import { shiftTracks, toMeta, voiceActivity, type VoiceFileMeta, voiceParticipants,type VoiceTrack } from "./voice";
 import { voiceBuffers } from "./voiceRecord";
 
 export const logger = new Logger("Clipper", "#f0b132");

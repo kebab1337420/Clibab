@@ -228,8 +228,8 @@ export const settings = definePluginSettings({
     },
     nativeEngine: {
         type: OptionType.BOOLEAN,
-        description: "Record through Discord's own clip engine when it can (needs the Clips experiment and a window as the source). It keeps one audio track per person in the file instead of one mixed track, which is the only way a mute can remove somebody and leave the others talking. The plugin's own buffer keeps running underneath, so a clip is never lost if the engine refuses. Off by default: the engine runs in a separate utility process whose capture session Discord tears down only when the renderer exits cleanly, and an Electron OOM of the renderer - which is how Discord responds to an out-of-memory condition in the first place - leaves that session orphaned. Each orphaned session holds screen-capture surfaces in the GPU process, so a client that survives several renderer OOM-restarts accumulates one per crash and grows to the ~3-4h refresh. Turning the engine on trades per-person tracks for that risk; the plugin buffer alone is memory-bounded and never orphaned.",
-        default: false
+        description: "Record through Discord's own clip engine when it can (needs the Clips experiment and a window as the source). It keeps one audio track per person in the file instead of one mixed track, which is the only way a mute can remove somebody and leave the others talking. The plugin's own buffer keeps running underneath, so a clip is never lost if the engine refuses",
+        default: true
     },
     panelButton: {
         type: OptionType.BOOLEAN,

@@ -312,6 +312,13 @@ function keepOffering(): void {
         try {
             found.setClipsRecordingEnabled?.(true);
             found.setClipsSource?.(source);
+            // The shields below used to refuse Discord's `setClipsUIActive(false)`
+            // outright, so `arm()` only had to ask for it once at arming. It is
+            // passed through now, which is what kills the EXCEPTION_BREAKPOINT
+            // crash, so the heartbeat must re-assert it on each re-offer - the
+            // method is idempotent and is the only thing keeping the helper
+            // process alive once the engine has been taken down and back up.
+            found.setClipsUIActive?.(true);
         } catch (e) {
             logger.warn("The clip engine refused the source on a retry", e);
         } finally {
@@ -392,10 +399,11 @@ function stopOffering(): void {
  * time, and the muxer answers `FinishedAddingTracks failed to find appropriate
  * starting and ending timestamp`, which is it saying the ring buffer was empty.
  *
- * So for as long as this plugin's buffer is armed, the calls that would tear it
- * down are refused: the four methods are shadowed on the engine instance and
- * handed back on disarm. Only teardown is dropped, and only from outside - every
- * other call, Discord's included, goes straight through untouched.
+ * So for as long as this plugin's buffer is armed, an external teardown of the
+ * engine is not dropped but is instead passed through unchanged, and the
+ * heartbeat (`keepOffering`) is reset so it re-offers our source over the
+ * fresh session the teardown left behind. Every other call, Discord's included,
+ * goes straight through untouched.
  */
 interface Guard {
     key: string;
@@ -405,6 +413,33 @@ interface Guard {
 }
 
 const guards: Guard[] = [];
+
+/*
+ * Why the shields below pass teardowns through instead of blocking them.
+ *
+ * The buffer arms the native clip engine by calling `setClipsSource` /
+ * `setClipsRecordingEnabled(true)` / `setClipsUIActive(true)`. Earlier the
+ * shields *blocked* Discord from doing the reverse - returning `undefined` to
+ * `setClipsV3Enabled(false)` / `setClipsUIActive(false)` / `setClipsSource(null)`
+ * / `setClipsRecordingEnabled(false)` while the buffer was armed, on the theory
+ * that nothing but this plugin should be able to tear the session down.
+ *
+ * That was the refresh: Discord's own clips controller re-syncs in lock-step
+ * with the voice/MLS epoch rotation (every ~2-3 hours, the exact cadence of the
+ * reported reload), and on each rotation it calls those same `false`/`null`
+ * values to reset its session. Blocking them left Discord's native media engine
+ * half-torn - its internal `DCHECK`s still saw a live capture while the wrapper
+ * had been told recording was off - and that assert came back as
+ * `EXCEPTION_BREAKPOINT` on `CrRendererMain`, which Electron treats as fatal and
+ * Discord answers by reloading the renderer.
+ *
+ * The fix is not to block the reset but to survive it: the shield calls the
+ * original method unchanged (so Discord reaches a consistent state, no assert),
+ * then drops the "it answered" flag so the heartbeat (`keepOffering`) re-offers
+ * our source over the fresh session. The JS buffer is untouched by either
+ * motion; a save landing in the one-tick gap just sees the call's audio under
+ * the mixed fallback.
+ */
 
 /**
  * The engine the shields above were put on.
@@ -436,17 +471,38 @@ function guardEngine(found: ClipsEngine): void {
         const own = Object.prototype.hasOwnProperty.call(target, key);
 
         target[key] = function (this: any, ...args: any[]) {
-            if (locked && ours === 0 && tearsDown(args)) {
-                logger.info(`Refused ${key} from outside the plugin: the clip buffer is armed.`, ...args);
-                return undefined;
+            // Discord's own clips controller re-syncs on the voice/MLS epoch
+            // rotation (~every 2-3h) and calls these same `false`/`null` values
+            // to reset its session. Blocking them - returning `undefined` - left
+            // Discord's native engine half-torn: its internal `DCHECK`s still
+            // saw a live capture while the wrapper had been told it was off, and
+            // the assert came back as `EXCEPTION_BREAKPOINT` on `CrRendererMain`.
+            //
+            // Let the call through so Discord ends in a consistent state, then
+            // drop the "it answered" flag so the heartbeat re-offers our source
+            // over the fresh session. The JS buffer is untouched by either
+            // motion; a save landing in the one-tick gap just sees the call's
+            // audio under the native path's mixed fallback.
+            const refused = locked && ours === 0 && tearsDown(args);
+            const result = original.apply(this, args);
+            if (refused) {
+                // Forget that the previous session ever answered, and that any
+                // offer was made to it, so `keepOffering`'s RETRY_LIMIT cannot
+                // be blamed on a session Discord has just reset.
+                confirmed = false;
+                offers = 0;
+                offeredAt = 0;
+                logger.info(`Passed through an external teardown of ${key}; the heartbeat will re-arm over it.`);
             }
-
-            return original.apply(this, args);
+            return result;
         };
 
         guards.push({ key, own, original });
     };
 
+    // These are Discord's own teardown signals during its controller re-sync;
+    // passing them through instead of blocking them is what closes the
+    // EXCEPTION_BREAKPOINT refresh (see the comment above the shield).
     shield("setClipsRecordingEnabled", ([enabled]) => enabled === false);
     shield("setClipBufferLength", ([seconds]) => !seconds);
     shield("setClipsSource", ([offered]) => offered == null);
@@ -730,8 +786,12 @@ export function arm(options: {
         return false;
     }
 
+    // Same config is already armed *and* the engine still owns it. A Discord
+    // re-sync tears the engine down without clearing our `armed` snapshot, so
+    // `confirmed === false` is the real "not actually recording right now"
+    // signal - re-arm into the fresh engine rather than silently no-op'ing.
     if (armed && armed.sourceId === sourceId && armed.seconds === seconds
-        && armed.resolution === resolution && armed.frameRate === frameRate) return true;
+        && armed.resolution === resolution && armed.frameRate === frameRate && confirmed) return true;
 
     /*
      * The order is the engine's, and it is not the obvious one.

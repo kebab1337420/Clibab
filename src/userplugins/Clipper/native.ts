@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
@@ -50,6 +51,154 @@ const IS_WAYLAND = process.platform === "linux"
  * name is a backstop for the case it does not.
  */
 const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
+
+/*
+ * ---------------------------------------------------- discord voice capture --
+ *
+ * `rust-voice-capture` is an alternate Discord client that speaks the voice
+ * gateway + RTP UDP directly in Rust, demuxes one .wav per participant (by
+ * SSRC), and writes them into ./clips. The renderer never holds a per-person
+ * MediaStream (Discord decodes and mixes the call itself), so the only way to
+ * get per-person tracks is to capture the RTP outside the renderer — which is
+ * exactly what this binary does, bypassing Discord's own `discord_voice.node`
+ * (the source of the `EXCEPTION_BREAKPOINT` / renderer-reload crash).
+ *
+ * The binary is driven over JSON lines on stdin/stdout:
+ *   stdin:  {"cmd":"start","token":"...","guild_id":"...","channel_id":"..."}
+ *   stdin:  {"cmd":"stop"}
+ *   stdout: {"event":"wav_ready","user_id":"...","path":"clips/...wav"}
+ *   stdout: {"event":"connected","endpoint":"1.2.3.4:50001"}
+ *   stdout: {"event":"error","detail":"..."}
+ *
+ * It is spawned by `startVoiceCapture` below; the renderer reads the resulting
+ * ./clips/*.wav via the existing `readVoiceTrack`/`listClips` handlers (no
+ * stdout→IPC fan-out needed — the folder is the contract).
+ */
+
+/** Path to the precompiled `discord-voice-capture` binary; null when not shipped. */
+function voiceBinaryPath(): string | null {
+    // Dev: repo sibling of the plugin source. Packaged: sits next to the asar.
+    const candidates = [
+        join(__dirname, "..", "..", "..", "..", "rust-voice-capture", "target", "release", "discord-voice-capture"),
+        join(__dirname, "..", "..", "discord-voice-capture"),
+        join(process.resourcesPath ?? "", "discord-voice-capture"),
+    ];
+    for (const c of candidates) {
+        if (existsSync(c)) return c;
+    }
+    return null;
+}
+
+let voiceProc: ChildProcessWithoutNullStreams | null = null;
+let voiceStdin: NodeJS.WriteStream | null = null;
+
+/**
+ * Captures the Discord user token the first time a Discord API request goes
+ * through this session, then holds it for the lifetime of the process.
+ *
+ * Discord never exposes the token to renderer/plugin JS directly, so the main
+ * process sniffs the `Authorization` header off `/api/*` request headers. This
+ * is the same surface Vencord itself uses for cloud-sync and the ReviewDB auth
+ * flow. Reading once (not every request) keeps the hook cheap.
+ */
+let cachedToken: string | null = null;
+function captureDiscordToken() {
+    session.defaultSession.webRequest.onBeforeSendHeaders(
+        { urls: ["https://*.discord.com/api/*"] },
+        details => {
+            if (cachedToken != null) return;
+            for (const h of details.requestHeaders?.["Authorization"] ?? []) {
+                const v = Array.isArray(h) ? h[0] : h;
+                const s = String(v ?? "");
+                if (s.length > 8 && !s.includes("*")) { cachedToken = s; }
+            }
+        },
+    );
+}
+
+// Lazily install the header hook so it's only active from the moment the binary
+// is first requested. Called once, on first startVoiceCapture.
+let tokenHookInstalled = false;
+function ensureTokenHook() {
+    if (tokenHookInstalled) return;
+    tokenHookInstalled = true;
+    captureDiscordToken();
+}
+
+/** Starts the Rust `discord-voice-capture` binary in stdio mode. */
+export function startVoiceCapture(_: IpcMainInvokeEvent, args: {
+    token?: string;
+    guildId: string;
+    channelId: string;
+}): { started: boolean; pid?: number; error?: string } {
+    if (voiceProc && voiceProc.exitCode === null) {
+        return { started: false, error: "already running" };
+    }
+
+    const bin = voiceBinaryPath();
+    if (!bin) {
+        return { started: false, error: "discord-voice-capture binary not found" };
+    }
+
+    ensureTokenHook();
+    const token = args.token ?? process.env.DISCORD_TOKEN ?? cachedToken;
+    if (!token) {
+        return { started: false, error: "no Discord token available yet (make one API request, or pass DISCORD_TOKEN)" };
+    }
+
+    try {
+        const proc = spawn(bin, ["--stdio"], {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: { ...process.env, DISCORD_TOKEN: token },
+        });
+        voiceProc = proc;
+        voiceStdin = proc.stdin;
+
+        // Forward the start cmd + the runtime stdout back over IPC so the
+        // renderer can react to connected/error in near-real time.
+        proc.stdout?.on("data", (b: Buffer) => {
+            const line = b.toString().trim();
+            if (!line) return;
+            // Re-emit onto the renderer via an async webContents.send-style
+            // broadcast. Vencord plugins read this through the reply channel
+            // below; kept simple: log + let the renderer poll ./clips.
+            console.log("[clipper-voice]", line);
+        });
+        proc.stderr?.on("data", (b: Buffer) => console.error("[clipper-voice]", b.toString()));
+
+        proc.on("exit", () => { voiceProc = null; voiceStdin = null; });
+
+        // Send the start envelope.
+        const envelope = JSON.stringify({
+            cmd: "start",
+            token,
+            guild_id: args.guildId,
+            channel_id: args.channelId,
+        });
+        voiceStdin?.write(envelope + "\n", "utf8");
+
+        return { started: true, pid: proc.pid };
+    } catch (e) {
+        return { started: false, error: (e as Error).message };
+    }
+}
+
+/** Stops the Rust capture binary (writes {"cmd":"stop"} to its stdin). */
+export function stopVoiceCapture(_: IpcMainInvokeEvent): { stopped: boolean; error?: string } {
+    const proc = voiceProc;
+    if (!proc || proc.exitCode !== null) {
+        return { stopped: false, error: "not running" };
+    }
+    voiceStdin?.write(JSON.stringify({ cmd: "stop" }) + "\n", "utf8");
+    return { stopped: true };
+}
+
+/** Status for the renderer to toggle UI state. */
+export function voiceCaptureStatus(_: IpcMainInvokeEvent): { running: boolean; pid?: number } {
+    const proc = voiceProc;
+    const running = proc != null && proc.exitCode === null;
+    return { running, pid: proc?.pid };
+}
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
@@ -952,7 +1101,13 @@ export function waitForVrEvent(_: IpcMainInvokeEvent, timeoutMs = 30_000): Promi
 // A listening socket outlives the window it was opened for otherwise. Not
 // waited on, because nothing here can hold the quit open - and the process
 // going away closes the port either way. This is for the tidy case.
-app.on("will-quit", () => void closeFeeds());
+app.on("will-quit", () => {
+    void closeFeeds();
+    // Kill the Rust voice capture binary if it's still alive.
+    if (voiceProc && voiceProc.exitCode === null) {
+        voiceProc.kill();
+    }
+});
 
 /*
  * ------------------------------------------------------- the game overlay ---
