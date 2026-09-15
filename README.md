@@ -1,12 +1,8 @@
 # Clipper — Vencord user plugin
 
 Free clipping plugin because i don't want to pay 10 bucks a month for basic features 👍👍👍👍👍👍👍👍👍👍
-Runs a LOT better than alternatives like MidalTV 
-usually takes up a couple % of GPU usage at most
-
+The plugin wont eat your GPU unless you crank the bitrate
 obviously can't really make every single feature possible because it isn't a dedicated app (not really the point of the **plugin** but i might make it a seperated app in the future)
-
-kind of my first time making anything (vibecoded obv) but just dl the source code and launch the .bat files
 ## Features
 
 - Rolling in-memory buffer, configurable from 10s to 300s
