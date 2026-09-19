@@ -21,7 +21,7 @@
 
 import { useEffect, useState } from "@webpack/common";
 
-import { CLIPS_AVAILABLE } from "../clips";
+import { CLIPS_AVAILABLE, loadClipUrl } from "../clips";
 import { recorder, type SavedClip } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { settings } from "../settings";
@@ -43,10 +43,21 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
     const [step, setStep] = useState("");
 
     useEffect(() => {
-        const made = URL.createObjectURL(clip.blob);
-        setUrl(made);
+        // Loaded off disk for the card alone: the save lets go of the
+        // footage once it is written, so nothing pins a whole clip in RAM
+        // between two saves. Without a URL the card still shows the name
+        // and every action but the preview.
+        let made = "";
+        let alive = true;
 
-        return () => URL.revokeObjectURL(made);
+        void loadClipUrl(clip.name)
+            .then(url => { if (alive) { made = url; setUrl(url); } else URL.revokeObjectURL(url); })
+            .catch(() => { if (alive) setUrl(""); });
+
+        return () => {
+            alive = false;
+            if (made) URL.revokeObjectURL(made);
+        };
     }, [clip]);
 
     // Held while the pointer is on the card, or while something it started is
@@ -105,7 +116,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
 
             <div className="vc-clipper-replay-head">
                 <span className="vc-clipper-replay-name" title={clip.path}>{step || clip.name}</span>
-                {!step && <span>{formatBytes(clip.blob.size)}</span>}
+                {!step && <span>{formatBytes(clip.size)}</span>}
                 <button className="vc-clipper-close" onClick={onClose} aria-label="Dismiss">&times;</button>
             </div>
 

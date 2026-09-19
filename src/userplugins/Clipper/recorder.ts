@@ -91,6 +91,15 @@ const AUTO_SAVE_MS = 120_000;
 const AUTO_SAVE_SECONDS = 30;
 
 /**
+ * Largest rolling buffer held in memory, in bytes.
+ *
+ * Time alone lets a high bitrate hold gigabytes (50Mbps x 300s is ~1.9GB
+ * in one-second blobs), and every save copies the whole of it several times
+ * over. Past this the oldest chunks go even when their time has not come.
+ */
+const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
+
+/**
  * The native clip engine keeps capture surfaces and encoder state outside the
  * JS heap. Recycle it before that native allocation can grow until Discord
  * reloads the renderer.
@@ -247,7 +256,8 @@ export function buildMixBus(ctx: BaseAudioContext, destination: AudioNode): Audi
 export interface SavedClip {
     name: string;
     path: string;
-    blob: Blob;
+    /** Bytes on disk. The footage itself is re-read on demand, never held. */
+    size: number;
     mimeType: string;
     /** Marker offsets in seconds, already relative to this clip's start. */
     markers: number[];
@@ -341,9 +351,11 @@ class ClipRecorder {
         // clip is taken, stop the capture too - otherwise it rolls on into an
         // empty voice channel and keeps arming the native helper (the exact
         // leak the 5.3.0 idle reset exists to stop). `save` sets state back
-        // to "recording", so `stop` is what actually ends the buffer.
+        // to "recording", so `stop` is what actually ends the buffer. Only
+        // when the clip landed: stopping on a failed save would throw away
+        // the tail of the call along with the error.
         void this.save(settings.store.autoClipEndLength)
-            .then(() => this.stop())
+            .then(saved => { if (saved) this.stop(); })
             .catch(e => logger.error("Could not save the clip that the call end asked for", e))
             .finally(() => {
                 this.autoClipPending = false;
@@ -1018,11 +1030,15 @@ class ClipRecorder {
      * Asks the recorder for whatever it holds and waits for that chunk, so a save
      * ends on "now" instead of on the last full timeslice. Gives up quickly: a
      * stalled recorder must not block the save.
+     *
+     * True when the wait gave up first, in which case the clip ends on the last
+     * full timeslice and may miss its final second.
      */
-    private async flush(): Promise<void> {
+    private async flush(): Promise<boolean> {
         const { recorder } = this;
-        if (!recorder || recorder.state !== "recording") return;
+        if (!recorder || recorder.state !== "recording") return false;
 
+        let truncated = false;
         await new Promise<void>(resolve => {
             let done = false;
             const settle = () => {
@@ -1036,6 +1052,7 @@ class ClipRecorder {
             const timer = setTimeout(() => {
                 this.nextChunk = this.nextChunk.filter(waiting => waiting !== settle);
                 this.flushTimers.delete(timer);
+                truncated = true;
                 settle();
             }, 500);
 
@@ -1049,6 +1066,7 @@ class ClipRecorder {
                 settle();
             }
         });
+        return truncated;
     }
 
     /**
@@ -1078,6 +1096,14 @@ class ClipRecorder {
         // Keep one extra timeslice so the clip is never shorter than asked for.
         const cutoff = Date.now() - (clipRetentionSeconds(settings.store.clipLength) * 1000 + TIMESLICE);
         while (this.chunks.length && this.chunks[0].at < cutoff) this.chunks.shift();
+
+        // And never more bytes than this, whatever the bitrate and the length
+        // say. The last chunk stays whatever happens: a save has to write
+        // something.
+        let held = this.bufferedBytes;
+        while (held > MAX_BUFFER_BYTES && this.chunks.length > 1) {
+            held -= this.chunks.shift()?.blob.size ?? 0;
+        }
 
         /*
          * A mark whose footage has been dropped points at nothing.
@@ -1678,22 +1704,22 @@ class ClipRecorder {
      * Cut at chunk boundaries, so the edges land within a timeslice of what was
      * asked for - the container is only cut where it can be cut.
      */
-    async save(seconds?: number, window?: ClipWindow): Promise<void> {
+    async save(seconds?: number, window?: ClipWindow): Promise<boolean> {
         // Out loud rather than swallowed: the keybind and the button both
         // reach here, and a second press during a long save (flush, repair,
         // mux) would otherwise lose a clip with no word about it.
         if (this.state === "saving") {
             toast("Already saving a clip - this one was not taken", Toasts.Type.MESSAGE);
-            return;
+            return false;
         }
 
         if (!this.isRecording) {
             toast("Clip buffer is not running", Toasts.Type.FAILURE);
-            return;
+            return false;
         }
         if (!this.header || !this.chunks.length) {
             toast("Nothing buffered yet, give it a second", Toasts.Type.FAILURE);
-            return;
+            return false;
         }
 
         // Before the sound: a back-dated window (multi-POV) can have rolled
@@ -1701,7 +1727,7 @@ class ClipRecorder {
         // announced as one that was.
         if (window && window.to <= this.bufferStart) {
             toast("That part of the buffer has already rolled past", Toasts.Type.FAILURE);
-            return;
+            return false;
         }
 
         /*
@@ -1737,7 +1763,7 @@ class ClipRecorder {
              */
             if (this.native && !window) {
                 try {
-                    if (await this.saveNative(seconds)) return;
+                    if (await this.saveNative(seconds)) return true;
                 } catch (e) {
                     /*
                      * The whole of the engine's answer goes to the log, and one
@@ -1784,6 +1810,7 @@ class ClipRecorder {
                      */
                     if (++this.nativeFailures >= 2) {
                         logger.info("Leaving the native clip engine out for the rest of this buffer: it has answered two saves in a row with nothing.");
+                        toast("The clip engine gave up for this buffer - clips will have mixed sound. Restart the buffer to try it again.", Toasts.Type.MESSAGE);
                         disarm();
                         this.native = false;
                     }
@@ -1791,12 +1818,17 @@ class ClipRecorder {
             }
 
             // Flush whatever the recorder holds so the clip ends on "now".
-            await this.flush();
+            // A flush that gives up first still saves, on the last full
+            // timeslice - said out loud, so a missing final second is not a
+            // mystery in the file.
+            if (await this.flush()) {
+                toast("The encoder lagged - the clip may miss its last second", Toasts.Type.MESSAGE);
+            }
             this.prune();
 
             if (mine !== this.generation) {
                 toast("Clip buffer stopped before the clip could be saved", Toasts.Type.FAILURE);
-                return;
+                return false;
             }
 
             /*
@@ -1817,7 +1849,7 @@ class ClipRecorder {
 
                 if (picked.to <= oldest) {
                     toast("That part of the buffer has already rolled past", Toasts.Type.FAILURE);
-                    return;
+                    return false;
                 }
 
                 if (picked.from < oldest) {
@@ -1898,7 +1930,7 @@ class ClipRecorder {
             const path = await writeClip(bytes, name, blob);
             const saved = path.split(/[\\/]/).pop() || name;
 
-            this.lastSaved = { name: saved, path, blob, mimeType: this.mimeType, markers: offsets, voices: lanes, chat };
+            this.lastSaved = { name: saved, path, size: blob.size, mimeType: this.mimeType, markers: offsets, voices: lanes, chat };
 
             // The call, kept apart. `cutOff` is what the repair took off the
             // front, so this is the instant the saved footage really begins.
@@ -1942,6 +1974,8 @@ class ClipRecorder {
                 this.setState(this.recorder ? "recording" : "idle");
             }
         }
+
+        return !failed;
     }
 
     /**
@@ -2338,7 +2372,7 @@ class ClipRecorder {
         const voices = voiceActivity.slice(start, end);
         const chat = chatLog.slice(start, end);
 
-        this.lastSaved = { name: saved, path, blob, mimeType: "video/mp4", markers, voices, chat };
+        this.lastSaved = { name: saved, path, size: blob.size, mimeType: "video/mp4", markers, voices, chat };
 
         await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
         void writeThumbnail(blob, saved);
@@ -2433,11 +2467,16 @@ class ClipRecorder {
         if (!(seconds > 0)) return;
 
         try {
-            // Read once, then measure and cut on those same bytes. A clip is
-            // hundreds of megabytes and every parse of the blob used to copy
-            // the whole of it again.
-            const data = new Uint8Array(await last.blob.arrayBuffer());
+            // Read off disk rather than from a held blob: the save lets go
+            // of the footage once it is written, so a trim re-reads it.
+            // A clip is hundreds of megabytes and every parse used to copy
+            // the whole of it again, so measure and cut on these same bytes.
+            const data = await Native.readClip(settings.store.saveDirectory, last.name);
             const total = lengthBytes(data, last.mimeType);
+            if (!(total > 0)) {
+                toast("That clip could not be read", Toasts.Type.FAILURE);
+                return;
+            }
             const from = total - seconds;
 
             // Shorter than the cut asked for: nothing to take off.
@@ -2476,7 +2515,7 @@ class ClipRecorder {
                 logger.warn("Could not remove the untrimmed clip", e);
             }
 
-            this.lastSaved = { name: saved, path, blob: cut, mimeType: last.mimeType, markers, voices, chat };
+            this.lastSaved = { name: saved, path, size: cut.size, mimeType: last.mimeType, markers, voices, chat };
             toast(`Kept the last ${Math.round(seconds)}s (${formatBytes(cut.size)})`, Toasts.Type.SUCCESS);
         } catch (e) {
             logger.error("Failed to trim the last clip", e);
