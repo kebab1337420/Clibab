@@ -28,7 +28,7 @@ import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
 import { shareClipLink } from "../share";
 import { toast } from "../toasts";
-import { formatBytes, formatTime, TRIM_CUTS } from "../utils";
+import { formatBytes, formatTime, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
 import { SimpleStudio } from "./SimpleStudio";
@@ -700,6 +700,22 @@ function CaptureOptions() {
         if (recorder.isRecording) void recorder.restart();
     };
 
+    const applyPreset = (preset: CapturePreset) => {
+        settings.store.fps = preset.fps;
+        settings.store.resolution = preset.resolution;
+        settings.store.videoBitrate = preset.bitrate;
+        settings.store.clipLength = preset.length;
+        restartIfLive();
+    };
+
+    const presetMatch = CAPTURE_PRESETS.find(p =>
+        p.fps === fps && p.resolution === resolution && p.bitrate === videoBitrate && p.length === clipLength
+    )?.label ?? "Custom";
+
+    // Video bytes held, roughly: bitrate over the whole length plus ~10%
+    // of container overhead. Audio and the header are noise next to it.
+    const estimate = formatBytes((videoBitrate * 1_000_000) / 8 * clipLength * 1.1);
+
     const select = (value: string | number, onPick: (v: string) => void, options: [string | number, string][]) => (
         <select
             value={String(value)}
@@ -711,6 +727,20 @@ function CaptureOptions() {
 
     return (
         <div className="vc-clipper-options">
+            <Field label="Preset">
+                <select
+                    value={presetMatch}
+                    title="One click sets frame rate, resolution, quality and length together"
+                    onChange={e => {
+                        const found = CAPTURE_PRESETS.find(p => p.label === e.currentTarget.value);
+                        if (found) applyPreset(found);
+                    }}
+                >
+                    {presetMatch === "Custom" && <option value="Custom">Custom</option>}
+                    {CAPTURE_PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
+                </select>
+            </Field>
+
             <Field label="Frame rate">
                 {select(fps, v => (settings.store.fps = Number(v)), [
                     [24, "24 FPS"], [30, "30 FPS"], [60, "60 FPS"], [120, "120 FPS"]
@@ -753,7 +783,7 @@ function CaptureOptions() {
                     value={clipLength}
                     onChange={e => (settings.store.clipLength = Number(e.currentTarget.value))}
                 />
-                <div className="vc-clipper-value">{clipLength} s</div>
+                <div className="vc-clipper-value" title="Estimated memory the buffer holds at these settings">{clipLength} s (≈ {estimate})</div>
             </Field>
         </div>
     );

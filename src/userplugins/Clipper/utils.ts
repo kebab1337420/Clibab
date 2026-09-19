@@ -320,6 +320,26 @@ export const TIMESLICE = 1000;
  */
 export const TRIM_CUTS = [15, 30, 60];
 
+/** One-click capture setup: frame rate, height, bitrate in Mbps, length in s. */
+export interface CapturePreset {
+    label: string;
+    fps: number;
+    resolution: number;
+    bitrate: number;
+    length: number;
+}
+
+/**
+ * Eco sips memory (~15MB held), Balanced is the everyday middle (~90MB),
+ * Quality spends more (~225MB) for demanding games. All stay well under
+ * the 512MB the buffer refuses to cross.
+ */
+export const CAPTURE_PRESETS: CapturePreset[] = [
+    { label: "Eco", fps: 30, resolution: 720, bitrate: 4, length: 30 },
+    { label: "Balanced", fps: 60, resolution: 1080, bitrate: 12, length: 60 },
+    { label: "Quality", fps: 60, resolution: 1440, bitrate: 20, length: 90 }
+];
+
 /**
  * Something readable out of anything that was thrown.
  *
