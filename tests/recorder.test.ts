@@ -40,6 +40,7 @@ const hooks = registerHooks({
                 "./mux": "export const muxNativeAudio = async () => null;",
                 "./nativeClips": "export const arm = async () => {}; export const disarm = () => {}; export const canRecord = () => false; export const engineTornDown = () => false; export const goLiveActive = () => false; export const nativeAvailability = async () => ({ canUse: false }); export const saveNativeClip = async () => null; export const setOnIdleCallback = () => {}; export const setRecordUser = () => {}; export const watchRecording = () => {};",
                 "./nativeTracks": "export const hasVideoTrack = () => false;",
+                "./profiles": "export const applyProfile = () => false; export const deleteProfile = () => false; export const hasProfile = () => false; export const matchesProfile = () => false; export const profileFor = () => null; export const saveProfile = () => false;",
                 "./repair": "export const lengthBytes = () => 0; export const repairBytes = b => b; export const trimBytes = b => b;",
                 "./thumbnail": "export const writeThumbnail = async () => {};",
                 "./toasts": "export const toast = (...args) => { globalThis.__clipperTest.toasts.push(args); };",

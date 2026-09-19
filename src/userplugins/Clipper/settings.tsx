@@ -159,6 +159,12 @@ export const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: {}
     },
+    // Per-game capture knobs, keyed case-insensitively. Read and written by
+    // ./profiles, which is also where the shape lives.
+    gameProfiles: {
+        type: OptionType.CUSTOM,
+        default: {}
+    },
     clipsSection: {
         type: OptionType.COMPONENT,
         component: () => (

@@ -26,6 +26,8 @@ import type { CaptureSource } from "../native";
 import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerOpener, setStudioOpener } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
+import { deleteProfile, hasProfile, matchesProfile, saveProfile } from "../profiles";
+import { runningGame } from "../game";
 import { shareClipLink } from "../share";
 import { toast } from "../toasts";
 import { formatBytes, formatTime, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
@@ -795,6 +797,8 @@ function Picker({ onClose }: { onClose(): void; }) {
     const [tab, setTab] = useState<Tab>("all");
     const [query, setQuery] = useState("");
     const [refreshedAt, setRefreshedAt] = useState(0);
+    // Bumped after a profile save/forget so the row below re-reads it.
+    const [profileTick, setProfileTick] = useState(0);
     const searchRef = useRef<HTMLInputElement | null>(null);
     const refreshRef = useRef<(() => void) | null>(null);
 
@@ -921,6 +925,41 @@ function Picker({ onClose }: { onClose(): void; }) {
                 </div>
 
                 <CaptureOptions />
+
+                {!!runningGame() && (
+                    <div className="vc-clipper-note" key={profileTick}>
+                        {matchesProfile(runningGame())
+                            ? `Using ${runningGame()}'s saved profile.`
+                            : (
+                                <>
+                                    <button
+                                        className="vc-clipper-tab"
+                                        title="Remember the settings above for this game"
+                                        onClick={() => {
+                                            if (saveProfile(runningGame())) {
+                                                toast(`Profile saved for ${runningGame()}`, Toasts.Type.SUCCESS);
+                                                setProfileTick(t => t + 1);
+                                            }
+                                        }}
+                                    >
+                                        Save as {runningGame()}'s profile
+                                    </button>
+                                    {hasProfile(runningGame()) && (
+                                        <button
+                                            className="vc-clipper-tab"
+                                            title="Forget this game's saved profile"
+                                            onClick={() => {
+                                                deleteProfile(runningGame());
+                                                setProfileTick(t => t + 1);
+                                            }}
+                                        >
+                                            Forget
+                                        </button>
+                                    )}
+                                </>
+                            )}
+                    </div>
+                )}
 
                 <div className="vc-clipper-body">
                     {error && <div className="vc-clipper-note vc-clipper-error">{error}</div>}

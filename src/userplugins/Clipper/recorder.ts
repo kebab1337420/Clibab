@@ -20,6 +20,7 @@ import { FluxDispatcher, Toasts, UserStore } from "@webpack/common";
 import { type ChatLine, chatLog, shiftChat } from "./chat";
 import { playClipSound } from "./clipSound";
 import { runningGame, watchRunningGame } from "./game";
+import { applyProfile } from "./profiles";
 import { highlights } from "./highlights";
 import { dropMeta, readMeta, setMeta, tagSavedClip } from "./library";
 import { MicInput } from "./micInput";
@@ -432,6 +433,9 @@ class ClipRecorder {
     /** Whether the buffer has ever started this session. The first pick starts it. */
     private startedOnce = false;
 
+    /** Game-change watch, so per-game profiles apply mid-buffer. */
+    private unwatchGame: (() => void) | null = null;
+
     /** Not before this instant does a highlight save another clip by itself. */
     private autoSaveAfter = 0;
 
@@ -668,6 +672,11 @@ class ClipRecorder {
 
         this.setState("starting");
         const mine = this.generation;
+
+        // A profile moves the knobs before they are read below, and the watch
+        // keeps them moving when the game changes mid-buffer.
+        this.unwatchGame ??= watchRunningGame(game => this.applyGameProfile(game));
+        this.applyGameProfile(runningGame());
 
         try {
             const { fps, resolution, container } = settings.store;
@@ -1603,9 +1612,23 @@ class ClipRecorder {
         this.memoryTicker = null;
     }
 
+    /** Applies the running game's profile, if one was saved for it. */
+    private applyGameProfile(game: string): void {
+        if (!game) return;
+        if (this.state !== "recording" && this.state !== "starting") return;
+
+        if (applyProfile(game)) {
+            toast(`Profile for ${game.trim().slice(0, 60)} applied`, Toasts.Type.MESSAGE);
+            void this.restart();
+        }
+    }
+
     private cleanup() {
         // Any start() still waiting on a stream is now stale.
         this.generation++;
+
+        this.unwatchGame?.();
+        this.unwatchGame = null;
 
         this.stopMemoryWatch();
 
