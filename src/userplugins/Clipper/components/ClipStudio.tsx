@@ -3215,25 +3215,23 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     /**
-     * Pulls one of the clips posted in the channel in beside this shot.
+     * Downloads one posted angle and lines it up by ear.
      *
      * The download is the easy half. The hard half is that their buffer started
      * whenever their client felt like it, so the two files are the same moment
      * minutes apart: the sound is what they have in common, and the offset that
      * lines their loudness up with ours is what puts them on the same clock.
+     * Throws when the file itself cannot be read; a failed alignment only
+     * warns and leaves the offset at zero for the hand nudge below.
      */
-    const addAngle = async (angle: PostedAngle) => {
-        if (!segment || !source) return;
+    const openAngle = async (angle: PostedAngle): Promise<{ item: StudioSource; offset: number; }> => {
+        if (!segment || !source) throw new Error("Pick a shot first");
 
-        setError("");
         setNote(`Downloading ${angle.name}…`);
-
-        let opened: { url: string; bytes: ArrayBuffer; } | null = null;
+        const opened = await fetchAngle(angle);
+        track({ url: opened.url });
 
         try {
-            opened = await fetchAngle(angle);
-            track({ url: opened.url });
-
             const range = await probeFile(opened.url);
             if (range.end - range.start <= 0) throw new Error(`"${angle.name}" has nothing to play`);
 
@@ -3261,13 +3259,109 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 toast("Could not read the sound of that angle - line it up by hand below", Toasts.Type.FAILURE);
             }
 
+            return { item, offset };
+        } catch (e) {
+            drop(opened.url);
+            throw e;
+        }
+    };
+
+    /**
+     * Pulls one of the clips posted in the channel in beside this shot.
+     */
+    const addAngle = async (angle: PostedAngle) => {
+        if (!segment || !source) return;
+
+        setError("");
+
+        try {
+            const { item, offset } = await openAngle(angle);
+
             setSources(list => [...list, item]);
             patchSegment(segment.id, { angles: [...(segment.angles ?? []), { sourceId: item.id, offset }] });
 
             toast(`Added ${angle.author}'s angle`, Toasts.Type.SUCCESS);
         } catch (e) {
-            if (opened) drop(opened.url);
             logger.warn("Could not add a posted angle", e);
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setNote("");
+        }
+    };
+
+    /**
+     * Downloads every posted angle and cuts between them in one step.
+     *
+     * One undo step whatever the headcount: the angles land on the timeline
+     * only as the edit they become, never as an intermediate state to clean.
+     */
+    const autoAngles = async () => {
+        if (!segment || !source) return;
+
+        const posted = postedAngles();
+        if (!posted.length) {
+            toast("Nobody posted an angle in the channel", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        setError("");
+
+        try {
+            const items: StudioSource[] = [];
+            const offsets: number[] = [];
+            let failed = 0;
+
+            for (const angle of posted) {
+                try {
+                    const opened = await openAngle(angle);
+                    items.push(opened.item);
+                    offsets.push(opened.offset);
+                } catch (e) {
+                    failed++;
+                    logger.warn(`Could not fetch a posted angle (${angle.name})`, e);
+                }
+            }
+
+            if (!items.length) {
+                toast("None of the posted angles could be read", Toasts.Type.FAILURE);
+                return;
+            }
+
+            setSources(list => [...list, ...items]);
+            setNote("Listening to the angles…");
+
+            const tracks: AngleTrack[] = [{
+                sourceId: source.id,
+                offset: 0,
+                envelope: envelopeOf(await audioOf(source)),
+                hz: ENVELOPE_HZ
+            }];
+
+            for (let i = 0; i < items.length; i++) {
+                tracks.push({
+                    sourceId: items[i].id,
+                    offset: offsets[i],
+                    envelope: envelopeOf(await audioOf(items[i])),
+                    hz: ENVELOPE_HZ
+                });
+            }
+
+            const made = cutBetweenAngles(segment, tracks, ANGLE_PACES[anglePace]);
+
+            if (made.length < 2) {
+                toast("One angle carried the whole shot - there was nothing to cut to", Toasts.Type.MESSAGE);
+                return;
+            }
+
+            commitAngleEdit(segment, made, source.id);
+            setSelected(made[0].id);
+
+            toast(
+                `Cut into ${made.length} shots across ${tracks.length} angles${failed ? ` (${failed} unreadable skipped)` : ""}`,
+                Toasts.Type.SUCCESS
+            );
+        } catch (e) {
+            logger.warn("Could not auto-cut the angles", e);
             setError(e instanceof Error ? e.message : String(e));
         } finally {
             setNote("");
@@ -3286,6 +3380,55 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
         const angles = (segment.angles ?? []).filter((_, i) => i !== index);
         patchSegment(segment.id, { angles });
+    };
+
+    /**
+     * Swaps a shot for an angle-cutting run of shots, in one undo step.
+     *
+     * The soundtrack stays on the angle the shot was cut from rather than
+     * following whoever is on screen: every one of these captures has the
+     * same call in it, at its own level and its own few hundred milliseconds
+     * of latency, so an edit that took the sound of each angle in turn would
+     * jump mix and echo on every cut. One sound clip over the whole run
+     * instead, and the pictures cut under it.
+     *
+     * A sound clip has no rate of its own, so it only lines up at speed 1:
+     * a stretched shot keeps the sound of each angle, and a silent one has
+     * nothing to keep.
+     */
+    const commitAngleEdit = (base: Segment, made: Segment[], soundtrackId: string) => {
+        commit(p => {
+            const index = p.segments.findIndex(s => s.id === base.id);
+            if (index < 0) return p;
+
+            const together = base.speed === 1 && base.volume > 0 && p.audio;
+
+            const segments = [
+                ...p.segments.slice(0, index),
+                ...(together ? made.map(one => ({ ...one, volume: 0 })) : made),
+                ...p.segments.slice(index + 1)
+            ];
+
+            if (!together) return { ...p, segments };
+
+            const at = p.segments.slice(0, index).reduce((sum, s) => sum + segmentLength(s), 0);
+
+            const clip: AudioClip = {
+                id: newId(),
+                sourceId: soundtrackId,
+                at,
+                from: base.from,
+                to: base.to,
+                gain: base.volume,
+                fadeIn: base.effects?.fadeIn ?? 0,
+                fadeOut: base.effects?.fadeOut ?? 0,
+                muted: false
+            };
+
+            return { ...p, segments, audioClips: [...(p.audioClips ?? []), clip] };
+        });
+
+        setSelected(made[0].id);
     };
 
     /**
@@ -3338,52 +3481,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 return;
             }
 
-            commit(p => {
-                const index = p.segments.findIndex(s => s.id === base.id);
-                if (index < 0) return p;
-
-                /*
-                 * The soundtrack stays on the angle the shot was cut from
-                 * rather than following whoever is on screen.
-                 *
-                 * Every one of these captures has the same call in it, at its
-                 * own level and its own few hundred milliseconds of latency, so
-                 * an edit that took the sound of each angle in turn would jump
-                 * mix and echo on every cut. One sound clip over the whole run
-                 * instead, and the pictures cut under it.
-                 *
-                 * A sound clip has no rate of its own, so it only lines up at
-                 * speed 1: a stretched shot keeps the sound of each angle, and
-                 * a silent one has nothing to keep.
-                 */
-                const together = base.speed === 1 && base.volume > 0 && p.audio;
-
-                const segments = [
-                    ...p.segments.slice(0, index),
-                    ...(together ? made.map(one => ({ ...one, volume: 0 })) : made),
-                    ...p.segments.slice(index + 1)
-                ];
-
-                if (!together) return { ...p, segments };
-
-                const at = p.segments.slice(0, index).reduce((sum, s) => sum + segmentLength(s), 0);
-
-                const clip: AudioClip = {
-                    id: newId(),
-                    sourceId: source.id,
-                    at,
-                    from: base.from,
-                    to: base.to,
-                    gain: base.volume,
-                    fadeIn: base.effects?.fadeIn ?? 0,
-                    fadeOut: base.effects?.fadeOut ?? 0,
-                    muted: false
-                };
-
-                return { ...p, segments, audioClips: [...(p.audioClips ?? []), clip] };
-            });
-
-            setSelected(made[0].id);
+            commitAngleEdit(base, made, source.id);
 
             toast(`Cut into ${made.length} shots across ${tracks.length} angles`, Toasts.Type.SUCCESS);
         } catch (e) {
@@ -6216,6 +6314,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                 onClick={() => setPosted(postedAngles())}
                                             >
                                                 Look in the chat
+                                            </button>
+                                            <button
+                                                className="vc-clipper-primary"
+                                                disabled={busy}
+                                                title="Download every posted angle and cut between them in one step"
+                                                onClick={() => void autoAngles()}
+                                            >
+                                                Fetch all & cut
                                             </button>
                                             {!!segment.angles?.length && (
                                                 <select
