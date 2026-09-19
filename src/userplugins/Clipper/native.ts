@@ -537,14 +537,29 @@ function trashDir(target: string): string {
 }
 
 function readTrashIndex(trash: string): Record<string, TrashEntry> {
+    let parsed: unknown;
+
     try {
-        const parsed = JSON.parse(readFileSync(join(trash, TRASH_INDEX), "utf8"));
-        if (parsed && typeof parsed === "object") return parsed;
+        parsed = JSON.parse(readFileSync(join(trash, TRASH_INDEX), "utf8"));
     } catch {
         // Missing or corrupt: start the index over rather than losing the files.
+        return {};
     }
 
-    return {};
+    if (!parsed || typeof parsed !== "object") return {};
+
+    // The index is ours until somebody hand-edits it: entries that are not
+    // plain clip names in this folder are dropped before any path is built
+    // from them, so a "../" smuggled in can never escape the trash dir.
+    const clean: Record<string, TrashEntry> = {};
+
+    for (const [stored, entry] of Object.entries(parsed as Record<string, TrashEntry>)) {
+        if (!/^([\w.\-+ ()[\]]{1,120})\.(webm|mp4|png|jpg|gif)$/i.test(stored)) continue;
+        if (!entry || typeof entry !== "object" || entry.stored !== stored) continue;
+        clean[stored] = entry;
+    }
+
+    return clean;
 }
 
 function writeTrashIndex(trash: string, index: Record<string, TrashEntry>): void {

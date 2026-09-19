@@ -1171,6 +1171,26 @@ export const STUDIO_CSS = `
     background: var(--button-danger-background, #da373c);
     color: #fff;
 }
+.vc-clipper-trash-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 12px;
+    cursor: pointer;
+}
+.vc-clipper-trash-btn:hover:not(:disabled) {
+    background: var(--button-secondary-background-hover, #6d6f78);
+}
+.vc-clipper-trash-btn:disabled {
+    opacity: .5;
+    cursor: default;
+}
+.vc-clipper-trash-btn.vc-clipper-danger:not(:disabled) {
+    background: var(--button-danger-background, #da373c);
+}
 .vc-clipper-mark-badge {
     flex: 0 0 auto;
     padding: 2px 7px;
@@ -2238,6 +2258,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [search, setSearch] = useState("");
     const [showTrash, setShowTrash] = useState(false);
     const [trash, setTrash] = useState<TrashedClip[] | null>(null);
+    const [confirmEmpty, setConfirmEmpty] = useState(false);
 
     // The clip library, which used to be its own modal: the picked clip is the
     // one the rename, category and delete actions act on, and it is kept apart
@@ -2717,6 +2738,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     const onEmptyTrash = async () => {
+        if (!confirmEmpty) {
+            setConfirmEmpty(true);
+            setTimeout(() => setConfirmEmpty(false), 4000);
+            return;
+        }
+
+        setConfirmEmpty(false);
+
         try {
             await emptyTrash();
             await refreshTrash();
@@ -5694,6 +5723,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
                         <div className="vc-clipper-field">
                             <button
+                                className="vc-clipper-trash-btn"
                                 disabled={busy}
                                 title="Deleted clips stay 7 days, then go for good"
                                 onClick={() => setShowTrash(showing => {
@@ -5719,12 +5749,19 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                     {formatBytes(t.size)}{t.game ? ` - ${t.game}` : ""} - {trashLeft(t.deletedAt)}
                                                 </div>
                                             </div>
-                                            <button disabled={busy} title="Bring it back to the folder" onClick={() => void onRestore(t.stored)}>Restore</button>
+                                            <button className="vc-clipper-trash-btn" disabled={busy} title="Bring it back to the folder" onClick={() => void onRestore(t.stored)}>Restore</button>
                                         </div>
                                     </div>
                                 ))}
                                 {!!trash?.length && (
-                                    <button disabled={busy} title="Delete everything in the trash for good" onClick={() => void onEmptyTrash()}>Empty trash</button>
+                                    <button
+                                        className={`vc-clipper-trash-btn${confirmEmpty ? " vc-clipper-danger" : ""}`}
+                                        disabled={busy}
+                                        title="Delete everything in the trash for good"
+                                        onClick={() => void onEmptyTrash()}
+                                    >
+                                        {confirmEmpty ? "Sure?" : "Empty trash"}
+                                    </button>
                                 )}
                             </>
                         ) : (
