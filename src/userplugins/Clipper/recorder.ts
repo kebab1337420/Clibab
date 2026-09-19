@@ -91,6 +91,13 @@ const AUTO_SAVE_MS = 120_000;
 const AUTO_SAVE_SECONDS = 30;
 
 /**
+ * Largest rolling buffer held in memory, in bytes.
+ *
+ * Time alone lets a high bitrate hold gigabytes (50Mbps x 300s is ~1.9GB
+ * in one-second blobs), and every save copies the whole of it several times
+ * over. Past this the oldest chunks go even when their time has not come.
+ */
+const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
  * How far past the asked length a native clip may run before it is cut back.
  *
  * A windowed engine answer lands within a fragment or two of the request;
