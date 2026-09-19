@@ -2,17 +2,17 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "5.5.1",
-  "clipperCommit": "7271180",
-  "builtAt": "2026-09-19T12:15:51",
+  "clipperVersion": "6.0.0",
+  "clipperCommit": "e2cba55",
+  "builtAt": "2026-09-19T14:44:48",
   "files": {
     "discord-voice-capture.exe": {
-      "size": 3395584,
-      "sha256": "c06b95977ce95a9236492299e3b34ef17b047baa9e385b359732313753221439"
+      "size": 3396608,
+      "sha256": "ad17c52a0c321261ca388c74c4270e4794a09c248814a80a3131d13e0f47bae3"
     },
     "patcher.js": {
-      "size": 138785,
-      "sha256": "8e06f71a0fdb59953d517ddede223c9f6b7c520af57decf924bb4718ff505714"
+      "size": 140296,
+      "sha256": "dffd29c8a369d24cc222d8c3a2fc7e6451e4a1668e88339d3d10d18d14698567"
     },
     "patcher.js.LEGAL.txt": {
       "size": 964,
@@ -27,16 +27,16 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "renderer.js": {
-      "size": 1126248,
-      "sha256": "633bde65e22c5f9dbfc84565e481634ce26c44207b44acab1390791747732d73"
+      "size": 1116331,
+      "sha256": "dd2d9c7eb38f74da3c7959926df97e56e0003746d12be5e5b08366664d337e6e"
     },
     "renderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
     },
     "vencordDesktopMain.js": {
-      "size": 135050,
-      "sha256": "67da6ca9dfeec9fa111bb322aa4122927475afeabf53a0668a144304047e1807"
+      "size": 136566,
+      "sha256": "d0a2f2f19a94c9f377de98bff7eca20f00ccffc0fd9a8866af7dbc9ca2a08634"
     },
     "vencordDesktopMain.js.LEGAL.txt": {
       "size": 964,
@@ -51,8 +51,8 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "vencordDesktopRenderer.js": {
-      "size": 1134146,
-      "sha256": "b235247a2e398a253a7362da34ff2edd92b3b8779e7b0a3a1bb95db1eb68b0ef"
+      "size": 1124229,
+      "sha256": "efdd1268227dc0be6b6ddff923bc76cfcb89d9c6b419bad31ff093d09accf32e"
     },
     "vencordDesktopRenderer.js.LEGAL.txt": {
       "size": 1880,
