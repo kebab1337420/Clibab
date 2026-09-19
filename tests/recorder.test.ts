@@ -36,7 +36,7 @@ const hooks = registerHooks({
                 "./library": "export const dropMeta = async () => {}; export const readMeta = async () => ({ 'known.webm': { title: 'Keep' } }); export const setMeta = async name => { globalThis.__clipperTest.adopted.push(name); }; export const tagSavedClip = async () => {};",
                 "./micInput": "export class MicInput {}",
                 "./mixer": "export const gainOf = () => 1; export const readMixer = () => ({}); export const MIC_CHANNEL = 'mic'; export const SYSTEM_CHANNEL = 'system'; export const voiceLevelsFrom = () => ({});",
-                "./mp4": "export const probeAudioTracks = async () => [];",
+                "./mp4": "export const lengthMp4 = () => 0; export const probeAudioTracks = async () => []; export const trimMp4 = () => null;",
                 "./mux": "export const muxNativeAudio = async () => null;",
                 "./nativeClips": "export const arm = async () => {}; export const disarm = () => {}; export const canRecord = () => false; export const engineTornDown = () => false; export const goLiveActive = () => false; export const nativeAvailability = async () => ({ canUse: false }); export const saveNativeClip = async () => null; export const setOnIdleCallback = () => {}; export const setRecordUser = () => {}; export const watchRecording = () => {};",
                 "./nativeTracks": "export const hasVideoTrack = () => false;",
