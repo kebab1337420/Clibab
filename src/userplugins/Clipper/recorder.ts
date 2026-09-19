@@ -98,6 +98,8 @@ const AUTO_SAVE_SECONDS = 30;
  * over. Past this the oldest chunks go even when their time has not come.
  */
 const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
+
+/**
  * How far past the asked length a native clip may run before it is cut back.
  *
  * A windowed engine answer lands within a fragment or two of the request;
