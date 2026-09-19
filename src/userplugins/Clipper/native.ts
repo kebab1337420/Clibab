@@ -406,7 +406,13 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
         const { size } = fstatSync(fd);
         if (size > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
 
-        return new Uint8Array(readFileSync(fd));
+        const data = new Uint8Array(readFileSync(fd));
+
+        // Checked again after the read: a file that grew in between still
+        // cannot get past the cap on its way to the renderer.
+        if (data.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
+
+        return data;
     } finally {
         closeSync(fd);
     }
@@ -424,6 +430,8 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
  */
 const SHARE_LIMIT_BYTES = 200 * 1024 * 1024;
 const SHARE_ENDPOINT = "https://catbox.moe/user/api.php";
+/** A link is bytes long; anything past this answering is not a link. */
+const SHARE_RESPONSE_CAP = 1024 * 1024;
 
 export function shareClip(_: IpcMainInvokeEvent, dir: string, name: string): Promise<string> {
     const clip = clipName(name);
@@ -437,6 +445,10 @@ export function shareClip(_: IpcMainInvokeEvent, dir: string, name: string): Pro
         const { size } = fstatSync(fd);
         if (size > SHARE_LIMIT_BYTES) throw new Error("That clip is over 200MB - shorten it in the studio first");
         data = readFileSync(fd);
+
+        // Checked again after the read: a render landing mid-upload must
+        // not smuggle a bigger file past the cap.
+        if (data.length > SHARE_LIMIT_BYTES) throw new Error("That clip is over 200MB - shorten it in the studio first");
     } finally {
         closeSync(fd);
     }
@@ -460,7 +472,17 @@ export function shareClip(_: IpcMainInvokeEvent, dir: string, name: string): Pro
             }
         }, response => {
             const chunks: Buffer[] = [];
-            response.on("data", (chunk: Buffer) => chunks.push(chunk));
+            let received = 0;
+            response.on("data", (chunk: Buffer) => {
+                // The answer is one line; a body that keeps streaming past
+                // this is not a link and must not accumulate without bound.
+                received += chunk.length;
+                if (received > SHARE_RESPONSE_CAP) {
+                    response.destroy(new Error("The host answered with more than a link"));
+                    return;
+                }
+                chunks.push(chunk);
+            });
             response.on("end", () => {
                 const body = Buffer.concat(chunks).toString("utf8").trim();
                 if ((response.statusCode ?? 0) !== 200) reject(new Error(`The host answered ${response.statusCode ?? "?"} - try again later`));
