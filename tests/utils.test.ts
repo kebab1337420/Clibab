@@ -2,7 +2,24 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
-import { clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
+
+test("capture presets stay within sane bounds", () => {
+    assert.ok(CAPTURE_PRESETS.length >= 2);
+
+    for (const preset of CAPTURE_PRESETS) {
+        // Held memory, same estimate the picker shows: bitrate over the
+        // whole length plus container overhead, under the 512MB buffer cap.
+        const held = (preset.bitrate * 1_000_000) / 8 * preset.length * 1.1;
+        assert.ok(held < 512 * 1024 * 1024, `${preset.label} holds ${held}`);
+
+        // Each value must survive the clamps that sanitize the settings.
+        assert.equal(utils.captureFrameRate(preset.fps), preset.fps);
+        assert.equal(utils.captureHeight(preset.resolution), preset.resolution);
+        assert.ok(utils.captureVideoBitrate(preset.bitrate) === preset.bitrate * 1_000_000);
+        assert.ok(retention(preset.length) >= preset.length);
+    }
+});
 
 test("capture frame rates remain finite and within encoder limits", () => {
     for (const value of [NaN, Infinity, -Infinity, undefined, null, "60", {}, 0, -10]) {
