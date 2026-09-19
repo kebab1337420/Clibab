@@ -404,12 +404,13 @@ anything. Run them with `.\scripts\test.ps1`.
   untouched: their fragments need a different parser.
 - **The studio renders in real time**, because there is no muxer in the plugin:
   the timeline is played into one canvas and one audio mix, and a single MediaRecorder
-  records the run, so a 2-minute montage takes 2 minutes. The preview plays one
+  records the run, so a 2-minute montage takes 2 minutes. A plain trim skips
+  the render: it is cut out of the file losslessly, in seconds. The preview plays one
   file at a time, so a dissolve and the extra angles of a shot only appear in
   the render. Sources of different shapes are letterboxed into the output
   rather than stretched, unless the segment is set to crop.
-  Keep the window visible while it renders: a hidden window stops painting
-  frames while the audio keeps running, and the two drift apart.
+  Hiding Discord pauses the render instead of desyncing it: the picture and
+  the sound freeze together and resume together.
 - **Imports are capped at 512 MB.** An imported file is read in the main
   process, copied across IPC and held in memory while the timeline is open, so
   a bigger one is refused rather than allowed to take the client down with it.

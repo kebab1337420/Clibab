@@ -27,8 +27,11 @@ import {
     probeRange,
     renderName,
     type StoredClip,
+    typeOfClip,
     writeClipCopy
 } from "../clips";
+import { probeAudioTracks } from "../mp4";
+import { trimBytes } from "../repair";
 import { logger } from "../recorder";
 import {
     DEFAULT_CAPTION_STYLE,
@@ -236,6 +239,31 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
     const trimmed = Math.max(0, trim.to - trim.from);
     const pct = trim.length > 0 ? Math.round((trimmed / trim.length) * 100) : 0;
 
+    /**
+     * The trim, cut out of the file instead of re-encoded.
+     *
+     * Null when the timeline asks for anything the container cannot express,
+     * and the caller falls back to the renderer. Saved clips start at zero,
+     * so the trim points read off the player are already clip time.
+     */
+    const losslessTrim = async (): Promise<Blob | null> => {
+        const src = sourceRef.current;
+        if (!src || !/\.(webm|mp4)$/i.test(src.name)) return null;
+
+        const data = new Uint8Array(await (await fetch(src.url)).arrayBuffer());
+
+        // A native clip keeps one track per person, and every player that
+        // matters plays the first audio track alone - the game, with the
+        // whole call missing. Only a render mixes them down.
+        if ((probeAudioTracks(data) ?? []).length > 1) return null;
+
+        const type = typeOfClip(src.name);
+        const cut = trimBytes(data, type, trim.from, trim.to);
+
+        // Nothing back: the range already covers the whole file.
+        return new Blob([(cut ?? data) as BlobPart], { type });
+    };
+
     const onRender = async () => {
         const src = sourceRef.current;
         if (!src) return;
@@ -266,13 +294,18 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
         };
 
         try {
-            const blob = await renderProject(project, [src], {
+            // A plain trim is cut out of the file, not re-encoded: seconds
+            // instead of minutes. Anything else - a multi-track native clip
+            // whose voices need mixing down, or an undecodable import - goes
+            // through the renderer below.
+            const fast = await losslessTrim();
+            const blob = fast ?? await renderProject(project, [src], {
                 onProgress: setProgress,
                 cancelled: () => cancelRef.current
             });
 
             const path = await writeClipCopy(blob, renderName(src.name, blob.type));
-            toast(`Clip saved (${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
+            toast(fast ? `Cut without re-encoding (${formatBytes(blob.size)})` : `Clip saved (${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             logger.info("Trimmed a clip from the simple studio", path);
 
             await writeThumbnail(blob, path.split(/[\\/]/).pop() || "");

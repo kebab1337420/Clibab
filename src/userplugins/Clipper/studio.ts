@@ -2523,6 +2523,33 @@ export async function renderProject(project: Project, sources: StudioSource[], o
     let started = false;
 
     /*
+     * A hidden page stops painting frames while the audio keeps running, and
+     * the two drift apart in the file. So backgrounding pauses the picture
+     * and the graph clock together, and foregrounding resumes both: the file
+     * holds a frozen frame for the gap instead of a desync.
+     */
+    const playing: HTMLVideoElement[] = [];
+    let saidHidden = false;
+    const onVisibility = () => {
+        if (document.hidden) {
+            for (const video of playing) video.pause();
+            audioCtx.suspend().catch(() => void 0);
+
+            if (!saidHidden) {
+                saidHidden = true;
+                logger.warn("Render paused while Discord is hidden - it resumes when the window is visible again");
+            }
+
+            return;
+        }
+
+        audioCtx.resume().catch(() => void 0).then(() => {
+            for (const video of playing) void video.play().catch(() => void 0);
+        });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    /*
      * The frame the outgoing segment ended on, kept for the cut.
      *
      * Seeking the next source takes long enough to see, and the canvas painted
@@ -2685,6 +2712,9 @@ export async function renderProject(project: Project, sources: StudioSource[], o
             // driven by: an angle that stalls must not hold up the shot.
             for (const other of angles) void other.play().catch(() => void 0);
 
+            // What the background guard resumes: everything audible right now.
+            playing.push(video, ...angles);
+
             /*
              * The sounds of this stretch are scheduled once playback is actually
              * running, and the clock is read at that moment.
@@ -2846,10 +2876,12 @@ export async function renderProject(project: Project, sources: StudioSource[], o
 
             video.pause();
             for (const other of angles) other.pause();
+            playing.length = 0;
             setGain(audioCtx, gain, 0);
             elapsed += length;
         }
     } finally {
+        document.removeEventListener("visibilitychange", onVisibility);
         current = null;
         cancelAnimationFrame(frame);
 
