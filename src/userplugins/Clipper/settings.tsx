@@ -37,8 +37,17 @@ export const settings = definePluginSettings({
     },
     followGame: {
         type: OptionType.BOOLEAN,
-        description: "While a game runs, record its screen instead of the picked source. Fullscreen games can't be captured as windows",
+        description: "Prefer the running game over the picked source",
         default: true
+    },
+    markersSection: {
+        type: OptionType.COMPONENT,
+        component: () => (
+            <SettingsSection
+                title="Auto-markers"
+                note="Markers the plugin drops by itself when something happens."
+            />
+        )
     },
     autoHighlight: {
         type: OptionType.BOOLEAN,
@@ -51,6 +60,7 @@ export const settings = definePluginSettings({
         default: false
     },
     highlightSensitivity: {
+        hidden: () => !settings.store.autoHighlight,
         type: OptionType.SELECT,
         description: "How much has to happen before an automatic marker drops",
         options: [
@@ -61,7 +71,7 @@ export const settings = definePluginSettings({
     },
     gameAudioWatch: {
         type: OptionType.BOOLEAN,
-        description: "Listen to the game's sound for markers. Off by default: the call shares the same audio stream",
+        description: "Detect loud game moments (leave off if game sound comes through the call)",
         default: false
     },
     gameVideoWatch: {
@@ -123,7 +133,7 @@ export const settings = definePluginSettings({
     },
     micGate: {
         type: OptionType.BOOLEAN,
-        description: "Record the mic only while Discord would transmit. Off records everything the mic hears",
+        description: "Only record the mic while Discord transmits your voice",
         default: true
     },
     audioBitrate: {
@@ -204,6 +214,7 @@ export const settings = definePluginSettings({
         default: false
     },
     autoClipEndLength: {
+        hidden: () => !settings.store.autoClipOnCallEnd,
         type: OptionType.SLIDER,
         description: "Seconds of the call's end to keep. Capped at the buffer length",
         markers: [5, 10, 15, 30, 45, 60],
@@ -218,7 +229,7 @@ export const settings = definePluginSettings({
     },
     nativeEngine: {
         type: OptionType.BOOLEAN,
-        description: "Record via Discord's clip engine when available (one audio track per person). Falls back to the plugin buffer",
+        description: "Use Discord's engine when possible (per-person audio), otherwise the built-in buffer",
         default: true
     },
     panelButton: {
@@ -266,7 +277,7 @@ export const settings = definePluginSettings({
     },
     overlaySeconds: {
         type: OptionType.SLIDER,
-        description: "Seconds to replay, counted back from the clip's end. 0 plays it all",
+        description: "Replay length back from the end (0 = whole clip)",
         markers: [0, 5, 10, 15, 20, 30, 45, 60],
         default: 10,
         stickToMarkers: true
@@ -292,7 +303,7 @@ export const settings = definePluginSettings({
         component: () => (
             <SettingsSection
                 title="Keybinds"
-                note="Registered with the OS, so they fire from inside a game."
+                note="Registered with the OS, so they fire from inside a game. On Wayland they only fire while Discord is focused."
             />
         )
     },
@@ -303,11 +314,11 @@ export const settings = definePluginSettings({
     },
     saveKeybind: {
         type: OptionType.COMPONENT,
-        default: "alt+F10",
+        default: "ctrl+alt+F10",
         component: () => (
             <KeybindInput
                 title="Save clip keybind"
-                note="Save the buffered footage. Avoid Ctrl+R / Ctrl+Shift+R (reserved by Electron)."
+                note="Save the buffered footage. Avoid Ctrl+R (reserved by Electron)."
                 value={settings.store.saveKeybind}
                 onChange={v => (settings.store.saveKeybind = v)}
             />
@@ -315,7 +326,7 @@ export const settings = definePluginSettings({
     },
     toggleKeybind: {
         type: OptionType.COMPONENT,
-        default: "alt+F9",
+        default: "ctrl+alt+F9",
         component: () => (
             <KeybindInput
                 title="Start / stop capture keybind"
@@ -327,7 +338,7 @@ export const settings = definePluginSettings({
     },
     markKeybind: {
         type: OptionType.COMPONENT,
-        default: "alt+F11",
+        default: "ctrl+alt+F11",
         component: () => (
             <KeybindInput
                 title="Drop a marker keybind"
@@ -339,11 +350,11 @@ export const settings = definePluginSettings({
     },
     povKeybind: {
         type: OptionType.COMPONENT,
-        default: "alt+F12",
+        default: "ctrl+alt+F12",
         component: () => (
             <KeybindInput
                 title="Clip everyone's angle keybind"
-                note="Save your clip and ask everyone in the call to save theirs (plain-text chat message)."
+                note="Save your clip and ask everyone in the call to save theirs."
                 value={settings.store.povKeybind}
                 onChange={v => (settings.store.povKeybind = v)}
             />
@@ -351,7 +362,7 @@ export const settings = definePluginSettings({
     },
     replayKeybind: {
         type: OptionType.COMPONENT,
-        default: "alt+F8",
+        default: "ctrl+alt+F8",
         component: () => (
             <KeybindInput
                 title="Clip editor keybind"
@@ -363,12 +374,7 @@ export const settings = definePluginSettings({
     },
     povRequests: {
         type: OptionType.BOOLEAN,
-        description: "Auto-save your clip when someone in your call requests everyone's angle (max one per 10s)",
-        default: true
-    },
-    povCleanup: {
-        type: OptionType.BOOLEAN,
-        description: "Delete your own multi-angle request message after a few seconds",
+        description: "Auto-save your clip when someone in your call requests everyone's angle",
         default: true
     },
     /*

@@ -215,7 +215,7 @@ internal static class Program
                     ? "Clipper and the SteamVR integration are installed.\r\n\r\nRestart Discord, then enable \u201cClipper\u201d in Settings > Vencord > Plugins.\r\n\r\n" +
                       "In the headset, double-tap B on the right controller to save a clip, hold A to drop a marker."
                     : "Clipper is installed.\r\n\r\nRestart Discord, then enable \u201cClipper\u201d in Settings > Vencord > Plugins.\r\n\r\n" +
-                      "Default keybinds:  Alt+F9 start/stop buffer, Alt+F10 save a clip.";
+                      "Default keybinds:  Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save a clip.";
             }
 
             Controls.Add(back);

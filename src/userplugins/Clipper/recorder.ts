@@ -420,6 +420,9 @@ class ClipRecorder {
      */
     private pickedByHand = false;
 
+    /** Whether the buffer has ever started this session. The first pick starts it. */
+    private startedOnce = false;
+
     /** Not before this instant does a highlight save another clip by itself. */
     private autoSaveAfter = 0;
 
@@ -652,6 +655,7 @@ class ClipRecorder {
         if (this.state !== "idle") return this.isRecording;
 
         if (retry) forgetBroken();
+        this.startedOnce = true;
 
         this.setState("starting");
         const mine = this.generation;
@@ -2592,7 +2596,12 @@ class ClipRecorder {
         rememberSource(source);
         this.pickedByHand = true;
         toast(`Clip source: ${source.name}`, Toasts.Type.SUCCESS);
-        void this.restart();
+
+        // The first pick also starts the buffer: picking alone otherwise
+        // leaves a newcomer staring at "Buffer stopped" with a source set
+        // and no idea a second step exists. A deliberate stop is respected.
+        if (!this.isRecording && !this.startedOnce) void this.start(true);
+        else void this.restart();
     }
 
     /** Name of the remembered source, empty when none was picked yet. */

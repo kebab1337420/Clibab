@@ -68,6 +68,7 @@ export async function startGlobalKeybinds(): Promise<void> {
         const { wayland } = await Native.getPlatformInfo();
         if (wayland) {
             logger.warn("Wayland ignores application-registered hotkeys, so the keybinds only fire while Discord is focused. Bind them in your compositor to a command instead, or use the chat bar button.");
+            toast("Wayland: keybinds only fire while Discord is focused", Toasts.Type.MESSAGE, 8000);
         }
     } catch (e) {
         logger.warn("Could not read the platform info", e);

@@ -66,6 +66,18 @@ test("importing the recorder does not touch settings before the plugin is initia
     assert.deepEqual(fixture.listed, []);
 });
 
+test("a save with the buffer stopped says so and reports failure", async () => {
+    (mod.recorder as any).state = "idle";
+    try {
+        const before = fixture.toasts.length;
+        assert.equal(await mod.recorder.save(), false);
+        assert.equal(fixture.toasts.length, before + 1);
+        assert.match(String(fixture.toasts[before][0]), /not running/i);
+    } finally {
+        (mod.recorder as any).state = "idle";
+    }
+});
+
 test("a save pressed while one is running says so instead of vanishing", async () => {
     (mod.recorder as any).state = "saving";
     try {

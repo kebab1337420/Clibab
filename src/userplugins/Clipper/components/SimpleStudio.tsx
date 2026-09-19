@@ -40,6 +40,7 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
+import { settings } from "../settings";
 import { formatBytes, formatTime } from "../utils";
 
 /** Clamp a trim point to the file's own range. */
@@ -307,6 +308,7 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
                         <small>Simple - one clip, trimmed and saved</small>
                     </div>
                     <div className="vc-clipper-studio-head-right">
+                        <button className="vc-clipper-studio-switch" disabled={busy} title="Open the full montage timeline" onClick={() => { settings.store.studioMode = "advanced"; }}>Advanced</button>
                         <button className="vc-clipper-studio-ok" disabled={busy} onClick={onClose}>Done</button>
                         <button className="vc-clipper-studio-close" onClick={onClose} disabled={busy} aria-label="Close">
                             <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">

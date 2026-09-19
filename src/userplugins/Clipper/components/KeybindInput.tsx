@@ -52,6 +52,7 @@ export function KeybindInput({ title, note, value, onChange }: KeybindInputProps
     const [listening, setListening] = useState(false);
     const [current, setCurrent] = useState(value);
     const [held, setHeld] = useState<Keybind | null>(null);
+    const [bareWarn, setBareWarn] = useState(false);
 
     // Held in a ref rather than in the effect's dependencies: the settings panel
     // hands down a fresh closure on every render, and re-running the effect
@@ -62,6 +63,7 @@ export function KeybindInput({ title, note, value, onChange }: KeybindInputProps
     useEffect(() => {
         if (!listening) {
             setHeld(null);
+            setBareWarn(false);
             return;
         }
 
@@ -92,6 +94,14 @@ export function KeybindInput({ title, note, value, onChange }: KeybindInputProps
 
             if (isModifierKey(e.code)) {
                 setHeld(bind);
+                return;
+            }
+
+            // A bare key registered system-wide is swallowed game-wide: the
+            // game never sees its S, its Space, its F9 again. Refuse it here
+            // rather than after it has eaten somebody's inputs.
+            if (bare) {
+                setBareWarn(true);
                 return;
             }
 
@@ -155,6 +165,11 @@ export function KeybindInput({ title, note, value, onChange }: KeybindInputProps
             {!listening && !!current && !toAccelerator(current) && (
                 <Paragraph style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted, #949ba4)" }}>
                     This key cannot be registered system-wide, so it only fires while Discord is the focused window.
+                </Paragraph>
+            )}
+            {listening && bareWarn && (
+                <Paragraph style={{ marginTop: 6, fontSize: 12, color: "var(--text-warning, #f0b232)" }}>
+                    That key alone would be swallowed game-wide. Hold Ctrl, Alt, Shift or Meta with it.
                 </Paragraph>
             )}
         </section>

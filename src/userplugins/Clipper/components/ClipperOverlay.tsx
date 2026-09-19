@@ -26,8 +26,9 @@ import type { CaptureSource } from "../native";
 import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerOpener, setStudioOpener } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
+import { shareClipLink } from "../share";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
+import { formatBytes, formatTime, TRIM_CUTS } from "../utils";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
 import { SimpleStudio } from "./SimpleStudio";
@@ -620,6 +621,11 @@ const CSS = `
 .vc-clipper-replay-actions .vc-clipper-danger:hover {
     background: var(--button-danger-background-hover, #a12828);
 }
+.vc-clipper-replay-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted, #949ba4);
+}
 
 @keyframes vc-clipper-fade {
     from { opacity: 0; }
@@ -962,7 +968,7 @@ function ActionMenu({ recording, onClose, onStudio }: {
 
     // Offered lengths, shortest first, none of them longer than the buffer:
     // asking for more than was recorded is asking for the whole buffer twice.
-    const cuts = [15, 30, 60].filter(n => n < settings.store.clipLength);
+    const cuts = TRIM_CUTS.filter(n => n < settings.store.clipLength);
 
     return (
         <div className="vc-clipper-menu">
@@ -995,6 +1001,7 @@ function ActionMenu({ recording, onClose, onStudio }: {
                     "Drop a marker on this moment"
                 )}
                 {item("Everyone", () => void requestPov(), !recording, undefined, "Ask everyone in the call to save their own angle")}
+                {item("Source", () => recorder.chooseSource(), false, undefined, "Pick what to record")}
             </div>
 
             {last && (
@@ -1003,6 +1010,7 @@ function ActionMenu({ recording, onClose, onStudio }: {
                     <div className="vc-clipper-menu-row">
                         {item("Send", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
                         {item("GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
+                        {item("Link", () => void shareClipLink(last.name), false, undefined, "Upload it and copy a share link")}
                         {cuts.map(n => (
                             <React.Fragment key={n}>
                                 {item(`${n}s`, () => void recorder.trimLastSaved(n), false, "vc-clipper-menu-chip", `Keep only its last ${n} seconds`)}
@@ -1016,11 +1024,13 @@ function ActionMenu({ recording, onClose, onStudio }: {
 
             <div className="vc-clipper-menu-foot">
                 {CLIPS_AVAILABLE && item("Clip studio", onStudio)}
-                <span className="vc-clipper-menu-status">
-                    {recording
-                        ? `${buffered}s / ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`
-                        : "Buffer stopped"}
-                </span>
+                {recording
+                    ? (
+                        <span className="vc-clipper-menu-status">
+                            {`${buffered}s / ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`}
+                        </span>
+                    )
+                    : item("Start the buffer", () => void recorder.toggle(), false, "vc-clipper-menu-main")}
             </div>
         </div>
     );
@@ -1122,9 +1132,12 @@ export function ClipperOverlay() {
                         className={`vc-clipper-trigger${recording ? " vc-clipper-live" : ""}`}
                         aria-label={recording ? "Clipper - recording" : "Clipper - pick a source"}
                         title={recording
-                            ? `Clipper - recording ${sourceName || "screen"} (right click: stop / save / studio)`
-                            : `Clipper - pick a source${sourceName ? ` (current: ${sourceName})` : ""}`}
-                        onClick={e => { e.stopPropagation(); setMenu(false); setPicker(true); }}
+                            ? `Clipper - recording ${sourceName || "screen"} (click: stop / save / studio)`
+                            : `Clipper - pick a source${sourceName ? ` (current: ${sourceName})` : ""} (right click: menu)`}
+                        // While recording the menu is the useful click (stop, save,
+                        // studio); the picker moves into it as "Source". Idle,
+                        // the click picks a source, which also starts the buffer.
+                        onClick={e => { e.stopPropagation(); if (recording) { setPicker(false); setMenu(true); } else { setMenu(false); setPicker(true); } }}
                         onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMenu(v => !v); }}
                     >
                         <Icon />

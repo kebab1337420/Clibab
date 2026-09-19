@@ -25,7 +25,8 @@ import { CLIPS_AVAILABLE, loadClipUrl } from "../clips";
 import { recorder, type SavedClip } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { settings } from "../settings";
-import { formatBytes } from "../utils";
+import { shareClipLink } from "../share";
+import { formatBytes, TRIM_CUTS } from "../utils";
 
 /** How long the card sits there before it takes itself off screen. */
 const DISMISS_MS = 20_000;
@@ -90,7 +91,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
 
     // Whatever is shorter than the clip: trimming to more than was saved is a
     // rewrite of the same file for nothing.
-    const trim = [15, 30].find(n => n < settings.store.clipLength);
+    const trim = TRIM_CUTS.find(n => n < settings.store.clipLength);
 
     return (
         <div
@@ -124,6 +125,13 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                 <button disabled={busy} onClick={act(() => sendClipFitted(clip.name, setStep))}>Send</button>
                 <button
                     disabled={busy}
+                    title="Upload it and copy a share link instead of the file"
+                    onClick={act(() => shareClipLink(clip.name))}
+                >
+                    Link
+                </button>
+                <button
+                    disabled={busy}
                     title="The last few seconds, as a looping GIF small enough to post"
                     onClick={act(() => sendClipGif(clip.name, { onProgress: setStep }))}
                 >
@@ -145,6 +153,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                     Delete
                 </button>
             </div>
+            <div className="vc-clipper-replay-hint">Later: right-click the Clipper button for this clip again.</div>
         </div>
     );
 }

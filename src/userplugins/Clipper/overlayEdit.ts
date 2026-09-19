@@ -25,6 +25,7 @@ import { dropMeta, readMeta, setMeta } from "./library";
 import { logger, recorder } from "./recorder";
 import { trimBytes } from "./repair";
 import { sendClipRange } from "./send";
+import { shareClipLink } from "./share";
 import type { StudioAction } from "./studioOverlay";
 import { errorMessage } from "./utils";
 
@@ -105,6 +106,15 @@ async function send(action: StudioAction): Promise<Outcome> {
         : { ok: false, message: "Could not attach it - open a channel first", close: false };
 }
 
+/** Uploads the whole clip and copies a share link, whatever Discord's size limit says. */
+async function link(action: StudioAction): Promise<Outcome> {
+    const shared = await shareClipLink(action.clip);
+
+    return shared
+        ? { ok: true, message: "Link copied - paste it in Discord", close: false }
+        : { ok: false, message: "Could not upload that clip", close: false };
+}
+
 /** Throws the clip away, wholesale. The editor has nothing left to show. */
 async function drop(action: StudioAction): Promise<Outcome> {
     await deleteClip(action.clip);
@@ -127,6 +137,7 @@ async function open(action: StudioAction): Promise<Outcome> {
 const DOERS: Record<StudioAction["kind"], (action: StudioAction) => Promise<Outcome>> = {
     cut,
     send,
+    link,
     delete: drop,
     open
 };
