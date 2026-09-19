@@ -3356,7 +3356,22 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 return;
             }
 
-            setSources(list => [...list, ...items]);
+            const attachedNames = new Set(
+                (segment.angles ?? [])
+                    .map(a => sources.find(s => s.id === a.sourceId)?.name)
+                    .filter((name): name is string => !!name)
+            );
+
+            // Posted twice, or posted after being added by hand: one copy is
+            // already cutting, the second would only double it.
+            const fresh = items.filter(item => {
+                if (!attachedNames.has(item.name)) return true;
+                drop(item.url);
+                return false;
+            });
+            const freshOffsets = offsets.filter((_, i) => !attachedNames.has(items[i].name));
+
+            setSources(list => [...list, ...fresh]);
             setNote("Listening to the angles…");
 
             const tracks: AngleTrack[] = [{
@@ -3366,11 +3381,25 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 hz: ENVELOPE_HZ
             }];
 
-            for (let i = 0; i < items.length; i++) {
+            // Angles attached by hand earlier cut along, rather than being
+            // replaced: they were lined up on purpose.
+            for (const angle of segment.angles ?? []) {
+                const item = sources.find(s => s.id === angle.sourceId);
+                if (!item) continue;
+
                 tracks.push({
-                    sourceId: items[i].id,
-                    offset: offsets[i],
-                    envelope: envelopeOf(await audioOf(items[i])),
+                    sourceId: item.id,
+                    offset: angle.offset,
+                    envelope: envelopeOf(await audioOf(item)),
+                    hz: ENVELOPE_HZ
+                });
+            }
+
+            for (let i = 0; i < fresh.length; i++) {
+                tracks.push({
+                    sourceId: fresh[i].id,
+                    offset: freshOffsets[i],
+                    envelope: envelopeOf(await audioOf(fresh[i])),
                     hz: ENVELOPE_HZ
                 });
             }
