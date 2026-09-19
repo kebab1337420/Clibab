@@ -24,7 +24,7 @@ import { highlights } from "./highlights";
 import { dropMeta, readMeta, setMeta, tagSavedClip } from "./library";
 import { MicInput } from "./micInput";
 import { gainOf, MIC_CHANNEL, type MixerLevel, readMixer, SYSTEM_CHANNEL, voiceLevelsFrom } from "./mixer";
-import { probeAudioTracks } from "./mp4";
+import { lengthMp4, probeAudioTracks, trimMp4 } from "./mp4";
 import { muxNativeAudio } from "./mux";
 import type { CaptureSource } from "./native";
 import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, saveNativeClip, setOnIdleCallback, setRecordUser, watchRecording } from "./nativeClips";
@@ -98,6 +98,13 @@ const AUTO_SAVE_SECONDS = 30;
  * over. Past this the oldest chunks go even when their time has not come.
  */
 const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
+ * How far past the asked length a native clip may run before it is cut back.
+ *
+ * A windowed engine answer lands within a fragment or two of the request;
+ * anything further past it is the unwindowed fallback ("write whatever you
+ * are holding") answering with the whole buffer.
+ */
+const NATIVE_LENGTH_SLACK_S = 5;
 
 /**
  * The native clip engine keeps capture surfaces and encoder state outside the
@@ -2304,8 +2311,10 @@ class ClipRecorder {
 
         // The engine answers in milliseconds, but older builds answered in
         // seconds and the buffer is capped well under 600s either way, so the
-        // magnitude is a safe way to tell which one this is.
-        const seconds = reported > 600 ? reported / 1000 : reported;
+        // magnitude is a safe way to tell which one this is. Never longer
+        // than asked: the unwindowed fallback answers with the whole buffer,
+        // and the file is cut back down to it below.
+        const seconds = Math.min(reported > 600 ? reported / 1000 : reported, wanted);
 
         /*
          * Zero means the engine had nothing buffered, and it is not a detail.
@@ -2328,7 +2337,27 @@ class ClipRecorder {
         }
 
         const saved = path.split(/[\\/]/).pop() || name;
-        const data = await Native.readClip(settings.store.saveDirectory, saved);
+        let data = await Native.readClip(settings.store.saveDirectory, saved);
+
+        /*
+         * The last engine attempt names no window ("write whatever you are
+         * holding"), so when every windowed request fails the file comes
+         * back full-length: as long as the buffer has been running rather
+         * than as long as asked. The tail is cut off losslessly instead of
+         * handing that file over - the per-person tracks survive the cut,
+         * which falling back to the mixed buffer would throw away.
+         */
+        const actual = lengthMp4(data);
+        if (actual - wanted > NATIVE_LENGTH_SLACK_S) {
+            const cut = trimMp4(data, (actual - wanted) * 1000, actual * 1000);
+            if (cut) {
+                await Native.saveClip(settings.store.saveDirectory, saved, cut);
+                data = cut;
+                logger.info(`Native clip came back ${Math.round(actual)}s for ${wanted}s asked - trimmed to the tail.`);
+            } else {
+                logger.warn(`Native clip came back ${Math.round(actual)}s for ${wanted}s asked and resisted trimming - keeping it whole.`);
+            }
+        }
 
         // It answered with a file, so whatever else is wrong with it, the
         // engine is not the thing to give up on.
