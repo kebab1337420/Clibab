@@ -20,7 +20,7 @@
 
 import type { PluginNative } from "@utils/types";
 
-import { deleteClip, readClipBytes, typeOfClip, writeClipBytes } from "./clips";
+import { deleteClip, readClipBytes, typeOfClip, trashClip, writeClipBytes } from "./clips";
 import { dropMeta, readMeta, setMeta } from "./library";
 import { logger, recorder } from "./recorder";
 import { trimBytes } from "./repair";
@@ -117,11 +117,10 @@ async function link(action: StudioAction): Promise<Outcome> {
 
 /** Throws the clip away, wholesale. The editor has nothing left to show. */
 async function drop(action: StudioAction): Promise<Outcome> {
-    await deleteClip(action.clip);
-    await dropMeta(action.clip);
+    await trashClip(action.clip);
     recorder.forgetSaved(action.clip);
 
-    return { ok: true, message: "Clip deleted", close: true };
+    return { ok: true, message: "Clip moved to the trash", close: true };
 }
 
 /** Hands the clip to the real studio, and the screen back to Discord. */

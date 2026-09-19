@@ -2454,19 +2454,20 @@ class ClipRecorder {
      *
      * The other half of watching a clip straight after saving it: most of what
      * a rolling buffer writes is not worth keeping, and a folder nobody ever
-     * prunes is how a clip library becomes unusable. It goes to the trash, not
-     * to the void - the native delete is the same one the library uses.
+     * prunes is how a clip library becomes unusable. It goes to the folder's
+     * own trash rather than the void, restorable from the studio for 7 days.
      */
     async discardLastSaved(): Promise<void> {
         const last = this.lastSaved;
         if (!last) return;
 
         try {
-            await Native.deleteClip(settings.store.saveDirectory, last.name);
+            const meta = (await readMeta())[last.name] ?? null;
+            await Native.trashClip(settings.store.saveDirectory, last.name, meta ? JSON.stringify(meta) : null);
             await dropMeta(last.name);
 
             this.lastSaved = null;
-            toast("Clip deleted", Toasts.Type.MESSAGE);
+            toast("Clip moved to the trash", Toasts.Type.MESSAGE);
         } catch (e) {
             logger.error("Could not delete the clip", e);
             toast(`Could not delete the clip: ${errorMessage(e)}`, Toasts.Type.FAILURE);
