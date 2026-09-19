@@ -190,6 +190,7 @@ The always-on-top window, and the two files that decide what it draws.
 | `angleCut.ts` | 384 | Cutting between those angles: who is on screen, second by second, and one soundtrack under it. |
 | `chat.ts` | 208 | What the chat said while it was happening. |
 | `clips.ts` | 329 | Access to the clip folder. |
+| `profiles.ts` | 130 | Capture settings remembered per game. |
 | `library.ts` | 408 | Clip metadata and categories. |
 | `send.ts` | 160 | Sending a clip to the channel that is open. |
 | `share.ts` | 60 | Uploading a clip for a share link and copying it. |
