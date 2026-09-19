@@ -683,6 +683,19 @@ export function cutSilence(
     return { project: next, removed, ranges };
 }
 
+/**
+ * Dead-air ranges without cutting anything, for a preview the user confirms.
+ *
+ * Same detection as {@link cutSilence}, same defaults: the list Apply works
+ * from is exactly what the one-click cut would have taken.
+ */
+export function previewSilence(
+    project: Project,
+    sources: StudioSource[]
+): { from: number; to: number; }[] {
+    return silentRanges(project, sources);
+}
+
 /*
  * The music steps aside while somebody talks.
  *
