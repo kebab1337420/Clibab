@@ -145,11 +145,6 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
   on `127.0.0.1` for the game to post to. Nothing leaves the machine. *Check
   what is watching the game* in the actions menu says what is actually hooked
   up. Every other game gets the sound and the picture, which need no setup.
-- **Watch the buffer before you save it.** The actions menu plays a copy of
-  what is in memory right now, with the markers drawn on the scrub bar and two
-  handles to pick the piece worth keeping. The window you pick is what gets
-  written, so a 30s buffer can become the 6s that mattered without a round trip
-  through the studio.
 - **Instant replay after a save.** The clip that was just written plays itself
   in the corner, muted and looping, next to the things anybody does about a clip
   they just watched: send it, turn its ending into a GIF, shorten it to 15s or
