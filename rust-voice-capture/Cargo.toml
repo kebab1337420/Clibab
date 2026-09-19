@@ -39,3 +39,13 @@ path = "src/lib.rs"
 default = ["transport_decrypt"]
 opus_decode = ["dep:opus-decoder"]
 transport_decrypt = []
+
+# The exe ships inside every install and update, so it pays to keep it small:
+# stripped symbols, thin LTO, single codegen unit, size-optimized codegen.
+# The workload is packet-rate crypto and file IO, nowhere near CPU-bound, so
+# opt-level "z" costs no audible throughput for ~40% fewer bytes on the wire.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "z"
