@@ -167,7 +167,7 @@ export async function installUpdate(info: UpdateInfo, quiet = false): Promise<bo
     if (!quiet) toast(`Downloading Clipper ${info.version}...`, Toasts.Type.MESSAGE);
 
     try {
-        const files = await Native.downloadUpdate(info.tag);
+        const files = await Native.downloadUpdate(info.tag, CLIPPER_VERSION);
         logger.info(`Installed Clipper ${info.version}: ${files.length} files replaced`);
 
         change({ restartNeeded: true });

@@ -56,9 +56,41 @@ const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
-    if (trimmed && isAbsolute(trimmed)) return trimmed;
+    const target = trimmed && isAbsolute(trimmed)
+        ? trimmed
+        : join(app.getPath("videos"), "DiscordClips");
 
-    return join(app.getPath("videos"), "DiscordClips");
+    // The folder comes from the renderer, so it is never trusted with a
+    // system location: clips have no business inside the OS, its program
+    // folders, or the bundle this code runs from. Anything else - including
+    // a custom folder the user typed - is theirs to keep.
+    const needle = target.toLowerCase().replace(/[\\/]+$/, "");
+    for (const root of forbiddenClipRoots()) {
+        const base = root.toLowerCase().replace(/[\\/]+$/, "");
+        if (needle === base || needle.startsWith(`${base}\\`) || needle.startsWith(`${base}/`)) {
+            throw new Error("That folder is not a place for clips");
+        }
+    }
+
+    return target;
+}
+
+/** Roots no clip folder may point at or into. */
+function forbiddenClipRoots(): string[] {
+    const roots: string[] = [];
+
+    for (const name of ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]) {
+        const value = process.env[name]?.trim();
+        if (value) roots.push(value);
+    }
+
+    try {
+        roots.push(bundleDirectory());
+    } catch {
+        // A checkout without an installed bundle: nothing extra to protect.
+    }
+
+    return roots;
 }
 
 /**
@@ -141,6 +173,11 @@ function writeClipBytes(path: string, data: Uint8Array): void {
 }
 
 export function saveClip(_: IpcMainInvokeEvent, dir: string, name: string, data: Uint8Array, keep = false): Promise<string> {
+    // Reads are capped (readClip, readVideoFile), so writes are too: an
+    // oversized buffer handed across IPC would otherwise OOM the main
+    // process before anything validates it.
+    if (data.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to write");
+
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
 
@@ -1329,7 +1366,7 @@ export function focusClient(event: IpcMainInvokeEvent): void {
  */
 
 /** Where the prebuilt bundle is published. */
-const UPDATE_REPO = "kebab1337420/vencord-clipper";
+const UPDATE_REPO = "kebab1337420/Clibab";
 
 /** GitHub rejects an API request with no user agent, so every call carries one. */
 const UPDATE_AGENT = `VencordClipper (+https://github.com/${UPDATE_REPO})`;
@@ -1523,8 +1560,15 @@ async function fetchManifest(tag: string): Promise<Record<string, ManifestEntry>
  *
  * Returns the names of the files that were replaced.
  */
-export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string): Promise<string[]> {
+export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, installed: string): Promise<string[]> {
     if (!/^[\w.-]{1,40}$/.test(tag)) throw new Error(`Refusing to fetch a release named ${tag}`);
+
+    // The tag alone says nothing about direction: a renderer asking for an
+    // older release by name would otherwise install a downgrade over a
+    // newer bundle, hashes and all.
+    if (!isNewer(tag.replace(/^v/i, ""), String(installed ?? ""))) {
+        throw new Error(`Refusing to install ${tag}: it is not newer than the installed bundle`);
+    }
 
     const dir = bundleDirectory();
     if (!bundleInstalled(dir)) throw new Error(`No installed bundle at ${dir}`);
