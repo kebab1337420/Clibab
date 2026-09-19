@@ -244,13 +244,21 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
      *
      * Null when the timeline asks for anything the container cannot express,
      * and the caller falls back to the renderer. Saved clips start at zero,
-     * so the trim points read off the player are already clip time.
+     * so the trim points read off the player are already clip time. A file
+     * that cannot even be read is not a failure either: the renderer opens
+     * tolerant decoders the byte reader does not have.
      */
     const losslessTrim = async (): Promise<Blob | null> => {
         const src = sourceRef.current;
         if (!src || !/\.(webm|mp4)$/i.test(src.name)) return null;
 
-        const data = new Uint8Array(await (await fetch(src.url)).arrayBuffer());
+        let data: Uint8Array;
+        try {
+            data = new Uint8Array(await (await fetch(src.url)).arrayBuffer());
+        } catch (e) {
+            logger.warn("Fast trim could not read the file, rendering instead", e);
+            return null;
+        }
 
         // A native clip keeps one track per person, and every player that
         // matters plays the first audio track alone - the game, with the
