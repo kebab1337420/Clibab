@@ -4506,6 +4506,12 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [silencePreview, setSilencePreview] = useState<{ from: number; to: number; }[] | null>(null);
     const [silenceChecked, setSilenceChecked] = useState<boolean[]>([]);
 
+    // Ranges are measured against the timeline they were found on: any edit
+    // after that closes the preview rather than cutting stale coordinates.
+    useEffect(() => {
+        setSilencePreview(null);
+    }, [project.segments]);
+
     const trimSilence = () => {
         const before = projectRef.current;
         if (!before.segments.length) {
