@@ -7,7 +7,7 @@ namespace ClipperInstaller;
 
 internal static class Program
 {
-    private const string UpdateRepo = "kebab1337420/vencord-clipper";
+    private const string UpdateRepo = "kebab1337420/Clibab";
 
     [STAThread]
     private static void Main()
@@ -432,7 +432,9 @@ internal static class Program
             {
                 await using var stream = await response.Content.ReadAsStreamAsync();
                 using var doc = await JsonDocument.ParseAsync(stream);
-                files = doc.RootElement.GetProperty("files");
+                // Cloned: the element below outlives the document, and reading
+                // an uncloned one after its Dispose throws ObjectDisposed.
+                files = doc.RootElement.GetProperty("files").Clone();
             }
             catch (Exception ex) when (ex is InvalidOperationException or JsonException)
             {
