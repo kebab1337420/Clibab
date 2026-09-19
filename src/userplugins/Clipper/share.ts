@@ -24,6 +24,36 @@ import { toast } from "./toasts";
 const Native = VencordNative.pluginHelpers.Clipper as PluginNative<typeof import("./native")>;
 
 /**
+ * Copies text, the hard way when the easy way is refused.
+ *
+ * The async clipboard API wants a permission the client does not always
+ * grant the renderer; the legacy path only needs a focused document.
+ */
+async function copyText(text: string): Promise<boolean> {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch {
+        // Fall through to the legacy path.
+    }
+
+    try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand("copy");
+        area.remove();
+        return ok;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Uploads the clip and copies the link it answers with.
  *
  * True when a link was copied. The studio stays open either way: unlike a
@@ -40,16 +70,13 @@ export async function shareClipLink(name: string): Promise<boolean> {
     try {
         const url = await Native.shareClip(settings.store.saveDirectory, name);
 
-        try {
-            await navigator.clipboard.writeText(url);
-        } catch {
-            // No clipboard (or no permission): the link itself is the news,
-            // left on screen long enough to copy by hand.
+        if (await copyText(url)) {
+            toast(`Link copied: ${url}`, Toasts.Type.SUCCESS, 12000);
+        } else {
+            // No clipboard at all: the link itself is the news, left on
+            // screen long enough to copy by hand.
             toast(url, Toasts.Type.MESSAGE, 12000);
-            return true;
         }
-
-        toast(`Link copied: ${url}`, Toasts.Type.SUCCESS, 12000);
         return true;
     } catch (e) {
         logger.error("Could not share the clip", e);
