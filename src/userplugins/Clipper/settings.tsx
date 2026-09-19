@@ -32,51 +32,51 @@ export const settings = definePluginSettings({
      */
     autoStart: {
         type: OptionType.BOOLEAN,
-        description: "Start the capture buffer as soon as Discord launches, on the remembered source (the primary screen when none was picked)",
+        description: "Start the buffer automatically when Discord launches, on the last used source",
         default: false
     },
     followGame: {
         type: OptionType.BOOLEAN,
-        description: "While a game is running, record the screen it is on instead of the picked source - a game in exclusive fullscreen cannot be captured as a window, and only a screen carries the system sound",
+        description: "While a game runs, record its screen instead of the picked source. Fullscreen games can't be captured as windows",
         default: true
     },
     autoHighlight: {
         type: OptionType.BOOLEAN,
-        description: "Drop a marker by itself when something happens: gunfire out of the game, the screen going red or dark, a kill the game reported, the call going off alongside any of it. The call's own noise no longer marks anything by itself - see the setting below - because the loudest second of an evening is usually somebody swearing at a bad play",
+        description: "Drop markers automatically when something notable happens",
         default: true
     },
     voiceHighlights: {
         type: OptionType.BOOLEAN,
-        description: "Let how loud the call is count towards a marker at all. Off, and it counts for nothing while it is: the loudest second of most evenings is somebody swearing at their own bad play, and marking every one of those buried the moments worth keeping. Turn it on for a call worth clipping for its own sake, or where nothing below can read what is being played",
+        description: "Let loud moments in the call count towards auto-markers. Off by default",
         default: false
     },
     highlightSensitivity: {
         type: OptionType.SELECT,
-        description: "How much has to happen before a marker drops by itself",
+        description: "How much has to happen before an automatic marker drops",
         options: [
-            { label: "Strict - only the call properly going off", value: "strict" },
+            { label: "Strict", value: "strict" },
             { label: "Normal", value: "normal", default: true },
-            { label: "Loose - a hint of it is enough", value: "loose" }
+            { label: "Loose", value: "loose" }
         ]
     },
     gameAudioWatch: {
         type: OptionType.BOOLEAN,
-        description: "Listen to the game itself: gunfire, explosions and hits arrive across the whole spectrum at once, which a voice cannot do. Off, because the separation is not good enough in practice - there is one loopback stream and the call is inside it, so a room of people laughing puts enough through as gunfire to mark all evening. Worth turning on for a quiet call, or for playing alone",
+        description: "Listen to the game's sound for markers. Off by default: the call shares the same audio stream",
         default: false
     },
     gameVideoWatch: {
         type: OptionType.BOOLEAN,
-        description: "And watch the picture: how much it is moving, a red wash for damage, the colour draining for a death screen, a cut to black. Measured on a 64x36 copy of the frame six times a second, so the cost is negligible",
+        description: "Watch the picture for markers (motion, red flashes, fade to black). Costs almost nothing",
         default: true
     },
     gameIntegrations: {
         type: OptionType.BOOLEAN,
-        description: "Let games report what happened outright, where they offer a supported way to. Counter-Strike 2 needs a config file written into its own cfg folder and a listener on 127.0.0.1 for it to post to; League of Legends is read from the server it already runs on 127.0.0.1:2999. Nothing leaves the machine, and a kill the game reported is worth more than every guess put together",
+        description: "Let CS2 and League of Legends report their own events for markers. Nothing leaves your PC",
         default: false
     },
     autoHighlightSave: {
         type: OptionType.BOOLEAN,
-        description: "And save a clip of those moments without being asked. At most one every two minutes",
+        description: "Auto-save a clip when auto-markers fire. At most one every 2 minutes",
         default: false
     },
     clipLength: {
@@ -123,7 +123,7 @@ export const settings = definePluginSettings({
     },
     micGate: {
         type: OptionType.BOOLEAN,
-        description: "Record the microphone only while Discord would be transmitting it: above the input sensitivity, and never while you are muted in Discord. Off records everything the microphone hears, the room and the speakers included",
+        description: "Record the mic only while Discord would transmit. Off records everything the mic hears",
         default: true
     },
     audioBitrate: {
@@ -173,7 +173,7 @@ export const settings = definePluginSettings({
     },
     clipSound: {
         type: OptionType.BOOLEAN,
-        description: "Play a sound the moment a clip is taken. It is the only feedback that reaches you inside a fullscreen game, and it is kept out of the clip itself: the recording mutes the machine's own sound for exactly as long as the tone lasts",
+        description: "Play a confirmation sound when a clip is saved. Kept out of the clip itself",
         default: true
     },
     // Absolute path of a custom clip sound. Empty means the built-in blip.
@@ -194,18 +194,18 @@ export const settings = definePluginSettings({
         component: () => (
             <SettingsSection
                 title="End-of-call clips"
-                note="One saved without being asked, at the moment a call would otherwise end - and so it almost never needs the buffer running first."
+                note="One clip saved automatically when a call ends."
             />
         )
     },
     autoClipOnCallEnd: {
         type: OptionType.BOOLEAN,
-        description: "Save a short clip automatically when you leave a call or Discord closes while the buffer is running. It catches the moments nobody thinks to mark - the final play, the last words, the wipeout right as the round ends - from the tail of the clip buffer, without a key press",
+        description: "Auto-save the end of the call when you leave with the buffer running",
         default: false
     },
     autoClipEndLength: {
         type: OptionType.SLIDER,
-        description: "Seconds of the call's end to keep in that automatic clip. Capped at the buffer length: you cannot save more than is buffered",
+        description: "Seconds of the call's end to keep. Capped at the buffer length",
         markers: [5, 10, 15, 30, 45, 60],
         default: 30,
         stickToMarkers: true
@@ -218,12 +218,12 @@ export const settings = definePluginSettings({
     },
     nativeEngine: {
         type: OptionType.BOOLEAN,
-        description: "Record through Discord's own clip engine when it can (needs the Clips experiment and a window as the source). It keeps one audio track per person in the file instead of one mixed track, which is the only way a mute can remove somebody and leave the others talking. The plugin's own buffer keeps running underneath, so a clip is never lost if the engine refuses",
+        description: "Record via Discord's clip engine when available (one audio track per person). Falls back to the plugin buffer",
         default: true
     },
     panelButton: {
         type: OptionType.BOOLEAN,
-        description: "Show the floating Clipper button above the account panel (left click: pick a source, right click: start / stop / save)",
+        description: "Show the floating Clipper button above the account panel",
         default: true
     },
     /*
@@ -234,20 +234,20 @@ export const settings = definePluginSettings({
      */
     studioMode: {
         type: OptionType.SELECT,
-        description: "Which clip studio opens. Simple: pick one clip, trim a range and save it. Advanced: the full montage timeline with captions, sounds and multi-clip arrangement",
+        description: "Which editor opens: full montage timeline, or simple trim",
         options: [
-            { label: "Advanced - the full montage timeline", value: "advanced", default: true },
-            { label: "Simple - pick one clip, trim and save", value: "simple" }
+            { label: "Advanced", value: "advanced", default: true },
+            { label: "Simple", value: "simple" }
         ]
     },
     overlayNotice: {
         type: OptionType.BOOLEAN,
-        description: "Say what the plugin just did over the game, for a couple of seconds - a clip saved, or somebody in the call asking for everyone's angle. A line of text, no video, and clicks go through it. Only while Discord is not the window in front. Watching the clip itself is the keybind below, and never happens on its own",
+        description: "Show a small notice over the game when a clip is saved or requested",
         default: true
     },
     overlayCorner: {
         type: OptionType.SELECT,
-        description: "Which corner the notice and the clip appear in, on the screen your pointer is on",
+        description: "Corner where the in-game notice and replay appear",
         options: [
             { label: "Bottom right", value: "bottom-right", default: true },
             { label: "Bottom left", value: "bottom-left" },
@@ -257,23 +257,23 @@ export const settings = definePluginSettings({
     },
     overlaySize: {
         type: OptionType.SELECT,
-        description: "How big the clip window is when you call it up",
+        description: "Size of the in-game replay window",
         options: [
-            { label: "Small (320px)", value: "small" },
-            { label: "Medium (420px)", value: "medium", default: true },
-            { label: "Large (560px)", value: "large" }
+            { label: "Small", value: "small" },
+            { label: "Medium", value: "medium", default: true },
+            { label: "Large", value: "large" }
         ]
     },
     overlaySeconds: {
         type: OptionType.SLIDER,
-        description: "Seconds of the clip to play, counted back from its end - the moment you saved is the one at the end of the buffer. 0 plays the whole thing",
+        description: "Seconds to replay, counted back from the clip's end. 0 plays it all",
         markers: [0, 5, 10, 15, 20, 30, 45, 60],
         default: 10,
         stickToMarkers: true
     },
     overlayVolume: {
         type: OptionType.SLIDER,
-        description: "How loud that window is. Muted by default, since the game is already making noise - and a browser only ever allows sound here after a click, so this is a request rather than a promise",
+        description: "Volume of the in-game replay. Muted by default",
         markers: [0, 10, 25, 50, 75, 100],
         default: 0,
         stickToMarkers: false
@@ -298,7 +298,7 @@ export const settings = definePluginSettings({
     },
     globalKeybinds: {
         type: OptionType.BOOLEAN,
-        description: "Register the keybinds system-wide, so they also fire while you are in a game. Turn off to keep them Discord-only",
+        description: "Make keybinds work while in-game. Off keeps them Discord-only",
         default: true
     },
     saveKeybind: {
@@ -307,7 +307,7 @@ export const settings = definePluginSettings({
         component: () => (
             <KeybindInput
                 title="Save clip keybind"
-                note="Saves the buffered footage to a file. Registered system-wide, so it fires from inside a game too. Avoid Ctrl+R and Ctrl+Shift+R: Electron reloads the client on those before the plugin sees them."
+                note="Save the buffered footage. Avoid Ctrl+R / Ctrl+Shift+R (reserved by Electron)."
                 value={settings.store.saveKeybind}
                 onChange={v => (settings.store.saveKeybind = v)}
             />
@@ -319,7 +319,7 @@ export const settings = definePluginSettings({
         component: () => (
             <KeybindInput
                 title="Start / stop capture keybind"
-                note="Starts the rolling buffer or stops it. Registered system-wide too."
+                note="Start or stop the rolling buffer."
                 value={settings.store.toggleKeybind}
                 onChange={v => (settings.store.toggleKeybind = v)}
             />
@@ -331,7 +331,7 @@ export const settings = definePluginSettings({
         component: () => (
             <KeybindInput
                 title="Drop a marker keybind"
-                note="Notes the moment without saving anything. Every marker inside the clip you save afterwards shows up on the studio timeline, so you can find the play again without scrubbing for it."
+                note="Drop a marker without saving. Markers show on the studio timeline."
                 value={settings.store.markKeybind}
                 onChange={v => (settings.store.markKeybind = v)}
             />
@@ -343,7 +343,7 @@ export const settings = definePluginSettings({
         component: () => (
             <KeybindInput
                 title="Clip everyone's angle keybind"
-                note="Saves your own clip and posts a message in the call's chat asking everyone else running Clipper to save theirs. The message is plain text and says what it does, so the people without the plugin see the same thing you sent."
+                note="Save your clip and ask everyone in the call to save theirs (plain-text chat message)."
                 value={settings.store.povKeybind}
                 onChange={v => (settings.store.povKeybind = v)}
             />
@@ -355,7 +355,7 @@ export const settings = definePluginSettings({
         component: () => (
             <KeybindInput
                 title="Clip editor keybind"
-                note="Opens the clip you saved last in an editor over the game, and hands it the mouse: watch it, pick a range out of it, cut it, send it, delete it or take it to the full studio. A second press gives the mouse back to the game and closes it, and so does Escape."
+                note="Open the last clip in the in-game editor."
                 value={settings.store.replayKeybind}
                 onChange={v => (settings.store.replayKeybind = v)}
             />
@@ -363,12 +363,12 @@ export const settings = definePluginSettings({
     },
     povRequests: {
         type: OptionType.BOOLEAN,
-        description: "Save your own clip when somebody else in your call asks for everyone's angle. Only from people in the call you are currently in, only while your buffer is already running, and at most one every ten seconds - so it can never write a clip you could not have saved yourself a second earlier. You are told over the game when it happens, or in Discord when you are looking at it",
+        description: "Auto-save your clip when someone in your call requests everyone's angle (max one per 10s)",
         default: true
     },
     povCleanup: {
         type: OptionType.BOOLEAN,
-        description: "Delete your own request message a few seconds after sending it. The message is only how the request reaches the other clients - everyone running Clipper is told over their game instead - so this keeps the channel from filling up with them. Turn it off to leave them in the chat",
+        description: "Delete your own multi-angle request message after a few seconds",
         default: true
     },
     /*
@@ -400,7 +400,7 @@ export const settings = definePluginSettings({
     vrControls: {
         hidden: () => !settings.store.vrInstalled,
         type: OptionType.BOOLEAN,
-        description: "Let the clip controls be worked from a VR controller. Attaches to SteamVR whenever it is running and lets go when it stops, so it costs nothing on the days you are not in VR - and it never starts SteamVR itself. The actions are the same ones the keybinds fire, and they are bound in SteamVR's own binding panel, next to the bindings for every game",
+        description: "Control Clipper from a VR controller via SteamVR bindings",
         default: false
     },
     vrBindings: {
@@ -411,13 +411,13 @@ export const settings = definePluginSettings({
     vrPanel: {
         hidden: () => !settings.store.vrInstalled,
         type: OptionType.BOOLEAN,
-        description: "And draw the plugin's notices inside the headset. A small card a metre in front of you saying what a button just did and how a clip ended up, for a few seconds - because every other way the plugin has of telling you is a toast on a monitor you cannot see. It needs nothing installed and no graphics card time: the picture is drawn in Discord and handed to SteamVR's compositor as it is",
+        description: "Show notices inside the headset",
         default: true
     },
     vrMotionWatch: {
         hidden: () => !settings.store.vrInstalled,
         type: OptionType.BOOLEAN,
-        description: "And let where your hands are count towards a marker. No VR game reports its kills, and what the picture watcher sees in VR is a distorted one-eye mirror window, so both of the usual detectors are nearly blind here - but a hand moving at five metres a second is not something that happens while you sit still. It is corroboration only: on its own it never marks anything, however hard you swing",
+        description: "Let fast hand movement count towards markers (corroboration only)",
         default: true
     },
     updatesSection: {
@@ -425,7 +425,7 @@ export const settings = definePluginSettings({
         component: () => (
             <SettingsSection
                 title="Updates"
-                note="The plugin is installed as a finished bundle, so it checks for a newer one itself."
+                note="The plugin ships as a bundle and updates itself."
             />
         )
     },
@@ -435,12 +435,12 @@ export const settings = definePluginSettings({
     },
     updateCheck: {
         type: OptionType.BOOLEAN,
-        description: "Look for a newer Clipper release when Discord starts. Nothing is downloaded by the check itself",
+        description: "Check for updates when Discord starts. The check downloads nothing",
         default: true
     },
     updateAutomatic: {
         type: OptionType.BOOLEAN,
-        description: "Install a newer release as soon as the check finds one, instead of asking first. It still only takes effect on the next Discord restart",
+        description: "Install updates without asking. Takes effect on next restart",
         default: false
     }
 });

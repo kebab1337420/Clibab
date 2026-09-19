@@ -12,7 +12,8 @@ test("capture frame rates remain finite and within encoder limits", () => {
     assert.equal(utils.captureFrameRate(24), 24);
     assert.equal(utils.captureFrameRate(30), 30);
     assert.equal(utils.captureFrameRate(60), 60);
-    assert.equal(utils.captureFrameRate(240), 60);
+    assert.equal(utils.captureFrameRate(120), 120);
+    assert.equal(utils.captureFrameRate(240), 120);
 });
 
 test("video bitrate settings produce bounded bits per second for the encoder", () => {
