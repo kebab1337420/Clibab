@@ -278,7 +278,7 @@ function onMessage({ message, optimistic }: { message?: IncomingMessage; optimis
         // thing left to do with it is to take it down again.
         if (author === myId()) {
             const ours = Date.now() - askedAt < CLEANUP_WINDOW;
-            if (!ours || !settings.store.povCleanup || !message.id || !message.channel_id) return;
+            if (!ours || !message.id || !message.channel_id) return;
 
             askedAt = 0;
             takeDown(message.channel_id, message.id);

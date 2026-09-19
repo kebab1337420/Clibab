@@ -313,6 +313,14 @@ export function suspendKeybinds(): () => void {
 export const TIMESLICE = 1000;
 
 /**
+ * Short-save lengths offered wherever a clip is cut down, shortest first.
+ *
+ * Shared by the overlay menu, the replay card and the in-game editor, which
+ * each had their own copy with their own upper bound.
+ */
+export const TRIM_CUTS = [15, 30, 60];
+
+/**
  * Something readable out of anything that was thrown.
  *
  * `String(e)` alone is what put `[object Object]` in front of a user instead of

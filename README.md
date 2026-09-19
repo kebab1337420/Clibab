@@ -337,8 +337,8 @@ quietly — run `install.bat` again in that case.
 
 | Action | Default |
 | --- | --- |
-| Start / stop the buffer | `Alt + F9`, panel button menu, chat bar button right click, or toolbox |
-| Save the last N seconds | `Alt + F10`, panel or chat bar button left click, or toolbox |
+| Start / stop the buffer | `Ctrl + Alt + F9`, panel button menu, chat bar button right click, or toolbox |
+| Save the last N seconds | `Ctrl + Alt + F10`, panel or chat bar button left click, or toolbox |
 | Trim, cut or montage clips | Panel button right click → *Open the clip studio*, or toolbox |
 | Manage the clip folder | Same window: pick a clip on the left, then rename / reveal / delete / file it |
 | Sort clips by game | Category dropdown above the clip list; *File it* refiles the picked clip |

@@ -71,7 +71,7 @@ import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
 import { shareClipLink } from "../share";
-import { Container, extensionFor, pickMimeType } from "../settings";
+import { Container, extensionFor, pickMimeType, settings } from "../settings";
 import {
     type AngleLayout,
     type AvatarCache,
@@ -217,6 +217,22 @@ export const STUDIO_CSS = `
     transform: scale(.97);
 }
 .vc-clipper-studio-ok:disabled {
+    opacity: .5;
+    cursor: default;
+}
+.vc-clipper-studio-switch {
+    padding: 7px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+}
+.vc-clipper-studio-switch:hover:not(:disabled) {
+    background: var(--button-secondary-background-hover, #6d6f78);
+}
+.vc-clipper-studio-switch:disabled {
     opacity: .5;
     cursor: default;
 }
@@ -5381,6 +5397,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                         <small>{headline}</small>
                     </div>
                     <div className="vc-clipper-studio-head-right">
+                        <button className="vc-clipper-studio-switch" disabled={busy} title="Switch to the simple trimmer" onClick={() => { settings.store.studioMode = "simple"; }}>Simple</button>
                         <button className="vc-clipper-studio-ok" disabled={busy} onClick={onClose}>Done</button>
                         <button className="vc-clipper-studio-close" onClick={onClose} disabled={busy} aria-label="Close">
                             <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
