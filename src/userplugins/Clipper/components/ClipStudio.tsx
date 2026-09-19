@@ -78,7 +78,7 @@ import {
     bestOf,
     type Caption,
     cutRange,
-    cutSilence,
+    previewSilence,
     decodeImage,
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -1116,6 +1116,53 @@ export const STUDIO_CSS = `
 .vc-clipper-ruler-actions button:disabled {
     opacity: .4;
     cursor: default;
+}
+.vc-clipper-silence {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--background-tertiary, #1e1f22);
+    font-size: 12px;
+}
+.vc-clipper-silence-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--text-normal, #dbdee1);
+    font-weight: 600;
+}
+.vc-clipper-silence-head button {
+    padding: 4px 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
+    color: var(--text-muted, #949ba4);
+    font-size: 11px;
+    cursor: pointer;
+}
+.vc-clipper-silence-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    color: var(--text-muted, #949ba4);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+.vc-clipper-silence-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+.vc-clipper-silence-actions button:not(.vc-clipper-studio-ok) {
+    padding: 7px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
 }
 .vc-clipper-ruler-actions button.vc-clipper-danger:not(:disabled) {
     background: var(--button-danger-background, #da373c);
@@ -4307,6 +4354,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * found: a montage that comes back the same length is one whose sources
      * never carried the activity, not one with no dead air in it.
      */
+    /*
+     * Dead-air preview: what "Trim silence" would cut, listed for approval.
+     * Ranges plus one checked flag each, in timeline order; the cut walks
+     * them back to front the way cutSilence does.
+     */
+    const [silencePreview, setSilencePreview] = useState<{ from: number; to: number; }[] | null>(null);
+    const [silenceChecked, setSilenceChecked] = useState<boolean[]>([]);
+
     const trimSilence = () => {
         const before = projectRef.current;
         if (!before.segments.length) {
@@ -4314,10 +4369,36 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             return;
         }
 
-        const { project: next, removed, ranges } = cutSilence(before, sourcesRef.current);
+        const found = previewSilence(before, sourcesRef.current);
+        if (!found.length) {
+            toast("Found no dead air to cut", Toasts.Type.FAILURE);
+            return;
+        }
+
+        setSilencePreview(found);
+        setSilenceChecked(found.map(() => true));
+    };
+
+    const applySilenceCut = () => {
+        const picked = (silencePreview ?? []).filter((_, i) => silenceChecked[i]);
+        setSilencePreview(null);
+        if (!picked.length) return;
+
+        const before = projectRef.current;
+        let next = before;
+        let removed = 0;
+        let ranges = 0;
+
+        for (const { from, to } of [...picked].sort((a, b) => b.from - a.from)) {
+            const after = cutRange(next, from, to);
+            if (after === next || !after.segments.length) continue;
+            next = after;
+            removed += to - from;
+            ranges++;
+        }
 
         if (next === before || !ranges) {
-            toast("Found no dead air to cut", Toasts.Type.FAILURE);
+            toast("Nothing could be cut off those stretches", Toasts.Type.FAILURE);
             return;
         }
 
@@ -5721,10 +5802,34 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         <button
                                             disabled={busy}
                                             onClick={trimSilence}
-                                            title="Cut every stretch nobody is talking over, using the clip's own voice lanes"
+                                            title="List every stretch nobody is talking over, using the clip's own voice lanes"
                                         >
                                             Trim silence
                                         </button>
+                                    </div>
+                                )}
+                                {!!silencePreview && (
+                                    <div className="vc-clipper-silence">
+                                        <div className="vc-clipper-silence-head">
+                                            <span>Cut the checked stretches ({silenceChecked.filter(Boolean).length}/{silencePreview.length})</span>
+                                            <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => true))}>All</button>
+                                            <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => false))}>None</button>
+                                        </div>
+                                        {silencePreview.map((range, i) => (
+                                            <label key={`${range.from}-${range.to}-${i}`} className="vc-clipper-silence-row">
+                                                <input
+                                                    type="checkbox"
+                                                    disabled={busy}
+                                                    checked={!!silenceChecked[i]}
+                                                    onChange={() => setSilenceChecked(prev => prev.map((v, j) => j === i ? !v : v))}
+                                                />
+                                                <span>{formatTime(range.from)} - {formatTime(range.to)} ({formatTime(range.to - range.from)})</span>
+                                            </label>
+                                        ))}
+                                        <div className="vc-clipper-silence-actions">
+                                            <button className="vc-clipper-studio-ok" disabled={busy} onClick={applySilenceCut}>Cut checked</button>
+                                            <button disabled={busy} onClick={() => setSilencePreview(null)}>Cancel</button>
+                                        </div>
                                     </div>
                                 )}
                             </div>
