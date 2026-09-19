@@ -14,7 +14,7 @@
 import { createHash } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { get as httpsGet } from "https";
+import { get as httpsGet, request as httpsRequest } from "https";
 import { basename, extname, isAbsolute, join } from "path";
 
 import { closeFeeds, type FeedStatus, type GameEvent, startFeeds, status as feedStatus, waitForFeedEvent } from "./gameFeeds";
@@ -373,6 +373,72 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
     } finally {
         closeSync(fd);
     }
+}
+
+/**
+ * Uploads a clip to a file host and answers with its link.
+ *
+ * Discord caps attachments, and squeezing a clip down to fit costs quality
+ * the moment never had to lose. catbox.moe takes 200MB per file with no
+ * account and keeps it, so the link bypasses the limit instead of the
+ * quality. The upload runs here rather than in the renderer: the file is
+ * read off disk directly, never copied over IPC, and there is no page
+ * whose CSP or CORS gets a vote.
+ */
+const SHARE_LIMIT_BYTES = 200 * 1024 * 1024;
+const SHARE_ENDPOINT = "https://catbox.moe/user/api.php";
+
+export function shareClip(_: IpcMainInvokeEvent, dir: string, name: string): Promise<string> {
+    const clip = clipName(name);
+    if (!clip) throw new Error("That is not a clip name");
+    if (!/\.(webm|mp4)$/i.test(clip)) throw new Error("Only video clips can be shared as a link");
+
+    const path = join(resolveDirectory(dir), clip);
+    const fd = openSync(path, "r");
+    let data: Buffer;
+    try {
+        const { size } = fstatSync(fd);
+        if (size > SHARE_LIMIT_BYTES) throw new Error("That clip is over 200MB - shorten it in the studio first");
+        data = readFileSync(fd);
+    } finally {
+        closeSync(fd);
+    }
+
+    const boundary = `clipper-${Date.now().toString(16)}-${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
+    const type = clip.toLowerCase().endsWith(".mp4") ? "video/mp4" : "video/webm";
+    const head = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="fileToUpload"; filename="${clip}"\r\nContent-Type: ${type}\r\n\r\n`,
+        "utf8"
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+
+    return new Promise((resolve, reject) => {
+        const request = httpsRequest(SHARE_ENDPOINT, {
+            method: "POST",
+            headers: {
+                "User-Agent": UPDATE_AGENT,
+                "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                "Content-Length": head.length + data.length + tail.length
+            }
+        }, response => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk: Buffer) => chunks.push(chunk));
+            response.on("end", () => {
+                const body = Buffer.concat(chunks).toString("utf8").trim();
+                if ((response.statusCode ?? 0) !== 200) reject(new Error(`The host answered ${response.statusCode ?? "?"} - try again later`));
+                else if (!/^https:\/\//.test(body)) reject(new Error("The host did not return a link - try again later"));
+                else resolve(body);
+            });
+            response.on("error", reject);
+        });
+
+        request.setTimeout(300_000, () => request.destroy(new Error("The upload timed out - try again on a faster connection")));
+        request.on("error", reject);
+        request.write(head);
+        request.write(data);
+        request.end(tail);
+    });
 }
 
 /** Moves a clip to the trash, so a mis-click stays undoable. */

@@ -70,6 +70,7 @@ import {
 import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
+import { shareClipLink } from "../share";
 import { Container, extensionFor, pickMimeType } from "../settings";
 import {
     type AngleLayout,
@@ -5265,6 +5266,11 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         if (await sendClipFitted(name)) onClose();
     };
 
+    /** Uploads the clip and copies a share link, so Discord's size limit never applies. */
+    const onShareLink = async (name: string) => {
+        await shareClipLink(name);
+    };
+
     const slider = (label: string, value: number, min: number, max: number, step: number, onChange: (v: number) => void, suffix = "") => (
         <div className="vc-clipper-field">
             <label>
@@ -5485,6 +5491,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     </button>
                                     <button disabled={busy} title="Attach it to the channel behind the studio" onClick={() => void onSend(picked)}>
                                         Send
+                                    </button>
+                                    <button disabled={busy} title="Upload it and copy a share link instead of the file" onClick={() => void onShareLink(picked)}>
+                                        Link
                                     </button>
                                     <button disabled={busy} title="Show the file in the folder" onClick={() => void revealClip(picked)}>
                                         Folder
