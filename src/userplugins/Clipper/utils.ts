@@ -21,7 +21,7 @@ export function thumbNameFor(name: string): string {
 
 export function captureFrameRate(value: unknown): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 30;
-    return Math.min(60, Math.max(1, value));
+    return Math.min(120, Math.max(1, value));
 }
 
 export function captureVideoBitrate(value: unknown): number {
