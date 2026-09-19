@@ -708,6 +708,7 @@ function CaptureOptions() {
         settings.store.videoBitrate = preset.bitrate;
         settings.store.clipLength = preset.length;
         restartIfLive();
+        toast(`Preset ${preset.label}: ${preset.resolution}p${preset.fps} at ${preset.bitrate}Mbps for ${preset.length}s`, Toasts.Type.SUCCESS);
     };
 
     const presetMatch = CAPTURE_PRESETS.find(p =>
