@@ -69,6 +69,10 @@ function readVint(data: Uint8Array, pos: number): Vint | null {
 }
 
 function readUint(data: Uint8Array, pos: number, length: number): number {
+    // A length that reaches past the buffer belongs to a file that disagrees
+    // with itself, and reading it would hand the tracker undefined bytes.
+    if (length < 1 || pos + length > data.length) return 0;
+
     let value = 0;
     for (let i = 0; i < length; i++) value = value * 256 + data[pos + i];
     return value;

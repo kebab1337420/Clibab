@@ -414,7 +414,7 @@ const GRAIN_S = 0.08;
 const OVERLAP_S = 0.02;
 
 /** The last stretch, so playing a segment again does not recompute it. */
-let stretched: { from: AudioBuffer; rate: number; buffer: AudioBuffer; } | null = null;
+let stretched: { from: AudioBuffer; rate: number; buffer: AudioBuffer; ctxRate: number; } | null = null;
 
 /**
  * The same audio at `rate` speed, with its pitch left where it was.
@@ -424,7 +424,7 @@ let stretched: { from: AudioBuffer; rate: number; buffer: AudioBuffer; } | null 
  */
 export function stretchToRate(ctx: BaseAudioContext, buffer: AudioBuffer, rate: number): AudioBuffer {
     if (!Number.isFinite(rate) || Math.abs(rate - 1) < 0.01) return buffer;
-    if (stretched && stretched.from === buffer && stretched.rate === rate) return stretched.buffer;
+    if (stretched && stretched.from === buffer && stretched.rate === rate && stretched.ctxRate === ctx.sampleRate) return stretched.buffer;
 
     const { sampleRate, numberOfChannels } = buffer;
     const length = Math.max(1, Math.round(buffer.length / rate));
@@ -469,7 +469,7 @@ export function stretchToRate(ctx: BaseAudioContext, buffer: AudioBuffer, rate: 
         }
     }
 
-    stretched = { from: buffer, rate, buffer: out };
+    stretched = { from: buffer, rate, buffer: out, ctxRate: ctx.sampleRate };
     return out;
 }
 

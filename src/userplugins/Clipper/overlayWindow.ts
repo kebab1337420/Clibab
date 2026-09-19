@@ -279,8 +279,9 @@ function toastPage(title: string, note: string): string {
 ${head(`.card {
         background: rgba(20, 21, 24, 0.92); display: flex; align-items: center; gap: 10px; padding: 0 14px;
         font: 12px/1.3 "gg sans", "Segoe UI", system-ui, sans-serif; color: #fff;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 34px rgba(0, 0, 0, 0.6);
     }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: #f23f43; flex: none; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #da373c; flex: none; box-shadow: 0 0 0 3px rgba(218, 55, 60, 0.2); }
     .text { min-width: 0; }
     .title { font-weight: 600; font-size: 13px; }
     .note { opacity: 0.72; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }`)}

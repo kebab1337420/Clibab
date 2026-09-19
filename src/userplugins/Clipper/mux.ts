@@ -44,6 +44,16 @@ const logger = new Logger("Clipper");
 /** Movie timescale of the file written out. Milliseconds, for legibility. */
 const MOVIE_TIMESCALE = 1000;
 
+/**
+ * Track timescale read off a hostile file. A zero or negative `mdhd` value
+ * garbles every `duration / timescale` further down (Infinity, NaN, and a
+ * `u32` write that moov cannot survive), so anything not sane is milliseconds,
+ * the same frame the output file thinks in.
+ */
+function safeTimescale(value: number): number {
+    return value > 0 ? value : MOVIE_TIMESCALE;
+}
+
 interface Sample {
     /** Offset of the sample's bytes inside the file it came from. */
     at: number;
@@ -151,9 +161,9 @@ function readFragmented(data: Uint8Array): Track[] {
 
         tracks.set(trackId, {
             kind,
-            timescale: view.getUint8(mdhd.start) === 1
+            timescale: safeTimescale(view.getUint8(mdhd.start) === 1
                 ? view.getUint32(mdhd.start + 20)
-                : view.getUint32(mdhd.start + 12),
+                : view.getUint32(mdhd.start + 12)),
             stsd: data.subarray(stsd.start - 8, stsd.end),
             handler: handlerName(data, hdlr),
             enabled: true,
@@ -221,8 +231,6 @@ function readFragmented(data: Uint8Array): Track[] {
 
             for (const trun of parts.filter(box => box.type === "trun")) {
                 const trunFlags = view.getUint32(trun.start) & 0xffffff;
-                const count = view.getUint32(trun.start + 4);
-
                 let read = trun.start + 8;
                 let offset = base;
 
@@ -236,6 +244,23 @@ function readFragmented(data: Uint8Array): Track[] {
                     firstFlags = view.getUint32(read);
                     read += 4;
                 }
+
+                // The declared sample count is trusted only up to what the box
+                // body could physically hold: fields are four bytes each, so an
+                // entry with all four present costs sixteen, one with none costs
+                // nothing, and making the padding assumptions explicit keeps a
+                // four-billion-sample header from looping (and allocating) until
+                // the tab dies. A default-only trun still gets a floor of one
+                // field per declared sample, so the worst case grows the samples
+                // array no faster than the file itself.
+                const entryBytes =
+                    (trunFlags & 0x000100 ? 4 : 0)
+                    + (trunFlags & 0x000200 ? 4 : 0)
+                    + (trunFlags & 0x000400 ? 4 : 0)
+                    + (trunFlags & 0x000800 ? 4 : 0);
+                const claimed = view.getUint32(trun.start + 4);
+                const room = Math.max(0, trun.end - read);
+                const count = Math.min(claimed, entryBytes ? Math.floor(room / entryBytes) : Math.max(0, Math.floor(room / 4)));
 
                 for (let i = 0; i < count; i++) {
                     let duration = defaultDuration;
@@ -342,7 +367,11 @@ function readPlainAudio(data: Uint8Array): Track[] {
 
         // Sizes.
         const uniform = view.getUint32(stsz.start + 4);
-        const count = view.getUint32(stsz.start + 8);
+        // The table counts come from the file and are never trusted with a
+        // loop or an allocation: each is capped at what its own box could
+        // physically hold, so a four-billion-sample claim grows arrays only
+        // as large as the file that stated it.
+        const count = Math.min(view.getUint32(stsz.start + 8), Math.max(0, Math.floor((stsz.end - (stsz.start + 12)) / 4)));
         const sizes: number[] = [];
 
         for (let i = 0; i < count; i++) {
@@ -351,7 +380,7 @@ function readPlainAudio(data: Uint8Array): Track[] {
 
         // Durations, run-length encoded in the file.
         const durations: number[] = [];
-        const runs = view.getUint32(stts.start + 4);
+        const runs = Math.min(view.getUint32(stts.start + 4), Math.max(0, Math.floor((stts.end - (stts.start + 8)) / 8)));
 
         for (let i = 0; i < runs; i++) {
             const times = view.getUint32(stts.start + 8 + i * 8);
@@ -363,8 +392,11 @@ function readPlainAudio(data: Uint8Array): Track[] {
 
         // Where each sample sits, walked chunk by chunk.
         const chunkOffsets: number[] = [];
-        const chunks = view.getUint32(stco.start + 4);
         const wide = stco.type === "co64";
+        const chunks = Math.min(
+            view.getUint32(stco.start + 4),
+            Math.max(0, Math.floor((stco.end - (stco.start + 8)) / (wide ? 8 : 4)))
+        );
 
         for (let i = 0; i < chunks; i++) {
             chunkOffsets.push(wide
@@ -373,7 +405,7 @@ function readPlainAudio(data: Uint8Array): Track[] {
         }
 
         const groups: Array<{ first: number; per: number; }> = [];
-        const entries = view.getUint32(stsc.start + 4);
+        const entries = Math.min(view.getUint32(stsc.start + 4), Math.max(0, Math.floor((stsc.end - (stsc.start + 8)) / 12)));
 
         for (let i = 0; i < entries; i++) {
             groups.push({
@@ -414,16 +446,23 @@ function readPlainAudio(data: Uint8Array): Track[] {
         if (elst) {
             const version = view.getUint8(elst.start);
             const listed = view.getUint32(elst.start + 4);
+            // The count is a field of a hostile file, and each entry is 12 or
+            // 20 bytes: the loop walks exactly what the box can hold, never
+            // the four billion entries a forged count asks for.
+            const count = Math.min(listed, Math.max(0, Math.floor((elst.end - (elst.start + 8)) / (version === 1 ? 20 : 12))));
             let read = elst.start + 8;
 
-            for (let i = 0; i < listed; i++) {
+            for (let i = 0; i < count; i++) {
                 const duration = version === 1 ? Number(view.getBigUint64(read)) : view.getUint32(read);
                 const media = version === 1
                     ? Number(view.getBigInt64(read + 8))
                     : view.getInt32(read + (version === 1 ? 8 : 4));
 
-                // An empty edit - media time -1 - is a gap of its own duration.
-                if (media === -1) offset += duration / movieTimescale;
+                // An empty edit - negative media time, written as -1 - is a gap
+                // of its own duration. Any negative does it: the two readers
+                // have to agree or a voice lands beside the words it should
+                // have kept.
+                if (media < 0) offset += duration / movieTimescale;
 
                 read += version === 1 ? 20 : 12;
             }
@@ -431,9 +470,9 @@ function readPlainAudio(data: Uint8Array): Track[] {
 
         found.push({
             kind: "soun",
-            timescale: view.getUint8(mdhd.start) === 1
+            timescale: safeTimescale(view.getUint8(mdhd.start) === 1
                 ? view.getUint32(mdhd.start + 20)
-                : view.getUint32(mdhd.start + 12),
+                : view.getUint32(mdhd.start + 12)),
             stsd: data.subarray(stsd.start - 8, stsd.end),
             handler: handlerName(data, hdlr),
 

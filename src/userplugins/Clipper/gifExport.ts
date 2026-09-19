@@ -38,6 +38,18 @@ const DEFAULT_WIDTH = 480;
 /** Longest piece worth making a GIF of, whatever was asked for. */
 const MAX_SECONDS = 15;
 
+/**
+ * Hard ceilings on a request. The frame count is fps x MAX_SECONDS and every
+ * frame is a full-width image in memory, so a 120fps grab at a width nobody
+ * checked is how a renderer's memory dies; requests under these are taken as
+ * asked, nothing above them is.
+ */
+const MAX_FPS = 30;
+const MAX_WIDTH = 480;
+
+/** How long a clip is waited on to hand over its first frame of data. */
+const LOAD_TIMEOUT_MS = 10_000;
+
 export interface GifRequest {
     /** Seconds into the clip, or the beginning. */
     from?: number;
@@ -94,7 +106,9 @@ async function urlToGif(url: string, request: GifRequest = {}): Promise<GifResul
     const frames = await grabFrames(url, request);
     if (!frames.length) throw new Error("Nothing could be read out of that clip");
 
-    const fps = request.fps || DEFAULT_FPS;
+    // The ladder below derives its rate from this fps, so the clamp used when
+    // grabbing has to be the same value the encoder's timing was built on.
+    const fps = Math.min(MAX_FPS, request.fps || DEFAULT_FPS);
 
     let last: GifResult | null = null;
 
@@ -102,7 +116,10 @@ async function urlToGif(url: string, request: GifRequest = {}): Promise<GifResul
         onProgress?.(last ? "Too big - trying again smaller" : "Encoding");
 
         const picked = rung.every === 1 ? frames : frames.filter((_, i) => i % rung.every === 0);
-        const scaled = rung.scale === 1 ? picked : rescale(picked, rung.scale);
+        // Only the last rung may free the frames it downsized from: the picks
+        // of every rung up to it are the same backing ImageData, still needed
+        // until the coarser picks have had their turn.
+        const scaled = rung.scale === 1 ? picked : rescale(picked, rung.scale, rung === LADDER[LADDER.length - 1]);
         const rate = fps / rung.every;
 
         const blob = encodeGif(scaled, { delay: 1000 / rate, colors: rung.colors });
@@ -140,14 +157,41 @@ export async function saveGif(clipName: string, blob: Blob): Promise<string> {
  * and exact is what keeps a GIF from stuttering.
  */
 async function grabFrames(url: string, { from, to, fps = DEFAULT_FPS, width = DEFAULT_WIDTH, onProgress }: GifRequest): Promise<ImageData[]> {
+    // What reaches the canvas and the frame count is what the tab pays for in
+    // memory, whatever the caller meant by the numbers.
+    fps = Math.min(MAX_FPS, fps);
+    width = Math.min(MAX_WIDTH, width);
+
     const video = document.createElement("video");
     video.src = url;
     video.muted = true;
     video.preload = "auto";
 
+    // Loaded or bust, within a timeout: a clip that stalls somewhere hands
+    // nothing back, and a promise that never settles reads as a hung save.
     await new Promise<void>((resolve, reject) => {
-        video.onloadeddata = () => resolve();
-        video.onerror = () => reject(new Error("That clip could not be decoded"));
+        // A clip already in the cache hands its data over before the handlers
+        // below could be attached, so the ready state is checked, not waited on.
+        if (video.readyState >= 2) return resolve();
+
+        let done = false;
+
+        const settle = (error?: Error) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            video.removeEventListener("loadeddata", onLoad);
+            video.removeEventListener("error", onError);
+            if (error) reject(error);
+            else resolve();
+        };
+        const onLoad = () => settle();
+        const onError = () => settle(new Error("That clip could not be decoded"));
+
+        const timer = setTimeout(() => settle(new Error("That clip took too long to load")), LOAD_TIMEOUT_MS);
+
+        video.addEventListener("loadeddata", onLoad);
+        video.addEventListener("error", onError);
     });
 
     // A live-recorded container has no duration in its header, and a rolling
@@ -191,14 +235,22 @@ async function grabFrames(url: string, { from, to, fps = DEFAULT_FPS, width = DE
             if (i % 10 === 0) onProgress?.(`Reading the clip (${i + 1}/${total})`);
         }
     } finally {
-        video.src = "";
+        video.removeAttribute("src");
+        video.load();
     }
 
     return frames;
 }
 
-/** Redraws every frame smaller, through a canvas, since ImageData cannot scale. */
-function rescale(frames: ImageData[], scale: number): ImageData[] {
+/**
+ * Redraws every frame smaller, through a canvas, since ImageData cannot scale.
+ *
+ * At full resolution every frame is the whole clip in raw pixels, and each
+ * rung of the ladder is a fresh full-size copy of it; when consume is set the
+ * caller is done with the originals, so their buffers are emptied the moment
+ * they have been drawn and can be collected instead of stacking the ladder.
+ */
+function rescale(frames: ImageData[], scale: number, consume = false): ImageData[] {
     const width = Math.max(1, Math.round(frames[0].width * scale));
     const height = Math.max(1, Math.round(frames[0].height * scale));
 
@@ -216,9 +268,15 @@ function rescale(frames: ImageData[], scale: number): ImageData[] {
 
     into.imageSmoothingQuality = "high";
 
-    return frames.map(frame => {
+    return frames.map((frame, index) => {
         from.putImageData(frame, 0, 0);
         into.drawImage(source, 0, 0, width, height);
+
+        // The scaled copy is what the encoder wants; the source frame's pixels
+        // are not, once the last rung that reads them has had them. The entry is
+        // replaced with a tiny ImageData (ImageData.data itself is read-only) so
+        // the full-size buffer can be collected instead of held past the ladder.
+        if (consume) frames[index] = new ImageData(1, 1);
 
         return into.getImageData(0, 0, width, height);
     });

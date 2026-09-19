@@ -99,7 +99,7 @@ function Person({ person, level, meter, compact, onChange }: {
                 step={5}
                 value={Math.round(level.gain * 100)}
                 disabled={disabled}
-                style={{ flex: 1, minWidth: 70, accentColor: "var(--brand-experiment, #5865f2)" }}
+                style={{ flex: 1, minWidth: 70, "--vc-fill": `${Math.round(level.gain * 100 / 3)}%` } as React.CSSProperties}
                 onChange={e => onChange({ ...level, gain: clampGain(Number(e.currentTarget.value) / 100) })}
             />
 
@@ -188,7 +188,7 @@ function Voices({ compact, recording, voices, onChange }: {
 
             <Paragraph style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted, #949ba4)" }}>
                 {compact
-                    ? "One channel per person, applied to the clips saved from now on - the clip on the timeline has its own levels in the Voices tab. Everybody is recorded on a track of their own, so a mute leaves them out of the mix rather than filtering them out of it, and your headphones are not touched."
+                    ? "One channel per person, added to clips saved from now on so a mute leaves them out of the mix, not out of the recording. Your headphones are untouched, and every level can still be changed in the studio."
                     : "One channel per person in the call, saved with the clip and applied when it is put back together. Everybody is recorded on a track of their own beside the clip, so turning somebody down changes the level their own recording is added back at, and muting them leaves their track out of the sum - the others carry on over the hole where they were. None of this touches what you hear while you play, and any of it can still be changed afterwards in the studio."}
             </Paragraph>
 

@@ -1,6 +1,6 @@
 # The module map
 
-Seventy-two files, about thirty-five thousand lines. The root `README.md` says what
+Seventy-four files, about thirty-five thousand lines. The root `README.md` says what
 the plugin does for the person using it; this says where each part of it lives,
 so that a change can start from the right file instead of from a search.
 

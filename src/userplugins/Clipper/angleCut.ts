@@ -233,7 +233,7 @@ function pickShots(rows: Score[][], options: AngleCutOptions): Shot[] {
 
     while (step < rows.length) {
         const window = Math.min(minSteps, rows.length - step);
-        const scores = rows[step].map((unused, i) => over(rows, i, step, step + window));
+        const scores = rows[step].map((_, i) => over(rows, i, step, step + window));
 
         let pick = -1;
         let best = -1;

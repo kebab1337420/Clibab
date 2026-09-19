@@ -155,14 +155,15 @@ export function stopVr(): void {
 
     if (!supported()) return;
 
-    try {
-        // A promise, like every other call over IPC: a throw on the far side
-        // never reaches the catch below, so it needs catching where it lands.
-        void Promise.resolve(Native.stopVrBridge())
-            .catch(e => logger.warn("Could not stop the SteamVR bridge", e));
-    } catch (e) {
-        logger.warn("Could not stop the SteamVR bridge", e);
-    }
+    // One guard for both halves of a failing stop: a throw on the far side of
+    // IPC surfaces as a rejection, but the call itself can throw too.
+    void (async () => {
+        try {
+            await Native.stopVrBridge();
+        } catch (e) {
+            logger.warn("Could not stop the SteamVR bridge", e);
+        }
+    })();
 }
 
 /**

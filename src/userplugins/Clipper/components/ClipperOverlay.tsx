@@ -27,10 +27,11 @@ import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerO
 import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
 import { toast } from "../toasts";
-import { formatBytes } from "../utils";
+import { formatBytes, formatTime } from "../utils";
 import { BufferPreview } from "./BufferPreview";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
+import { SimpleStudio } from "./SimpleStudio";
 
 const STYLE_ID = "vc-clipper-style";
 
@@ -54,27 +55,79 @@ const CSS = `
 }
 
 .vc-clipper-trigger {
-    width: 34px;
-    height: 34px;
+    height: 36px;
+    gap: 8px;
+    padding: 0 14px;
     display: flex;
     align-items: center;
-    justify-content: center;
     border: none;
-    border-radius: 10px;
+    border-radius: 999px;
     cursor: pointer;
-    color: var(--interactive-normal, #b5bac1);
+    color: var(--interactive-active, #fff);
     background: var(--background-secondary-alt, #232428);
-    box-shadow: var(--elevation-low, 0 1px 3px rgba(0, 0, 0, .3));
-    transition: background-color .15s ease, color .15s ease, transform .15s ease;
+    box-shadow: var(--elevation-low, 0 1px 3px rgba(0, 0, 0, .3)), inset 0 0 0 1px rgba(255, 255, 255, .06);
+    transition: background-color .15s ease, color .15s ease, transform .15s ease, box-shadow .15s ease;
 }
 .vc-clipper-trigger:hover {
-    color: var(--interactive-hover, #dbdee1);
+    color: var(--interactive-active, #fff);
     background: var(--background-modifier-hover, #35373c);
     transform: translateY(-1px);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-experiment, #5865f2) 55%, transparent), 0 3px 10px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(255, 255, 255, .06);
+}
+.vc-clipper-trigger:active {
+    transform: scale(.97);
+}
+.vc-clipper-trigger-label {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .01em;
 }
 .vc-clipper-trigger.vc-clipper-live {
-    color: #fff;
-    background: var(--status-danger, #f23f43);
+    background: linear-gradient(135deg, var(--status-danger, #da373c), #a12828);
+    box-shadow: 0 2px 12px rgba(218, 55, 60, .35), inset 0 0 0 1px rgba(255, 255, 255, .08);
+}
+.vc-clipper-rec {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .02em;
+}
+.vc-clipper-rec i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fff;
+    position: relative;
+}
+.vc-clipper-rec i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: #fff;
+    transform: scale(.5);
+    opacity: 1;
+    animation: vc-rec-pulse 1.6s ease-out infinite;
+}
+@keyframes vc-rec-pulse {
+    0% {
+        transform: scale(.5);
+        opacity: 1;
+    }
+    80%, 100% {
+        transform: scale(1.6);
+        opacity: 0;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .vc-clipper-trigger,
+    .vc-clipper-rec i::after {
+        transition: none;
+        animation: none;
+    }
 }
 
 .vc-clipper-menu {
@@ -99,6 +152,7 @@ const CSS = `
     font-size: 14px;
     text-align: left;
     cursor: pointer;
+    transition: background-color .12s ease, color .12s ease;
 }
 .vc-clipper-menu-row {
     display: flex;
@@ -154,12 +208,24 @@ const CSS = `
     text-overflow: ellipsis;
 }
 .vc-clipper-menu button:hover:not(:disabled) {
-    background: var(--brand-experiment, #5865f2);
-    color: #fff;
+    /* One hover for every row: the menu is a list of equal actions, and a
+       full row of saturated brand misreads the foot button as the only one. */
+    background: var(--background-modifier-selected, rgba(78, 80, 88, .48));
+    color: var(--interactive-active, #fff);
 }
 .vc-clipper-menu button:disabled {
     color: var(--text-muted, #949ba4);
     cursor: default;
+}
+.vc-clipper-menu button:active:not(:disabled) {
+    transform: scale(.98);
+}
+/* Keyboard reachability: the menu and the studio left the browser's default
+   ring off, so the only navigator that still sees where it is is the tab key. */
+.vc-clipper-menu button:focus-visible,
+.vc-clipper-modal :focus-visible {
+    outline: 2px solid var(--brand-experiment, #5865f2);
+    outline-offset: 2px;
 }
 .vc-clipper-menu-label {
     padding: 8px 10px 2px;
@@ -445,10 +511,45 @@ const CSS = `
     color: var(--text-muted, #949ba4);
 }
 .vc-clipper-field input[type="range"] {
+    width: 100%;
     padding: 0;
-    height: 18px;
-    background: none;
-    accent-color: var(--brand-experiment, #5865f2);
+    height: 4px;
+    margin: 8px 0;
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--brand-experiment, #5865f2) var(--vc-fill, 0%), var(--background-modifier-accent, rgba(78, 80, 88, .5)) var(--vc-fill, 0%));
+    outline: none;
+    cursor: pointer;
+}
+.vc-clipper-field input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: none;
+    border-radius: 50%;
+    background: var(--interactive-active, #fff);
+    box-shadow: 0 0 0 2px var(--brand-experiment, #5865f2), 0 1px 4px rgba(0, 0, 0, .45);
+    cursor: grab;
+    transition: box-shadow .12s ease, transform .12s ease;
+}
+.vc-clipper-field input[type="range"]::-webkit-slider-thumb:active {
+    cursor: grabbing;
+    transform: scale(1.15);
+}
+.vc-clipper-field input[type="range"]:hover:not(:disabled)::-webkit-slider-thumb {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 3px var(--brand-experiment, #5865f2), 0 1px 4px rgba(0, 0, 0, .45);
+}
+.vc-clipper-field input[type="range"]:focus-visible {
+    box-shadow: 0 0 0 2px var(--brand-experiment, #5865f2);
+}
+.vc-clipper-field input[type="range"]:disabled {
+    opacity: .45;
+    cursor: default;
 }
 
 .vc-clipper-preview {
@@ -638,14 +739,13 @@ function useStyle() {
     }, []);
 }
 
-function Icon({ recording }: { recording: boolean; }) {
+function Icon() {
     return (
         <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
             <path
                 fill="currentColor"
                 d="M17 10.5V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3.5l4 3.5V7l-4 3.5Z"
             />
-            {recording && <circle cx="9.5" cy="12" r="3" fill="var(--status-danger, #f23f43)" />}
         </svg>
     );
 }
@@ -794,7 +894,13 @@ function Picker({ onClose }: { onClose(): void; }) {
 
         searchRef.current?.focus();
 
-        const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+        // In the search field Escape clears it; anywhere else it closes the
+        // picker, which is what Search's one-button clear used to cost.
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== "Escape") return;
+            if (document.activeElement === searchRef.current) setQuery("");
+            else onClose();
+        };
         window.addEventListener("keydown", onKey);
 
         return () => {
@@ -1064,9 +1170,21 @@ export function ClipperOverlay() {
         return () => window.removeEventListener("click", close);
     }, [menu]);
 
-    const { panelButton, sourceName } = settings.use(["panelButton", "sourceName"]);
+    const { panelButton, sourceName, studioMode } = settings.use(["panelButton", "sourceName", "studioMode"]);
 
     const recording = state === "recording" || state === "saving";
+
+    /*
+     * The REC counter in the pill is a number on screen while recording, so the
+     * pill re-renders once a second for as long as it is recording and stops
+     * as soon as it is not. Nothing else in the overlay needs this beat.
+     */
+    const [, recTick] = useState(0);
+    useEffect(() => {
+        if (!recording) return;
+        const id = setInterval(() => recTick(n => n + 1), 1000);
+        return () => clearInterval(id);
+    }, [recording]);
 
     /*
      * The modals stay mounted even with the button turned off: the toolbox and
@@ -1087,13 +1205,21 @@ export function ClipperOverlay() {
                     )}
                     <button
                         className={`vc-clipper-trigger${recording ? " vc-clipper-live" : ""}`}
+                        aria-label={recording ? "Clipper - recording" : "Clipper - pick a source"}
                         title={recording
                             ? `Clipper - recording ${sourceName || "screen"} (right click: stop / save / studio)`
                             : `Clipper - pick a source${sourceName ? ` (current: ${sourceName})` : ""}`}
                         onClick={e => { e.stopPropagation(); setMenu(false); setPicker(true); }}
                         onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMenu(v => !v); }}
                     >
-                        <Icon recording={recording} />
+                        <Icon />
+                        {recording
+                            ? (
+                                <span className="vc-clipper-rec" title={`Recording ${sourceName || "screen"}`}>
+                                    <i aria-hidden="true" />REC {formatTime(Math.max(0, Math.floor(recorder.bufferedSeconds)))}
+                                </span>
+                            )
+                            : <span className="vc-clipper-trigger-label">Clipper</span>}
                     </button>
                 </div>
             )}
@@ -1134,7 +1260,9 @@ export function ClipperOverlay() {
                         toast("The studio hit an error and closed. Your timeline was kept - open it again to carry on.", Toasts.Type.FAILURE);
                     }}
                 >
-                    <ClipStudio initial={studio.initial} onClose={() => setStudio(null)} />
+                    {studioMode === "simple"
+                        ? <SimpleStudio initial={studio.initial} onClose={() => setStudio(null)} />
+                        : <ClipStudio initial={studio.initial} onClose={() => setStudio(null)} />}
                 </ErrorBoundary>
             )}
         </>

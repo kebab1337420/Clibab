@@ -245,6 +245,8 @@ class VoiceActivityBuffer {
     /** Whoever the SPEAKING dispatch says is talking right now. */
     private speaking = new Set<string>();
     private ticker: ReturnType<typeof setInterval> | null = null;
+    /** Ticks since the buffer started, so bookkeeping can run slower than the signal. */
+    private ticks = 0;
 
     /** When the speaking set was last checked against the channel members. */
     private sweptAt = 0;
@@ -261,7 +263,11 @@ class VoiceActivityBuffer {
         const userId = event?.userId;
         if (typeof userId !== "string") return;
 
-        if (Number(event?.speakingFlags ?? 0)) this.speaking.add(userId);
+        // Only the voice bit (1) means somebody is talking. Bit 2 flips when a
+        // stream is shared with the call and bit 4 for a priority speaker; both
+        // have their mic off more often than not, and a lane for them in the
+        // studio would read as a ghost mute.
+        if ((Number(event?.speakingFlags ?? 0) & 1) !== 0) this.speaking.add(userId);
         else this.speaking.delete(userId);
     };
 
@@ -297,7 +303,10 @@ class VoiceActivityBuffer {
         this.ticker = setInterval(() => {
             this.sweepSpeaking();
             for (const userId of this.speaking) this.write(userId, 0);
-            this.forget();
+            // Bookkeeping, not signal: forgetting sweeps whole maps for
+            // buckets that expired minutes ago, so once a second is plenty
+            // and a fifth of the wakeups.
+            if (++this.ticks % 5 === 0) this.forget();
         }, BUCKET_MS);
     }
 

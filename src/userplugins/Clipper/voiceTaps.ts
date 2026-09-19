@@ -314,6 +314,11 @@ function match() {
 }
 
 function tick() {
+    // Nothing open means nothing to sample and nothing to name. The rest of
+    // the tick is cheap, but it would still run every SAMPLE_MS for the whole
+    // session, so an idle call should not walk even that much.
+    if (!tracked.size) return;
+
     for (const entry of tracked.values()) {
         if (entry.dead) continue;
         push(entry.energy, loudness(entry));

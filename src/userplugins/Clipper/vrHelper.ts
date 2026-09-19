@@ -201,11 +201,28 @@ namespace Clipper
          *
          * Five seconds rather than the fifteen the supervisor used to wait,
          * because an attempt now costs one failed function call instead of a
-         * process and a C# compile. Fifty ticks is one second of the loop
-         * below: long enough that a hiccup is not mistaken for a shutdown.
+         * process and a C# compile. Fifty ticks is roughly a second of the
+         * loop below - the update call is the first thing it does, with the
+         * timeout only ever hit while it is busy - long enough that a hiccup
+         * is not mistaken for a shutdown.
          */
         private const int RetrySeconds = 5;
         private const int LostLimit = 50;
+
+        /* The fast (50Hz) and idle (~30Hz) cadences of the session loop. */
+        private const int BusyMilliseconds = 20;
+        private const int IdleMilliseconds = 33;
+        /* How many busy loops to stay fast for after the last thing that needed it. */
+        private const int FastTicks = 25;
+
+        /*
+         * The lowest hands and head speeds worth saying anything about,
+         * matching ./vr.ts: HAND_FLOOR and HEAD_FLOOR, under which its
+         * scale() throws the value away and the line would just be parsed
+         * into a zero.
+         */
+        private const float MotionHands = 1.2f;
+        private const float MotionHead = 1.5f;
 
         /*
          * Where the panel hangs, relative to the headset.
@@ -670,6 +687,7 @@ namespace Clipper
             {
                 int tick = 0;
                 int lost = 0;
+                int busyTicks = 0;
                 DateTime until = DateTime.MinValue;
 
                 while (!Stopping())
@@ -682,6 +700,8 @@ namespace Clipper
 
                     if (command != null)
                     {
+                        busyTicks = FastTicks;
+
                         // IVRInput index 32, OpenBindingUI: SteamVR's own
                         // binding panel, opened on our action set. Shown on the
                         // desktop as well as in the headset, because the person
@@ -742,6 +762,7 @@ namespace Clipper
                         // not fifty a second.
                         if (data.Active && data.State && data.Changed)
                         {
+                            busyTicks = FastTicks;
                             Say("{\\"t\\":\\"action\\",\\"name\\":\\"" + Esc(names[i]) + "\\"}");
                         }
                     }
@@ -765,10 +786,41 @@ namespace Clipper
 
                         double turn = head.PoseIsValid ? Magnitude(head.AngularVelocity) : 0;
 
-                        Say("{\\"t\\":\\"motion\\",\\"hands\\":" + Num(hands) + ",\\"head\\":" + Num(turn) + "}");
+                        /*
+                         * Silent until a hand or the head actually moves.
+                         *
+                         * The renderer turns the line into two levels by
+                         * comparing the numbers against HAND_FLOOR and
+                         * HEAD_FLOOR - a swing that matters, or nothing at
+                         * all - and ./signals forgets a level a second after
+                         * its last report. So a resting player needs no line
+                         * at all: nothing reported means zero, and the moment
+                         * a hand gets up in the air it does because a line
+                         * showed up. Sending zeros ten times a second was
+                         * moving the value 0 from the bridge to the browser
+                         * for nothing.
+                         *
+                         * One line because people do not sit at exactly zero:
+                         * a controller in a lap has a little sway in it, and
+                         * treating that as motion would wake the renderer up
+                         * for no reason and make it lie about what was
+                         * happening.
+                         */
+                        if (hands >= MotionHands || turn >= MotionHead)
+                        {
+                            busyTicks = FastTicks;
+                            Say("{\\"t\\":\\"motion\\",\\"hands\\":" + Num(hands) + ",\\"head\\":" + Num(turn) + "}");
+                        }
                     }
 
-                    Thread.Sleep(20);
+                    // Slow down when nothing is going on, wake up the moment
+                    // anything is. A sleeping player needs a 50Hz report of
+                    // their stillness about as much as they need the 50Hz
+                    // report of their slumber, and cutting the idle cadence
+                    // across both pipes - this loop and the browser that
+                    // parses it - is a quiet win for the whole machine.
+                    if (busyTicks > 0) busyTicks--;
+                    Thread.Sleep(busyTicks > 0 ? BusyMilliseconds : IdleMilliseconds);
                 }
             }
             finally
@@ -954,8 +1006,35 @@ $source = @'
 ${CSHARP}
 '@
 
+# Compile once, run as often as needed.
+#
+# The C# above is the same text every time the bridge is (re)started - toggled
+# on/off, a process killed, a headset yanked - and a cold Add-Type run is a
+# full csc invocation, around a second of it, every single time. So the one
+# thing that is actually expensive is hoarded: the compiled assembly is kept in
+# the temporary directory under a name carrying a hash of everything that
+# affects its output - the source and the PowerShell generation it was built
+# for - and only recompiled when that changes. The name also keeps a 5.1
+# Framework build and a 7.x Core build apart: an assembly loads where it was
+# built.
+$sourceHash = [System.BitConverter]::ToString(
+    [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+        [System.Text.Encoding]::UTF8.GetBytes($source)
+    )
+).Replace('-', '').Substring(0, 16)
+$cacheDir = Join-Path $env:TEMP "clipper-bridge"
+New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+$cacheFile = Join-Path $cacheDir ("bridge-" + $PSVersionTable.PSVersion.Major + "-" + $sourceHash + ".dll")
+
 try {
-    Add-Type -TypeDefinition $source -Language CSharp
+    if (-not (Test-Path -LiteralPath $cacheFile)) {
+        Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $cacheFile
+
+        # OutputAssembly writes the file but leaves the type unloaded, so a
+        # brand-new copy needs the same load as a reused one below.
+    }
+
+    Add-Type -LiteralPath $cacheFile
 } catch {
     Write-Output ('{"t":"error","message":"The bridge could not be compiled: ' + ($_.Exception.Message -replace '["\\\\]', ' ' -replace '\\s+', ' ') + '"}')
     exit 1

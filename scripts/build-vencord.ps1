@@ -19,9 +19,16 @@ $quarantine = Join-Path $VencordDir "userplugins-disabled"
 function Get-OffendingPlugins([string] $buildOutput) {
     $names = [System.Collections.Generic.HashSet[string]]::new()
 
-    foreach ($m in [regex]::Matches($buildOutput, 'src[\\/]userplugins[\\/]([^\\/:\s]+)')) {
-        $name = $m.Groups[1].Value
-        if ($name -ne $KeepPlugin) { [void] $names.Add($name) }
+    # Only error lines count. The whole log is full of userplugins paths - the
+    # "bundled" chatter esbuild prints on success - and matching those would
+    # quarantine a healthy plugin the moment another one fails.
+    foreach ($line in ($buildOutput -split "`r?`n")) {
+        if ($line -notmatch '(?i)\berror\b') { continue }
+
+        foreach ($m in [regex]::Matches($line, 'src[\\/]userplugins[\\/]([^\\/:\s]+)')) {
+            $name = $m.Groups[1].Value
+            if ($name -ne $KeepPlugin) { [void] $names.Add($name) }
+        }
     }
 
     return $names

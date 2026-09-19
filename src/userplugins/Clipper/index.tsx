@@ -27,7 +27,7 @@ import { runShortcut, startGlobalKeybinds, stopGlobalKeybinds, syncGlobalKeybind
 import { micReport } from "./micInput";
 import { SYSTEM_CHANNEL } from "./mixer";
 import { installPovRequests, requestPov, uninstallPovRequests } from "./multipov";
-import { logger, recorder } from "./recorder";
+import { adoptOrphans, logger, recorder } from "./recorder";
 import { settings } from "./settings";
 import { toast } from "./toasts";
 import { checkAtLaunch, checkNow } from "./updater";
@@ -261,6 +261,7 @@ export default definePlugin({
 
     start() {
         migrateReloadKeybinds();
+        void adoptOrphans();
 
         // Before anything else opens a connection: a call already running when
         // the patch lands is invisible to it.

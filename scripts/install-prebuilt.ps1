@@ -6,18 +6,24 @@
 # What it does:
 #   1. copies the bundle to %APPDATA%\Vencord\clipper\dist (a stable path, so
 #      moving or deleting this repo afterwards does not break the install)
-#   2. patches every Discord flavour found: the real app.asar is renamed to
-#      _app.asar and replaced by a stub asar that requires dist\patcher.js,
-#      which is exactly what the Vencord installer does
-#   3. points every Vesktop / Equibop install at the same dist folder
+#   2. stops there by default. Vencord itself is not touched: install and manage
+#      it yourself, then point your client at this dist folder (or copy
+#      clipper\dist over your Vencord dist to get Clipper under it).
+#   3. with -PatchClients, also restores the old behaviour: patches every
+#      Discord flavour found (real app.asar renamed to _app.asar and replaced
+#      by a stub asar that requires dist\patcher.js, exactly like the Vencord
+#      installer does) and points every Vesktop / Equibop install at the same
+#      dist folder.
 #
-# Exit codes: 0 = at least one client set up, 1 = nothing was set up.
+# Exit codes: 0 = bundle delivered (patch mode: at least one client set up),
+# 1 = nothing was set up.
 
 param(
     [string] $DistSource = (Join-Path (Split-Path $PSScriptRoot -Parent) "prebuilt\dist"),
     [string] $InstallDir = (Join-Path $env:APPDATA "Vencord\clipper"),
-    # copies the bundle and stops, leaving every client untouched
-    [switch] $BundleOnly
+    # also patch Discord / Vesktop to load this bundle. Off by default: Vencord
+    # is the user's own business, this script only delivers the Clipper bundle.
+    [switch] $PatchClients
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,7 +84,9 @@ if (-not (Test-Path (Join-Path $DistSource "patcher.js"))) {
 
 $dist = Join-Path $InstallDir "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
-Copy-Item (Join-Path $DistSource "*") $dist -Recurse -Force
+<# Every file of prebuilt\dist, the Rust voice-capture binary included, so the
+   exact bundle that was verified is the one that gets installed. #>
+Get-ChildItem $DistSource -File | Copy-Item -Destination $dist -Force
 
 # find-vencord.ps1 and Vesktop both expect a repo-shaped folder next to dist
 $marker = Join-Path $InstallDir "package.json"
@@ -89,7 +97,13 @@ if (-not (Test-Path $marker)) {
 
 Write-Host "      Bundle installed to $dist"
 
-if ($BundleOnly) { exit 0 }
+# The installation ends here unless the user explicitly asked for client patching.
+# Vencord's own installer and updater are left alone by default.
+if (-not $PatchClients) {
+    Write-Host "      Vencord not installed - install it yourself and point it at $dist"
+    Write-Host "      (or copy clipper\dist over your Vencord dist to get Clipper under it)."
+    exit 0
+}
 
 # ------------------------------------------------------------ patch Discord --
 $patcher = Join-Path $dist "patcher.js"
@@ -108,7 +122,7 @@ foreach ($root in $discordRoots) {
 
     # only the newest app-x.y.z matters; older ones are leftovers Discord no longer starts
     $resources = Get-ChildItem $root -Directory -Filter "app-*" |
-        Sort-Object Name -Descending |
+        Sort-Object { try { [version]($_.Name -replace '^app-', '') } catch { [version]'0.0.0' } } -Descending |
         ForEach-Object { Join-Path $_.FullName "resources" } |
         Where-Object { Test-Path $_ } |
         Select-Object -First 1

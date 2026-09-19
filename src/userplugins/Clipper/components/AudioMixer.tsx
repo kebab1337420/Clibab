@@ -37,6 +37,7 @@ import {
 } from "../mixer";
 import { recorder } from "../recorder";
 import { settings } from "../settings";
+import { voiceParticipants } from "../voice";
 import { Meter, VALUE } from "./Meter";
 import { VoicePanel } from "./VoicePanel";
 
@@ -88,8 +89,7 @@ const INPUT: React.CSSProperties = {
     outline: "none"
 };
 
-function Channel({ id, name, note, level, meter, compact, onChange, onRemove, children }: {
-    id: string;
+function Channel({ name, note, level, meter, compact, onChange, onRemove, children }: {
     name: string;
     note?: string;
     level: MixerLevel;
@@ -113,7 +113,7 @@ function Channel({ id, name, note, level, meter, compact, onChange, onRemove, ch
                     max={300}
                     step={5}
                     value={Math.round(level.gain * 100)}
-                    style={{ flex: 1, accentColor: "var(--brand-experiment, #5865f2)" }}
+                    style={{ flex: 1, "--vc-fill": `${Math.round(level.gain * 100 / 3)}%` } as React.CSSProperties}
                     onChange={e => onChange({ ...level, gain: clampGain(Number(e.currentTarget.value) / 100) })}
                 />
 
@@ -136,7 +136,6 @@ function Channel({ id, name, note, level, meter, compact, onChange, onRemove, ch
             </div>
 
             {children}
-            <input type="hidden" value={id} />
         </div>
     );
 }
@@ -215,6 +214,26 @@ function Mixer({ compact }: { compact?: boolean; }) {
         return () => clearInterval(timer);
     }, [recording]);
 
+    // A level set on somebody who left the call stays in the stored mixer
+    // otherwise, and the next time that person joins they come back with a
+    // volume meant for someone who was not there. Poll the roster like the
+    // panel below and drop the voices whose user is no longer in the channel.
+    useEffect(() => {
+        const prune = () => {
+            const present = new Set(voiceParticipants().map(p => p.id));
+            const voices = Object.fromEntries(Object.entries(mixer.voices).filter(([id]) => present.has(id)));
+
+            if (Object.keys(voices).length === Object.keys(mixer.voices).length) return;
+
+            setMixer({ ...mixer, voices });
+            guard("Saving the pruned mixer", () => writeMixer({ ...mixer, voices }), undefined);
+        };
+
+        prune();
+        const timer = setInterval(prune, 2000);
+        return () => clearInterval(timer);
+    }, [mixer.voices]);
+
     /** Stores the mixer and pushes the change into a running recording. */
     const apply = (next: MixerConfig, touched?: string) => {
         setMixer(next);
@@ -261,12 +280,11 @@ function Mixer({ compact }: { compact?: boolean; }) {
 
             <Paragraph style={{ marginTop: 6, fontSize: compact ? 12 : undefined, color: "var(--text-muted, #949ba4)" }}>
                 {compact
-                    ? "Levels the buffer records with. They apply to the clips saved from now on, not to what is already on the timeline - a segment's own volume is in the Segment tab."
-                    : "Balance of what goes into a clip. Sliders take effect immediately, so they can be set while the buffer is running. Windows hands out the captured source's sound as one stream, so the game, the people talking and the music arrive already mixed together: to give an application its own slider, send it to a virtual cable (VB-CABLE, Voicemeeter) and add the cable below as its own channel. The people in a voice call are the exception: they are recorded one track per person as well, so each of them gets a channel of their own at the bottom of this list."}
+                    ? "Levels for new recordings - what is already on the timeline keeps its own volumes in the rows above."
+                    : "Balance of what goes into a clip. Sliders take effect immediately, so they can be set while the buffer runs. Windows hands out the captured source's sound as one stream, so the game, the people talking and the music arrive already mixed together: to give an application its own slider, send it to a virtual cable (VB-CABLE, Voicemeeter) and add the cable below as its own channel. The people in a voice call are the exception: they are recorded one track per person as well, so each of them gets a channel of their own at the bottom of this list."}
             </Paragraph>
 
             <Channel
-                id={SYSTEM_CHANNEL}
                 name="System sound"
                 note="Game, voice chat, music"
                 compact={compact}
@@ -276,7 +294,6 @@ function Mixer({ compact }: { compact?: boolean; }) {
             />
 
             <Channel
-                id={MIC_CHANNEL}
                 name="Microphone"
                 note={includeMic ? micNote(mic) : "Microphone turned off in the settings"}
                 compact={compact}
@@ -288,7 +305,6 @@ function Mixer({ compact }: { compact?: boolean; }) {
             {mixer.extras.map(extra => (
                 <Channel
                     key={extra.id}
-                    id={extra.id}
                     name={extra.label}
                     note={devices.find(d => d.deviceId === extra.deviceId)?.label || "Device not found"}
                     compact={compact}

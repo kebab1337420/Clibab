@@ -14,9 +14,10 @@ spike; see `../../src/userplugins/Clipper/` for the plugin.
 cargo build --release
 ```
 
-No C/cmake toolchain required: RTP → PCM decode is stubbed (records raw Opus
-payload) so `cargo check` is green on a stock Rust install. A real decoder is
-one `opus`/`symphonia` feature-flag away (see `Cargo.toml`).
+No C/cmake toolchain required: RTP → PCM decode is stubbed (records a per-packet
+activity marker so wav size tracks voice activity) so `cargo check` is green on
+a stock Rust install. A real decoder is one `opus`/`symphonia` feature-flag
+away (see `Cargo.toml`).
 
 ## Run
 

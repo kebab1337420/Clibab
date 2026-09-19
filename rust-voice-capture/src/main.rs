@@ -27,7 +27,7 @@
 //! playable even on a crash).
 
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,7 @@ use std::time::Duration;
 use clap::Parser;
 use discord_voice_capture::gateway::{DiscordGateway, JoinArgs};
 use discord_voice_capture::voice::VoiceSession;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Parser, Debug)]
 #[command(name = "discord-voice-capture")]
@@ -49,93 +50,94 @@ struct Args {
     channel_id: Option<String>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Emit one JSON object line on the parent's stdio protocol channel.
+fn emit(obj: &serde_json::Value) {
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "{}", obj);
+    let _ = out.flush();
+}
+
+/// Report a fatal setup/runtime problem back to the parent, never panic.
+fn emit_error(message: &str) {
+    emit(&serde_json::json!({ "type": "error", "message": message }));
+}
+
+fn main() -> std::process::ExitCode {
     let args = Args::parse();
-    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN env var not set");
 
     env_logger::init();
-    let rt = tokio::runtime::Runtime::new()?;
+
+    let token = match env::var("DISCORD_TOKEN") {
+        Ok(t) => t,
+        Err(_) => {
+            emit_error("DISCORD_TOKEN env var not set");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            emit_error(&format!("failed to start async runtime: {e}"));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
 
     if args.stdio {
         // Vesktop / native addon host mode: parent drives us over JSON lines.
-        return rt.block_on(async_stdio(&token));
+        return match rt.block_on(async_stdio(&token)) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                emit_error(&e.to_string());
+                std::process::ExitCode::FAILURE
+            }
+        };
     }
 
     // Legacy CLI mode: positional / env args + Ctrl-C drain.
-    let guild_id = env::var("GUILD_ID").unwrap_or_else(|_| {
-        args.guild_id.clone().expect("guild_id positional arg or GUILD_ID env required")
-    });
+    let guild_id = match (env::var("GUILD_ID"), args.guild_id) {
+        (Ok(g), _) => g,
+        (_, Some(g)) => g,
+        _ => {
+            emit_error("guild_id positional arg or GUILD_ID env required");
+            return std::process::ExitCode::from(2);
+        }
+    };
     let channel_id = env::var("CHANNEL_ID")
         .unwrap_or_else(|_| args.channel_id.clone().unwrap_or_default());
 
-    rt.block_on(async move { run(&token, &guild_id, &channel_id, None).await })
+    match rt.block_on(async move { run(&token, &guild_id, &channel_id, None).await }) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            emit_error(&e.to_string());
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
-/// Parent-driven JSON-IPC loop over stdin/stdout.
+/// Parent-driven JSON-IPC loop over stdin/stdout. One capture session per
+/// process (the parent spawns a fresh binary for every "start"), so this exits
+/// on "stop", when the parent's stdin closes, or when the session ends on its
+/// own — which is what lets `native.ts` treat a dead process as "not running".
 async fn async_stdio(token: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut out = io::stdout().lock();
-    let mut emit = |obj: &serde_json::Value| {
-        let _ = writeln!(out, "{}", obj);
-        let _ = out.flush();
-    };
-
-    // Drive one capture session at a time. The parent sends "start" + "stop".
-    let mut handle: Option<tokio::task::JoinHandle<()>> = None;
-    let mut shutdown: Option<tokio::sync::broadcast::Sender<()>> = None;
-    let mut clips_dir: PathBuf = std::env::current_dir().unwrap_or(".".into());
-    clips_dir.push("clips");
-    // Snapshot the filenames we have already announced so a poll never
-    // double-reports a single .wav (run() finalizes on Drop).
-    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-    for line in io::BufReader::new(io::stdin()).lines() {
-        let line = line?;
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                emit(&serde_json::json!({"event":"error","detail":"invalid JSON on stdin"}));
+    // Background poller: announce freshly-finalized participant .wavs on a
+    // timer, so live events keep flowing between "start" and "stop" instead of
+    // only being emitted when the parent happens to send the next JSON line.
+    let clips_dir = PathBuf::from("clips");
+    let (poll_tx, mut poll_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let poller = tokio::spawn(async move {
+        // Snapshot the filenames we have already announced so a poll never
+        // double-reports a single .wav (run() finalizes on Drop).
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut interval = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = poll_rx.recv() => break,
+                _ = interval.tick() => {}
+            }
+            if !clips_dir.exists() {
                 continue;
             }
-        };
-
-        let cmd = v.get("cmd").and_then(|x| x.as_str()).unwrap_or("");
-        match cmd {
-            "start" => {
-                if handle.is_some() {
-                    emit(&serde_json::json!({"event":"error","detail":"already running"}));
-                    continue;
-                }
-
-                let token = token.to_string();
-                let guild_id = v.get("guild_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let channel_id = v.get("channel_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let (tx, rx) = tokio::sync::broadcast::channel::<()>(1);
-                shutdown = Some(tx);
-
-                let h = tokio::spawn(async move {
-                    if let Err(e) = run(&token, &guild_id, &channel_id, Some(rx)).await {
-                        eprintln!("capture exited: {e}");
-                    }
-                });
-                handle = Some(h);
-                // Announce connection lazily — the driver writes the first wav
-                // when RTP starts flowing; `connected` is implied by wav_ready.
-            }
-            "stop" => {
-                if let (Some(h), Some(tx)) = (handle.take(), shutdown.take()) {
-                    let _ = tx.send(());
-                    let _ = h.await;
-                }
-            }
-            _ => {
-                emit(&serde_json::json!({"event":"error","detail":format!("unknown cmd: {cmd}")}));
-            }
-        }
-
-        // Poll the clips dir for freshly-finalized participant .wavs and emit
-        // a wav_ready event once per file. This is zero-touch into voice.rs /
-        // wav.rs (no coupling) at the cost of a 200ms poll on a small dir.
-        if std::path::Path::exists(&clips_dir) {
             if let Ok(rd) = std::fs::read_dir(&clips_dir) {
                 for entry in rd.flatten() {
                     let path = entry.path();
@@ -157,9 +159,88 @@ async fn async_stdio(token: &str) -> Result<(), Box<dyn std::error::Error + Send
                 }
             }
         }
+    });
+
+    // Parent commands, read async so a capture that ends on its own (e.g. a
+    // lost connection) is noticed without waiting for the next JSON line.
+    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+
+    let mut handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut shutdown: Option<tokio::sync::broadcast::Sender<()>> = None;
+    // Fires when the spawned capture task ends on its own (disconnect/error).
+    let mut session_done: Option<tokio::sync::oneshot::Receiver<()>> = None;
+
+    loop {
+        let mut finished = false;
+        let line = if let Some(done) = session_done.as_mut() {
+            tokio::select! {
+                line = stdin.next_line() => line,
+                _ = done => {
+                    finished = true;
+                    Ok(None)
+                }
+            }
+        } else {
+            stdin.next_line().await
+        };
+        if finished {
+            break; // connection lost: run() already emitted the disconnected event
+        }
+
+        let Some(line) = line? else { break }; // stdin EOF: the parent is gone
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => {
+                emit(&serde_json::json!({"event":"error","detail":"invalid JSON on stdin"}));
+                continue;
+            }
+        };
+
+        let cmd = v.get("cmd").and_then(|x| x.as_str()).unwrap_or("");
+        match cmd {
+            "start" => {
+                if handle.is_some() {
+                    emit(&serde_json::json!({"event":"error","detail":"already running"}));
+                    continue;
+                }
+
+                let token = token.to_string();
+                let guild_id = v.get("guild_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let channel_id = v.get("channel_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let (tx, rx) = tokio::sync::broadcast::channel::<()>(1);
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                shutdown = Some(tx);
+                session_done = Some(done_rx);
+
+                let h = tokio::spawn(async move {
+                    if let Err(e) = run(&token, &guild_id, &channel_id, Some(rx)).await {
+                        emit_error(&e.to_string());
+                    }
+                    let _ = done_tx.send(());
+                });
+                handle = Some(h);
+            }
+            "stop" => {
+                if let (Some(h), Some(tx)) = (handle.take(), shutdown.take()) {
+                    let _ = tx.send(());
+                    let _ = h.await;
+                }
+                // One session per process: a stop finishes this one for good.
+                return Ok(());
+            }
+            _ => {
+                emit(&serde_json::json!({"event":"error","detail":format!("unknown cmd: {cmd}")}));
+            }
+        }
     }
 
-    // stdin closed: drain any active session then return.
+    // stdin closed (parent gone) or the session ended on its own: stop the
+    // poller, then drain any session that is still running.
+    let _ = poll_tx.send(());
+    let _ = poller.await;
     if let (Some(h), Some(tx)) = (handle, shutdown) {
         let _ = tx.send(());
         let _ = h.await;
@@ -177,6 +258,12 @@ async fn run(
     channel_id: &str,
     shutdown_rx: Option<tokio::sync::broadcast::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    enum StopCause {
+        Parent,
+        Session,
+        Gateway,
+    }
+
     let gateway = Arc::new(DiscordGateway::new(token).await?);
 
     // Asks Discord to put us in the voice channel; lands VOICE_SERVER_UPDATE
@@ -187,15 +274,15 @@ async fn run(
             channel_id: channel_id.to_string(),
         })
         .await?;
-    println!("joined voice channel {channel_id} (endpoint {})", join.endpoint);
+    emit(&serde_json::json!({
+        "type": "connected",
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "endpoint": join.endpoint.to_string()
+    }));
 
     // Spin up the UDP socket + per-participant .wav lanes keyed by SSRC.
     let mut session = VoiceSession::connect(join).await?;
-    // Feed the IP-discovered public ip:port back to the gateway (SelectProtocol
-    // op 1) so Discord routes incoming RTP to our real 4-tuple instead of :50001.
-    if let Some((ip, port)) = session.discovered.clone() {
-        gateway.select_protocol(&ip, port).await.ok();
-    }
     // Open a lane for every participant already known at join time.
     let ssrcs: Vec<_> = session.ssrc_table.id.keys().copied().collect();
     for ssrc in ssrcs {
@@ -205,7 +292,7 @@ async fn run(
             .get(&ssrc)
             .cloned()
             .unwrap_or_else(|| format!("user-{:#x}", ssrc));
-        if let Err(e) = session.lane_for(ssrc).await {
+        if let Err(e) = session.lane_for(ssrc) {
             eprintln!("lane open failed for {user_id}: {e}");
         }
     }
@@ -217,24 +304,40 @@ async fn run(
         }
     });
 
-    match shutdown_rx {
+    let cause = match shutdown_rx {
         Some(mut parent_rx) => {
-            // stdio mode: wait for the parent's "stop" (or the session exiting).
+            // stdio mode: stop when the parent asks, or when the gateway
+            // connection is lost while the parent is still listening. There is
+            // no wall-clock watchdog: the parent's death shows up as stdin EOF
+            // in `async_stdio`, so a long capture is never cut short.
+            let gw_closed = gateway.closed();
+            tokio::pin!(gw_closed);
             tokio::select! {
-                _ = parent_rx.recv() => {}
-                _ = &mut h => {}
-                // Safety net: never hang forever if the parent vanishes.
-                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-            };
+                _ = parent_rx.recv() => StopCause::Parent,
+                _ = &mut h => StopCause::Session,
+                reason = &mut gw_closed => {
+                    let detail = reason.unwrap_or_else(|| "gateway connection closed".to_string());
+                    emit(&serde_json::json!({ "type": "disconnected", "detail": detail }));
+                    StopCause::Gateway
+                }
+            }
         }
         None => {
             // CLI mode: Ctrl-C drains the UDP loop, then leaves the channel.
             tokio::signal::ctrl_c().await?;
+            StopCause::Parent
         }
-    }
+    };
 
     let _ = tx.send(()); // graceful drain of the UDP recv loop
     h.await.ok(); // let run() finish its cleanup + wav Drop finalize
+
+    // The stream was lost while the parent was still alive: say so before
+    // tearing down (the gateway-close case already emitted its reason above).
+    if matches!(cause, StopCause::Session) {
+        emit(&serde_json::json!({ "type": "disconnected", "detail": "voice session ended unexpectedly" }));
+    }
+
     gateway.leave_voice(guild_id).await;
     Ok(())
 }

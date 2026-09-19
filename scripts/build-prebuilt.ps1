@@ -18,6 +18,26 @@ $repo = Split-Path $PSScriptRoot -Parent
 $pluginSrc = Join-Path $repo "src\userplugins\$PluginName"
 $prebuilt = Join-Path $repo "prebuilt\dist"
 
+# ---- local-build guard ------------------------------------------------------
+# A rebuilt bundle silently rewrites tracked files (prebuilt\dist + build-info).
+# Publishing a local, untested bundle under a tag breaks VerifyBundleAsync for
+# everyone who installs it. Local iteration is not blocked, only warned about.
+if ($env:CLIPPER_SKIP_DIRTY_CHECK -ne "1") {
+    $dirty = $null
+    Push-Location $repo
+    try { $dirty = (& git status --porcelain -- prebuilt/ 2>$null) } catch { }
+    finally { Pop-Location }
+
+    if ($dirty) {
+        Write-Host ""
+        Write-Host "      [!!!] prebuilt/ has uncommitted local changes:"
+        $dirty | ForEach-Object { Write-Host "            $_" }
+        Write-Host "      [!!!] The bundle this script writes is NOT the one the last tag shipped."
+        Write-Host "      [!!!] Commit the regenerated bundle first, or set CLIPPER_SKIP_DIRTY_CHECK=1 to push on anyway."
+        Write-Host ""
+    }
+}
+
 if (-not (Test-Path (Join-Path $VencordDir "package.json"))) {
     Write-Host "[ERROR] Not a Vencord repository: $VencordDir"
     exit 1
@@ -67,6 +87,36 @@ if (-not (Select-String -Path $renderer -SimpleMatch $PluginName -Quiet)) {
     Write-Host "[ERROR] $PluginName is not in the built renderer - was it quarantined?"
     exit 1
 }
+
+# ---- the Rust voice-capture binary -----------------------------------------
+# The per-person voice capture ships as a native exe next to the bundle, and
+# native.ts finds it there (voiceBinaryPath). build-info.json below picks every
+# file present in prebuilt\dist, so the exe is shipped and integrity-checked
+# like the rest. A cargo failure fails the script: a release with the exe
+# missing would answer "binary not found" to every user.
+$crate = Join-Path $repo "rust-voice-capture"
+Write-Host "Building discord-voice-capture with cargo..."
+$cargoOut = $null
+Push-Location $crate
+try {
+    $cargoOut = & cargo build --release 2>&1
+    $cargoCode = $LASTEXITCODE
+} finally { Pop-Location }
+
+if ($cargoCode -ne 0) {
+    Write-Host "[ERROR] cargo build --release failed:"
+    $cargoOut | ForEach-Object { Write-Host "        $_" }
+    exit 1
+}
+
+$exeName = if ($IsWindows) { "discord-voice-capture.exe" } else { "discord-voice-capture" }
+$bin = Join-Path $crate "target\release\$exeName"
+if (-not (Test-Path $bin)) {
+    Write-Host "[ERROR] Built binary not found at $bin"
+    exit 1
+}
+Copy-Item $bin $prebuilt -Force
+Write-Host "Copied $exeName into prebuilt\dist"
 
 $version = (Get-Content (Join-Path $VencordDir "package.json") -Raw | ConvertFrom-Json).version
 

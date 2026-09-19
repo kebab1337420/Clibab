@@ -210,16 +210,6 @@ export const settings = definePluginSettings({
         default: 30,
         stickToMarkers: true
     },
-    autoClipEndIncludeMic: {
-        type: OptionType.BOOLEAN,
-        description: "Include your own microphone in the end-of-call clip. Off leaves you out of it, as if you had muted yourself on the voice channel panel",
-        default: true
-    },
-    autoClipEndToasts: {
-        type: OptionType.BOOLEAN,
-        description: "Tell you over Discord that one was taken",
-        default: true
-    },
     interfaceSection: {
         type: OptionType.COMPONENT,
         component: () => (
@@ -235,6 +225,20 @@ export const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Show the floating Clipper button above the account panel (left click: pick a source, right click: start / stop / save)",
         default: true
+    },
+    /*
+     * Which clip studio opens. The simple one is one clip picked, trimmed and
+     * saved; the advanced one is the full montage timeline. The advanced studio
+     * only gained its long tail of controls over time, so it stays the default:
+     * nobody who already uses it should come back to a bare trimmer.
+     */
+    studioMode: {
+        type: OptionType.SELECT,
+        description: "Which clip studio opens. Simple: pick one clip, trim a range and save it. Advanced: the full montage timeline with captions, sounds and multi-clip arrangement",
+        options: [
+            { label: "Advanced - the full montage timeline", value: "advanced", default: true },
+            { label: "Simple - pick one clip, trim and save", value: "simple" }
+        ]
     },
     overlayNotice: {
         type: OptionType.BOOLEAN,

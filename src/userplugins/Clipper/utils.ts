@@ -19,6 +19,27 @@ export function thumbNameFor(name: string): string {
     return `${name.replace(/\.(webm|mp4)$/i, "")}.thumb.jpg`;
 }
 
+export function captureFrameRate(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 30;
+    return Math.min(60, Math.max(1, value));
+}
+
+export function captureVideoBitrate(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 8_000_000;
+    return Math.round(Math.min(50, Math.max(1, value)) * 1_000_000);
+}
+
+export function captureHeight(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+    if (value < 120 || value > 4320) return 0;
+    return Math.round(value);
+}
+
+export function clipRetentionSeconds(value: unknown): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 30;
+    return Math.min(600, Math.max(5, value));
+}
+
 export interface Keybind {
     code: string;
     ctrl: boolean;
@@ -39,7 +60,7 @@ export function serializeKeybind(kb: Keybind): string {
 }
 
 export function parseKeybind(value: string): Keybind | null {
-    if (!value) return null;
+    if (typeof value !== "string" || !value) return null;
 
     const parts = value.split("+").filter(Boolean);
     const code = parts.pop();
@@ -187,6 +208,10 @@ export function toAccelerator(value: string): string {
 }
 
 export function formatBytes(bytes: number): string {
+    // A size read off a broken file can be NaN or Infinity; nothing renders
+    // those well, and "0 B" is the honest fallback for them.
+    if (!Number.isFinite(bytes)) return "0 B";
+
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
     if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
@@ -209,6 +234,10 @@ export function isTypingTarget(): boolean {
 
 /** A position on a timeline, e.g. "1:07.5". */
 export function formatTime(seconds: number): string {
+    // NaN and Infinity make no sensible position; a zero time is the honest
+    // fallback for one that cannot be expressed.
+    if (!Number.isFinite(seconds)) return "0:00";
+
     const value = Math.max(0, seconds);
     const minutes = Math.floor(value / 60);
     const rest = value - minutes * 60;

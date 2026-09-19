@@ -5,5 +5,14 @@ node_modules/
 dist/
 *.log
 
+# Standalone installer output, rebuilt per release by scripts\build-installer.ps1
+release/
+
+# .NET build output for the graphical installer
+installer/bin/
+installer/obj/
+.vs/
+*.user
+
 # ...except the shipped bundle, which is the whole point of the prebuilt install
 !prebuilt/dist/

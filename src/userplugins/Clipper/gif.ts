@@ -108,6 +108,17 @@ class Blocks {
 }
 
 /**
+ * The LZW dictionary, as a fixed open-addressed table instead of a Map: the
+ * code width caps it at 4096 entries, so 4096 slots always suffice and nothing
+ * is ever evicted - whether a string is already known has to come out the same
+ * for the bytes to stay identical. Module-wide, so the whole ladder reuses it,
+ * and reset is a fill rather than a fresh allocation.
+ */
+const TABLE_SIZE = 4096;
+const dictKey = new Uint32Array(TABLE_SIZE);
+const dictValue = new Int16Array(TABLE_SIZE);
+
+/**
  * LZW as the format defines it, straight onto the block stream.
  *
  * The whole difficulty is the code width, because it is never written down: the
@@ -129,7 +140,17 @@ function compress(indices: Uint8Array, minCodeSize: number, out: Bytes): void {
     let width = minCodeSize + 1;
     let next = end + 1;
     let mirror = end;
-    let table = new Map<number, number>();
+
+    dictKey.fill(0xffffffff);
+    dictValue.fill(-1);
+
+    const probe = (key: number) => {
+        let slot = Math.imul(key, 2654435761) >>> 20;
+        while (dictKey[slot] !== key && dictKey[slot] !== 0xffffffff) {
+            if (++slot === TABLE_SIZE) slot = 0;
+        }
+        return slot;
+    };
 
     const emit = (code: number) => {
         blocks.write(code, width);
@@ -141,7 +162,8 @@ function compress(indices: Uint8Array, minCodeSize: number, out: Bytes): void {
     const restart = () => {
         blocks.write(clear, width);
 
-        table = new Map();
+        dictKey.fill(0xffffffff);
+        dictValue.fill(-1);
         next = end + 1;
         width = minCodeSize + 1;
         mirror = end;
@@ -154,8 +176,10 @@ function compress(indices: Uint8Array, minCodeSize: number, out: Bytes): void {
         const value = indices[i];
         const key = (prefix << 8) | value;
 
-        const known = table.get(key);
-        if (known !== undefined) {
+        const slot = probe(key);
+        const known = dictKey[slot] === key ? dictValue[slot] : -1;
+
+        if (known !== -1) {
             prefix = known;
             continue;
         }
@@ -164,8 +188,10 @@ function compress(indices: Uint8Array, minCodeSize: number, out: Bytes): void {
 
         // 4096 is as far as the code width goes, so a table that full can only
         // be thrown away and rebuilt from the next pixel on.
-        if (next < 4096) table.set(key, next++);
-        else restart();
+        if (next < 4096) {
+            dictKey[slot] = key;
+            dictValue[slot] = next++;
+        } else restart();
 
         prefix = value;
     }
@@ -342,6 +368,15 @@ export function encodeGif(frames: ImageData[], { delay, colors = 128 }: GifOptio
     const { width, height } = frames[0];
     const pixels = width * height;
 
+    // Every frame must be the same size: each frame is indexed with the first
+    // frame's stride, so a smaller one would read past its own data and paint
+    // the palette with whatever was in the neighbouring buffer.
+    for (const frame of frames) {
+        if (frame.width !== width || frame.height !== height || frame.data.length < pixels * 4) {
+            throw new Error("A GIF needs every frame the same size");
+        }
+    }
+
     // Histogram over every frame, at 5 bits a channel. Reading every pixel of
     // every frame is affordable here and picking a palette off a sample is how
     // a rare but bright thing - a killfeed, a muzzle flash - loses its colour.
@@ -392,16 +427,29 @@ export function encodeGif(frames: ImageData[], { delay, colors = 128 }: GifOptio
 
     let previous: Uint8Array | null = null;
 
+    // Two alternating index buffers plus one diffed output, all reused between
+    // frames instead of allocated per frame: the previous frame stays readable
+    // in one buffer while the next is built in the other, and the output is
+    // copied and diffed into `written`, which is what the compressor reads.
+    let indices = new Uint8Array(pixels);
+    let spare = new Uint8Array(pixels);
+    const written = new Uint8Array(pixels);
+
+    // The format's unit is a centisecond, so a fractional frame time truncates
+    // nearly a centisecond every frame - ~4% off a 15s 12fps loop. The leftover
+    // fraction is carried into the next frame, so the written durations land on
+    // the requested rate on average instead of drifting to short.
+    let remainder = 0;
+
     for (const frame of frames) {
         const { data } = frame;
-        const indices = new Uint8Array(pixels);
 
         for (let p = 0; p < pixels; p++) {
             const i = p * 4;
             indices[p] = nearest.of(data[i], data[i + 1], data[i + 2]);
         }
 
-        const written = new Uint8Array(indices);
+        written.set(indices);
         if (previous) {
             for (let p = 0; p < pixels; p++) if (indices[p] === previous[p]) written[p] = transparent;
         }
@@ -412,7 +460,10 @@ export function encodeGif(frames: ImageData[], { delay, colors = 128 }: GifOptio
         out.byte(0xf9);
         out.byte(4);
         out.byte((1 << 2) | (previous ? 1 : 0));
-        out.short(Math.max(2, Math.round(delay / 10)));
+        remainder += delay;
+        const cents = Math.max(2, Math.round(remainder / 10));
+        remainder -= cents * 10;
+        out.short(cents);
         out.byte(transparent);
         out.byte(0);
 
@@ -426,7 +477,12 @@ export function encodeGif(frames: ImageData[], { delay, colors = 128 }: GifOptio
         out.byte(minCodeSize);
         compress(written, minCodeSize, out);
 
+        // The frame just built becomes the reference for the next one, and the
+        // other buffer - last used two frames ago - is the one to fill in next.
         previous = indices;
+        const swap = indices;
+        indices = spare;
+        spare = swap;
     }
 
     out.byte(0x3b);

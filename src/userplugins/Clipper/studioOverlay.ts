@@ -229,7 +229,8 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
     .card {
         position: absolute; inset: 0; display: flex; flex-direction: column;
         border-radius: 12px; overflow: hidden; background: #101114;
-        border: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 40px rgba(0, 0, 0, 0.7);
         font: 12px/1.35 "gg sans", "Segoe UI", system-ui, sans-serif; color: #f2f3f5;
         opacity: 0; transition: opacity 160ms ease;
     }
@@ -244,7 +245,7 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
     .controls { flex: none; padding: 10px 12px 11px; display: flex; flex-direction: column; gap: 8px; }
     .track { position: relative; height: 22px; cursor: pointer; }
     .rail { position: absolute; left: 0; right: 0; top: 8px; height: 6px; border-radius: 3px; background: #2c2f36; }
-    .range { position: absolute; top: 8px; height: 6px; border-radius: 3px; background: #3c437e; }
+    .range { position: absolute; top: 8px; height: 6px; border-radius: 3px; background: #4752c4; }
     .played { position: absolute; top: 8px; height: 6px; border-radius: 3px; background: #5865f2; }
     .mark { position: absolute; top: 3px; width: 2px; height: 16px; margin-left: -1px; border-radius: 1px; background: #f0b132; }
     .handle {
@@ -254,21 +255,32 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
     .head { position: absolute; top: 0; width: 2px; height: 22px; margin-left: -1px; background: #fff; pointer-events: none; }
     .row { display: flex; align-items: center; gap: 6px; }
     .spacer { flex: 1 1 auto; }
+    .grp { width: 1px; align-self: stretch; margin: 0 2px; background: rgba(255, 255, 255, 0.08); }
     .time { font-variant-numeric: tabular-nums; opacity: 0.75; }
     button {
         font: inherit; color: #f2f3f5; background: #2b2d31; border: 0; border-radius: 6px;
-        padding: 5px 10px; cursor: pointer;
+        padding: 5px 10px; cursor: pointer; transition: background-color 0.12s ease, color 0.12s ease;
     }
     button:hover { background: #3a3d44; }
+    button:active:not(:disabled) { transform: scale(0.97); }
     button:disabled { opacity: 0.4; cursor: default; }
+    button:focus-visible { outline: 2px solid #5865f2; outline-offset: 2px; }
     button.go { background: #5865f2; }
     button.go:hover { background: #4752c4; }
-    button.danger:hover { background: #b5292d; }
+    button.danger:hover { background: #a12828; }
+    #play {
+        background: linear-gradient(135deg, #5865f2, #4752c4);
+        font-weight: 600; box-shadow: 0 2px 10px rgba(88, 101, 242, 0.35);
+    }
+    #play:hover { background: linear-gradient(135deg, #4752c4, #3c45a5); }
     .status { min-height: 15px; font-size: 11px; opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .status.bad { color: #fa777c; opacity: 1; }
     /* Where the panels that come later - speed, volume, captions - mount. They
        speak the same channel, so nothing below them has to change. */
     .panels:empty { display: none; }
+    @media (prefers-reduced-motion: reduce) {
+        * { transition-duration: 0.01ms !important; }
+    }
 </style>
 </head>
 <body>
@@ -291,13 +303,15 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
         <div class="row">
             <button id="play" data-do="play">Pause</button>
             <span class="time" id="time">0:00 / 0:00</span>
+            <span class="grp"></span>
             <button data-do="in" title="I">In</button>
             <button data-do="out" title="O">Out</button>
             <button data-do="all">All</button>
-            <span class="spacer"></span>
             <button class="go" data-do="cut">Cut</button>
             <button class="go" data-do="send">Send</button>
             <button class="danger" data-do="delete">Delete</button>
+            <span class="grp"></span>
+            <span class="spacer"></span>
             <button data-do="open">Studio</button>
             <button data-do="close" title="Esc">Close</button>
         </div>

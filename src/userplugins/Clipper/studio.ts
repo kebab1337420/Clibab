@@ -1314,8 +1314,19 @@ function fitted(video: HTMLVideoElement, width: number, height: number, zoom: nu
     return { sx, sy, sw, sh, dx: (width - dw) / 2, dy: (height - dh) / 2, dw, dh };
 }
 
+/* Caption wraps, keyed on what the result is a function of. A caption's text
+   does not change between frames, and measureText costs a layout per word per
+   frame: a wrap that almost always answers from cache keeps a caption from
+   re-measuring itself at the display rate. The cache is cleared on growth
+   rather than unbounded, and entries are never mutated by the painter. */
+const wrapCache = new Map<string, string[]>();
+
 /** Splits a caption on its own newlines, then on width. */
 function wrap(ctx: CanvasRenderingContext2D, text: string, max: number): string[] {
+    const key = `${ctx.font}\u0000${max}\u0000${text}`;
+    const hit = wrapCache.get(key);
+    if (hit) return hit;
+
     const lines: string[] = [];
 
     for (const paragraph of text.split("\n")) {
@@ -1336,7 +1347,11 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, max: number): string[
         lines.push(line);
     }
 
-    return lines.length > 1 ? lines.filter(Boolean) : lines;
+    const wrapped = lines.length > 1 ? lines.filter(Boolean) : lines;
+    if (wrapCache.size >= 256) wrapCache.clear();
+    wrapCache.set(key, wrapped);
+
+    return wrapped;
 }
 
 /**
@@ -1809,12 +1824,42 @@ function pipBoxes(width: number, height: number, count: number): Box[] {
     const h = w * 9 / 16;
     const pad = Math.round(Math.min(width, height) * 0.025);
 
-    return Array.from({ length: count }, (unused, i) => ({
+    return Array.from({ length: count }, (_, i) => ({
         x: width - pad - w,
         y: pad + i * (h + pad * 0.6),
         w,
         h
     }));
+}
+
+/* Geometry for a frame is a pure function of the canvas and the angle count,
+   so the display-rate calls reuse the last answer instead of building fresh
+   arrays on every paint. The cells are read-only once handed out. */
+const layoutCache = new Map<string, Box[]>();
+
+function layoutFor(kind: string, width: number, height: number, count: number, make: () => Box[]): Box[] {
+    const key = `${kind}|${width}|${height}|${count}`;
+    const hit = layoutCache.get(key);
+    if (hit) return hit;
+    const fresh = make();
+    if (layoutCache.size >= 32) layoutCache.clear();
+    layoutCache.set(key, fresh);
+    return fresh;
+}
+
+/* The angles with a picture to show, capped at three: recreating that list on
+   every paint is the noisiest thing a 144 Hz loop does. The array is shared,
+   so callers must not keep it past the frame they painted. */
+const anglesScratch: HTMLVideoElement[] = [];
+
+function topAngles(angles: HTMLVideoElement[] | undefined): HTMLVideoElement[] {
+    anglesScratch.length = 0;
+    if (angles) {
+        for (let i = 0; i < angles.length && anglesScratch.length < 3; i++) {
+            if (angles[i].videoWidth) anglesScratch.push(angles[i]);
+        }
+    }
+    return anglesScratch;
 }
 
 /** What the frame under the playhead is, beyond the pixels the element holds. */
@@ -1874,10 +1919,10 @@ export function paintFrame(ctx: CanvasRenderingContext2D, video: HTMLVideoElemen
 
     // Only the angles that have a picture to give: one that failed to load
     // must not leave a black cell where a face should be.
-    const angles = (frame.angles ?? []).filter(other => other.videoWidth).slice(0, 3);
+    const angles = topAngles(frame.angles);
 
     if (angles.length && frame.layout !== "pip") {
-        const cells = angleCells(width, height, angles.length + 1);
+        const cells = layoutFor("cells", width, height, angles.length + 1, () => angleCells(width, height, angles.length + 1));
 
         drawCover(ctx, video, cells[0], framing.x, framing.y, effects.flip);
         angles.forEach((other, i) => drawCover(ctx, other, cells[i + 1]));
@@ -1895,7 +1940,7 @@ export function paintFrame(ctx: CanvasRenderingContext2D, video: HTMLVideoElemen
         }
 
         if (angles.length) {
-            const boxes = pipBoxes(width, height, angles.length);
+            const boxes = layoutFor("pips", width, height, angles.length, () => pipBoxes(width, height, angles.length));
 
             angles.forEach((other, i) => {
                 const at = boxes[i];
@@ -2318,7 +2363,9 @@ async function loadSources(project: Project, sources: StudioSource[], ctx: Audio
  */
 export async function renderProject(project: Project, sources: StudioSource[], options: RenderOptions = {}): Promise<Blob> {
     const total = projectLength(project);
-    if (!project.segments.length || total <= 0) throw new Error("The timeline is empty");
+    // Not `total <= 0`, which is false for NaN: a saved project with a
+    // non-numeric in/out point would otherwise render with a NaN clock.
+    if (!project.segments.length || !(total > 0)) throw new Error("The timeline is empty");
 
     const height = Math.max(2, Math.round((project.height || 720) / 2) * 2);
     const width = Math.max(2, Math.round((project.width || height * 16 / 9) / 2) * 2);
@@ -2398,6 +2445,13 @@ export async function renderProject(project: Project, sources: StudioSource[], o
     const built = await Promise.all(
         sources
             .filter(source => loaded.has(source.id))
+            // A source nobody can be separated out of is skipped before the
+            // fetch: an angle recorded outside a call has no per-person sidecars
+            // (`tracks`) and no voice metadata (`voices`), and for that one the
+            // native path would still pull the whole file over IPC just to learn
+            // it has no native tracks in it either. Only files that actually
+            // contain some idea of who is talking can answer a mute.
+            .filter(source => source.voices?.length || source.tracks?.length)
             .map(async source => [
                 source.id,
                 await voiceMixFor(

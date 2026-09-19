@@ -26,8 +26,17 @@ export function SaveDirectoryInput() {
 
     useEffect(() => {
         let alive = true;
-        resolveClipFolder().then(path => { if (alive) setResolved(path); });
-        return () => { alive = false; };
+
+        // Resolving walks the disk, so it is debounced until the field settles:
+        // racing resolutions on every keystroke only need that one to win.
+        const timer = setTimeout(() => {
+            resolveClipFolder().then(path => { if (alive) setResolved(path); });
+        }, 300);
+
+        return () => {
+            alive = false;
+            clearTimeout(timer);
+        };
     }, [saveDirectory]);
 
     return (

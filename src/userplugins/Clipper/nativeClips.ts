@@ -617,31 +617,98 @@ export function setOnIdleCallback(cb: (() => void) | null): void {
     onIdle = cb;
 }
 
-/** Installs the listeners once, so the engine's last word is always on hand. */
+/**
+ * The permanent listeners, named so they can be taken back off.
+ *
+ * They used to be anonymous closures made fresh inside `listen()`: after a
+ * `disarm()` - or after Discord rebuilt its voice stack and `engine()` started
+ * handing back a new instance - they stayed subscribed to the old engine while
+ * `listening` still claimed everything was wired up. The old instance's words
+ * then kept landing in `lastEvent`/`confirmed` long after they stopped meaning
+ * anything about the buffer that is actually armed.
+ */
+function onReadyEvent(...args: any[]): void {
+    lastEvent = { event: READY, detail: detailOf(args) };
+
+    /*
+     * `clips-recording-ready-changed` carries the answer as its first
+     * argument, and it is the only word the engine gives on whether the
+     * ring buffer is actually filling. It arrives on the in-process
+     * path too: the media engine wrapper registers the native handler
+     * from inside its own `setClipsSource`, not from `setClipsV3-
+     * Enabled`, so it does not depend on the out-of-process recorder.
+     */
+    confirmed = args[0] !== false;
+    logEvent(READY, args);
+}
+
+function onFailedEvent(...args: any[]): void {
+    lastEvent = { event: FAILED, detail: detailOf(args) };
+    logEvent(FAILED, args);
+}
+
+function onEndedEvent(...args: any[]): void {
+    lastEvent = { event: ENDED, detail: detailOf(args) };
+    noteEnded();
+    logEvent(ENDED, args);
+}
+
+function onIdleEvent(...args: any[]): void {
+    lastEvent = { event: IDLE, detail: detailOf(args) };
+    onIdle?.();
+    logEvent(IDLE, args);
+}
+
+/** Exactly what `listen()` installs, so `unlisten()` can take it back off. */
+const LISTENERS: Array<[string, (...args: any[]) => void]> = [
+    [READY, onReadyEvent],
+    [FAILED, onFailedEvent],
+    [ENDED, onEndedEvent],
+    [IDLE, onIdleEvent],
+];
+
+/** The engine instance the listeners above are currently installed on. */
+let listenedOn: ClipsEngine | null = null;
+
+/** Installs the listeners, so the engine's last word is always on hand. */
 function listen(): void {
     const found = engine();
-    if (listening || !found?.on) return;
+    if (!found?.on) return;
+    if (listenedOn === found) return;
 
+    // A re-arm onto a fresh engine, or onto the same one after a disarm: the
+    // listeners belong to one instance, so take them off the old one first and
+    // its last words stop landing in `lastEvent`/`confirmed`.
+    unlisten();
+
+    for (const [event, listener] of LISTENERS) found.on(event, listener);
+    listenedOn = found;
     listening = true;
+}
 
-    for (const event of [READY, FAILED, ENDED, IDLE]) {
-        found.on(event, (...args: any[]) => {
-            lastEvent = { event, detail: detailOf(args) };
+/**
+ * Removes exactly what `listen()` installed.
+ *
+ * The engine is replaced whenever Discord rebuilds its voice stack, so the
+ * instance is held rather than looked up again on the way out - asking the
+ * current engine to drop listeners it never had would leave the old one's in
+ * place, which is the leak this exists to close.
+ */
+function unlisten(): void {
+    const target = listenedOn;
+    listenedOn = null;
+    listening = false;
+    if (!target) return;
 
-            /*
-             * `clips-recording-ready-changed` carries the answer as its first
-             * argument, and it is the only word the engine gives on whether the
-             * ring buffer is actually filling. It arrives on the in-process
-             * path too: the media engine wrapper registers the native handler
-             * from inside its own `setClipsSource`, not from `setClipsV3-
-             * Enabled`, so it does not depend on the out-of-process recorder.
-             */
-            if (event === READY) confirmed = args[0] !== false;
-            if (event === ENDED) noteEnded();
-            if (event === IDLE) onIdle?.();
-            logEvent(event, args);
-        });
+    for (const [event, listener] of LISTENERS) {
+        try {
+            (target.off ?? target.removeListener)?.call(target, event, listener);
+        } catch { /* an emitter that only adds; forgetting it is enough */ }
     }
+
+    // Whatever the old instance said belonged to a buffer that is gone.
+    lastEvent = null;
+    confirmed = false;
 }
 
 /** How many times an event is logged in full before it is counted instead. */
@@ -756,7 +823,7 @@ export function nativeAvailability(): NativeAvailability {
 }
 
 /** The engine's clock, which is the only clock a save request may be built on. */
-export function now(): number | null {
+function now(): number | null {
     const value = engine()?.getSystemSteadyClockNowMs?.();
     return typeof value === "number" ? value : null;
 }
@@ -930,6 +997,7 @@ export function arm(options: {
 /** Stop the native buffer and let go of the capture source. */
 export function disarm(): void {
     stopOffering();
+    unlisten();
 
     const found = engine();
     if (!found) {

@@ -73,15 +73,21 @@ function samples(data: Uint8Array, view: DataView, stbl: Box): Array<[number, nu
     if (!stsz || !stsc || !stco) return [];
 
     const uniform = view.getUint32(stsz.start + 4);
-    const count = view.getUint32(stsz.start + 8);
+    // The declared counts come from the file and are never trusted with an
+    // allocation or a loop: a clip that claims four billion samples must not
+    // get a table that size - it gets the largest its own body could hold.
+    const count = Math.min(view.getUint32(stsz.start + 8), Math.max(0, Math.floor((stsz.end - (stsz.start + 12)) / 4)));
     const sizes = new Uint32Array(count);
 
     for (let i = 0; i < count; i++) {
         sizes[i] = uniform || view.getUint32(stsz.start + 12 + i * 4);
     }
 
-    const chunks = view.getUint32(stco.start + 4);
     const wide = stco.type === "co64";
+    const chunks = Math.min(
+        view.getUint32(stco.start + 4),
+        Math.max(0, Math.floor((stco.end - (stco.start + 8)) / (wide ? 8 : 4)))
+    );
     const offsets = new Float64Array(chunks);
 
     for (let i = 0; i < chunks; i++) {
@@ -92,7 +98,7 @@ function samples(data: Uint8Array, view: DataView, stbl: Box): Array<[number, nu
 
     // stsc says "from chunk N on, each chunk holds this many samples", so it is
     // read as runs rather than per chunk.
-    const runs = view.getUint32(stsc.start + 4);
+    const runs = Math.min(view.getUint32(stsc.start + 4), Math.max(0, Math.floor((stsc.end - (stsc.start + 8)) / 12)));
     const perChunk = new Uint32Array(chunks);
 
     for (let i = 0; i < runs; i++) {
@@ -208,7 +214,11 @@ function editOffset(data: Uint8Array, view: DataView, trak: Box, movieTimescale:
     if (!elst || !movieTimescale) return 0;
 
     const version = data[elst.start];
-    const count = view.getUint32(elst.start + 4);
+    const claimed = view.getUint32(elst.start + 4);
+    // The count is a field of a hostile file: an entry is 12 or 20 bytes, and
+    // the loop only walks what the box could physically hold - a forged count
+    // of four billion otherwise reads straight past the payload.
+    const count = Math.min(claimed, Math.max(0, Math.floor((elst.end - (elst.start + 8)) / (version === 1 ? 20 : 12))));
 
     let at = elst.start + 8;
     let offset = 0;

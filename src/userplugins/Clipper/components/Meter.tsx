@@ -37,10 +37,15 @@ export function Meter({ level }: { level: number; }) {
         >
             <div
                 style={{
-                    width: `${Math.round(Math.min(1, level) * 100)}%`,
+                    // A width animation reflows the track every frame a source
+                    // is loud; scaling the already-clipped bar does the same
+                    // with nothing but a composite.
+                    width: "100%",
                     height: "100%",
+                    transform: `scaleX(${Math.min(1, Math.max(0, level))})`,
+                    transformOrigin: "left",
                     background: level > 0.9 ? "var(--status-danger, #da373c)" : "var(--green-360, #23a55a)",
-                    transition: "width .1s linear"
+                    transition: "transform .1s linear"
                 }}
             />
         </div>

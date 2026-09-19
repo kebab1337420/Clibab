@@ -225,6 +225,67 @@ function parse(json: string): LibraryDocument {
 /** The read currently in flight, so concurrent callers share one document. */
 let loading: Promise<LibraryDocument> | null = null;
 
+/**
+ * The write currently queued or running, so two flushes never touch the disk
+ * at the same time.
+ */
+let writeTail: Promise<void> = Promise.resolve();
+/**
+ * The newest document waiting to go to disk, one per folder, or empty when the
+ * disk is caught up. Keying by folder is what keeps a burst that straddles a
+ * folder switch safe: both folders keep their own latest document, whereas a
+ * single slot would let the second folder's write swallow the first's.
+ */
+const pending = new Map<string, string>();
+/** Whether a drain is already running, so one flush a burst starts the loop. */
+let draining = false;
+
+/**
+ * Writes every pending snapshot until the disk catches up.
+ *
+ * Each flush captures its own folder and document synchronously, the way the
+ * old flush did, so an edit belongs to the folder it was made in even if the
+ * setting changes before the write lands. What coalesces is the write itself:
+ * a document that lands again while its folder is already waiting replaces the
+ * older one (the newer always reflects every earlier edit), so a burst settles
+ * in one write per folder, not one per edit. A single serial drain keeps the
+ * order, and a folder switch simply leaves both folders to be written.
+ */
+async function drain(): Promise<void> {
+    while (pending.size) {
+        for (const [dir, doc] of [...pending]) {
+            pending.delete(dir);
+
+            try {
+                // Deliberately the folder the cache came from, not the current
+                // setting: a folder changed between the read and the write must
+                // not receive the previous folder's categories.
+                await Native.writeLibrary(dir, doc);
+            } catch (e) {
+                logger.warn("Could not write the clip library", e);
+            }
+        }
+    }
+
+    draining = false;
+}
+
+function flush(): Promise<void> {
+    if (!cache) return writeTail;
+
+    // Serialising here rather than at write time is the whole point: the
+    // document that was just edited is pinned to the folder it belongs to, so
+    // a folder switch racing a save cannot reroute or drop the edit.
+    pending.set(cacheDir ?? settings.store.saveDirectory, JSON.stringify(cache));
+
+    if (!draining) {
+        draining = true;
+        writeTail = writeTail.then(drain);
+    }
+
+    return writeTail;
+}
+
 async function read(dir: string): Promise<LibraryDocument> {
     let doc: LibraryDocument;
 
@@ -261,19 +322,6 @@ async function load(): Promise<LibraryDocument> {
     work.finally(() => void (loading === work && (loading = null))).catch(() => void 0);
 
     return work;
-}
-
-async function flush(): Promise<void> {
-    if (!cache) return;
-
-    try {
-        // Deliberately the folder the cache came from, not the current setting:
-        // a folder changed between the read and the write must not receive the
-        // previous folder's categories.
-        await Native.writeLibrary(cacheDir ?? settings.store.saveDirectory, JSON.stringify(cache));
-    } catch (e) {
-        logger.warn("Could not write the clip library", e);
-    }
 }
 
 export async function readMeta(): Promise<Record<string, ClipMeta>> {

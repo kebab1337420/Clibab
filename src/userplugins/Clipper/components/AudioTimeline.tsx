@@ -17,7 +17,7 @@
  * it by eye, which is the whole point of a lane.
  */
 
-import { useRef, useState } from "@webpack/common";
+import { React, useMemo, useRef, useState } from "@webpack/common";
 
 import { type AudioClip, type AudioSource, clipLengthOf, PEAKS } from "../audio";
 import { formatTime } from "../utils";
@@ -64,12 +64,25 @@ function slice(source: AudioSource, from: number, to: number, bars: number): num
     return out;
 }
 
+/**
+ * One block's wave, memoized.
+ *
+ * The peaks envelope is decoded once and the block's trim is the only thing a
+ * drag changes, so the slice is recomputed only when the kept range moves. The
+ * waveform never re-renders for a playhead tick or a lane repaint.
+ */
 function Wave({ source, from, to }: { source: AudioSource; from: number; to: number; }) {
-    const bars = slice(source, from, to, 120);
+    /*
+     * A wave the width of the block, not the file's full envelope: a two second
+     * block on a three minute track would otherwise carry six hundred bars
+     * into two hundred pixels. Sliced once per kept range, not per render.
+     */
+    const bars = 120;
+    const points = useMemo(() => slice(source, from, to, bars), [source.peaks, from, to, bars]);
 
     return (
-        <svg className="vc-clipper-sound-wave" viewBox={`0 0 ${bars.length} ${WAVE}`} preserveAspectRatio="none">
-            {bars.map((value, i) => {
+        <svg className="vc-clipper-sound-wave" viewBox={`0 0 ${points.length} ${WAVE}`} preserveAspectRatio="none">
+            {points.map((value, i) => {
                 const height = Math.max(1, value * WAVE);
 
                 return <rect key={i} x={i + 0.1} y={(WAVE - height) / 2} width={0.8} height={height} />;
@@ -97,6 +110,7 @@ export function AudioTimeline({ clips, sources, length, playhead, disabled, onCh
     onSeek(at: number): void;
 }) {
     const laneRef = useRef<HTMLDivElement | null>(null);
+    const MemoWave = useMemo(() => React.memo(Wave), []);
     const [drag, setDrag] = useState<Drag | null>(null);
     const span = Math.max(1, length);
 
@@ -189,7 +203,7 @@ export function AudioTimeline({ clips, sources, length, playhead, disabled, onCh
                             title={`${source?.name ?? "missing sound"} - ${formatTime(clipLengthOf(clip))}`}
                             onMouseDown={e => grab(e, clip)}
                         >
-                            {source && <Wave source={source} from={clip.from} to={clip.to} />}
+                            {source && <MemoWave source={source} from={clip.from} to={clip.to} />}
                             <span className="vc-clipper-sound-name">{source?.name ?? "missing sound"}</span>
                         </div>
                     );

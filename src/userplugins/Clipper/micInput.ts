@@ -627,19 +627,31 @@ export class MicInput {
             }
         };
 
+        // Two independent subscriptions: the store refusing is not the dispatcher
+        // refusing, and bundling both in one try/catch silently dropped the
+        // speaking listener - the gate's loudness read - whenever the store
+        // throw first.
         try {
             store?.addChangeListener?.(onSettings);
+        } catch (e) {
+            logger.warn("Could not follow the voice settings store while recording", e);
+        }
+        try {
             FluxDispatcher.subscribe("SPEAKING" as any, onSpeaking);
         } catch (e) {
-            logger.warn("Could not follow Discord's voice settings while recording", e);
+            logger.warn("Could not follow Discord's speaking events while recording", e);
         }
 
         this.unsubscribe = () => {
             try {
                 store?.removeChangeListener?.(onSettings);
+            } catch (e) {
+                logger.warn("Could not stop following the voice settings store", e);
+            }
+            try {
                 FluxDispatcher.unsubscribe("SPEAKING" as any, onSpeaking);
             } catch (e) {
-                logger.warn("Could not stop following Discord's voice settings", e);
+                logger.warn("Could not stop following Discord's speaking events", e);
             }
         };
     }
@@ -710,6 +722,7 @@ export class MicInput {
             // which the operating system keeps showing as in use.
             if (this.stopped) {
                 stream.getTracks().forEach(t => t.stop());
+                this.resyncing = false;
                 return;
             }
 
@@ -733,14 +746,17 @@ export class MicInput {
             // Only the first refusal of a device is worth a line: the rest say
             // the same thing about the same device.
             if (again) logger.warn(`Could not follow the microphone Discord switched to; leaving it alone for ${MIC_RETRY_MS / 1000}s`, e);
-        } finally {
-            this.resyncing = false;
         }
 
-        // Whatever was asked for during the swap is answered now, and only when
-        // it wants something other than what just opened.
+        // The swap is over, whether it opened, refused or was cancelled under
+        // us. A change that arrived during it was parked in `missed`; it is
+        // answered by the recursion below. The flag is cleared *before* that
+        // recursion: a setting event that fires in between must be allowed to
+        // re-enter `resync` cleanly, whereas leaving `resyncing` set would have
+        // it parked in `missed` again and the same swap opened twice.
         const { missed } = this;
         this.missed = "";
+        this.resyncing = false;
 
         if (missed && missed !== target && !this.stopped) await this.resync();
     }

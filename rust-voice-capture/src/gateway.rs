@@ -5,13 +5,13 @@
 //! because the whole point is to reach the UDP RTP socket directly.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::{info, warn};
 use base64::Engine;
 use serde_json::Value;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::net::lookup_host;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use futures::{SinkExt, StreamExt};
 
@@ -19,6 +19,10 @@ use crate::voice::SsrcTable;
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const INTENT_GUILD_VOICE_STATES: u32 = 1 << 6;
+/// Cadence of the OP 1 heartbeat. This loop used to live only for the duration
+/// of `join_voice`, which is why `leave_voice` ended up writing into a dead
+/// socket and Discord kept showing the bot in voice.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(40);
 
 /// What the caller hands to `Gateway::join_voice`.
 #[derive(Debug, Clone)]
@@ -35,32 +39,116 @@ pub struct JoinResult {
     pub ssrc_table: SsrcTable,     // user_id <-> ssrc
 }
 
+/// Frames the connection driver task executes against the WebSocket. Writes are
+/// acked once the frame is on the wire, so `leave_voice` knows its OP 4 really
+/// reached Discord before the socket closes.
+enum GatewayCommand {
+    Send { op: u8, d: Value, ack: oneshot::Sender<Result<(), String>> },
+    Close,
+}
+
+type GatewaySocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// One long-lived gateway connection per capture. A single spawned driver task
+/// owns the socket, the read loop and the heartbeat for the lifetime of the
+/// struct; `join_voice` / `leave_voice` only push `GatewayCommand`s at it.
 pub struct DiscordGateway {
     token: String,
-    ws: Arc<AsyncMutex<Option<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>>,
-    seq: Arc<AsyncMutex<u32>>,
+    cmds: mpsc::UnboundedSender<GatewayCommand>,
+    events: broadcast::Sender<Value>,
+    close: watch::Sender<Option<String>>,
 }
 
 impl DiscordGateway {
     pub async fn new(token: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (ws, _resp) = connect_async(GATEWAY_URL).await?;
-        Ok(Self {
+        let (cmds_tx, cmds_rx) = mpsc::unbounded_channel();
+        let (events_tx, _) = broadcast::channel(256);
+        let (close_tx, _) = watch::channel(None);
+        let gateway = Self {
             token: token.to_string(),
-            ws: Arc::new(AsyncMutex::new(Some(ws))),
-            seq: Arc::new(AsyncMutex::new(0)),
-        })
+            cmds: cmds_tx,
+            events: events_tx,
+            close: close_tx,
+        };
+        gateway.spawn_driver(ws, cmds_rx);
+        Ok(gateway)
     }
 
-    async fn send(&self, op: u8, d: Value) {
-        let seq = *self.seq.lock().await;
-        let payload = serde_json::json!({ "op": op, "d": d, "s": seq, "t": null });
-        let mut ws = self.ws.lock().await;
-        if let Some(s) = ws.as_mut() {
-            if s.send(Message::Text(payload.to_string())).await.is_err() {
-                warn!("gateway send failed");
+    /// Owns the socket end-to-end: writes commands in order, fans inbound
+    /// frames out to `events`, and heartbeats forever. On a read/write error or
+    /// close it records the reason in `close` and exits, so `closed()` can tell
+    /// `main` that the connection died mid-capture.
+    fn spawn_driver(&self, mut ws: GatewaySocket, mut cmds: mpsc::UnboundedReceiver<GatewayCommand>) {
+        let events = self.events.clone();
+        let close = self.close.clone();
+        tokio::spawn(async move {
+            let mut last_seq: u32 = 0;
+            let mut first_beat = true;
+            let mut reason = None::<String>;
+            loop {
+                // First beat soon after connect (no server sequence to echo yet),
+                // then on the regular cadence.
+                let delay = if first_beat { Duration::from_secs(5) } else { HEARTBEAT_INTERVAL };
+                first_beat = false;
+                let mut heartbeat = Box::pin(tokio::time::sleep(delay));
+                tokio::select! {
+                    cmd = cmds.recv() => match cmd {
+                        Some(GatewayCommand::Send { op, d, ack }) => {
+                            let payload = serde_json::json!({ "op": op, "d": d });
+                            match ws.send(Message::Text(payload.to_string())).await {
+                                Ok(()) => { let _ = ack.send(Ok(())); }
+                                Err(e) => {
+                                    let _ = ack.send(Err(e.to_string()));
+                                    reason = Some("gateway write failed".into());
+                                    break;
+                                }
+                            }
+                        }
+                        Some(GatewayCommand::Close) => break,
+                        None => break,
+                    },
+                    frame = ws.next() => match frame {
+                        Some(Ok(Message::Text(t))) => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                                // Remember the server sequence so HEARTBEAT (op 1)
+                                // can echo it.
+                                if let Some(s) = v.get("s").and_then(|x| x.as_u64()) {
+                                    last_seq = s as u32;
+                                }
+                                let _ = events.send(v);
+                            }
+                        }
+                        // Binary / ping / pong frames need no action.
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => { reason = Some(format!("gateway read error: {e}")); break; }
+                        None => { reason = Some("gateway closed by server".into()); break; }
+                    },
+                    _ = &mut heartbeat => {
+                        let payload = serde_json::json!({ "op": 1, "d": last_seq });
+                        if ws.send(Message::Text(payload.to_string())).await.is_err() {
+                            reason = Some("gateway heartbeat send failed".into());
+                            break;
+                        }
+                    }
+                }
             }
-            *self.seq.lock().await = seq.wrapping_add(1);
-        }
+            let _ = close.send(reason);
+            drop(ws);
+        });
+    }
+
+    /// Client → gateway frames are `{ op, d }` only; `s`/`t` are server → client.
+    /// Awaits the driver's ack so the caller knows the frame was actually written.
+    async fn send(&self, op: u8, d: Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmds.send(GatewayCommand::Send { op, d, ack: ack_tx })
+            .map_err(|_| Box::<dyn std::error::Error + Send + Sync>::from("gateway connection is not running"))?;
+        let res = ack_rx.await.map_err(|_| {
+            Box::<dyn std::error::Error + Send + Sync>::from("gateway connection closed before frame was written")
+        })?;
+        res.map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+        Ok(())
     }
 
     /// Identify + request voice join, then collect VOICE_SERVER_UPDATE key +
@@ -72,7 +160,7 @@ impl DiscordGateway {
             "intents": INTENT_GUILD_VOICE_STATES,
             "properties": { "os": "linux", "browser": "discord-voice-capture", "device": "rust" },
             "shard": [0, 1],
-        })).await;
+        })).await?;
 
         // 2. Request to join the vchannel. Emits VOICE_STATE_UPDATE (sourced table).
         self.send(4, serde_json::json!({
@@ -80,57 +168,70 @@ impl DiscordGateway {
             "channel_id": args.channel_id,
             "self_mute": false,
             "self_deaf": false,
-        })).await;
+        })).await?;
 
         // 3. Collect VOICE_SERVER_UPDATE (token + endpoint + key) + SSRC table.
-        let endpoint = Arc::new(AsyncMutex::new(None::<SocketAddr>));
-        let enc_key = Arc::new(AsyncMutex::new(Vec::<u8>::new()));
-        let table = Arc::new(AsyncMutex::new(SsrcTable::default()));
+        let mut rx = self.events.subscribe();
+        let mut endpoint: Option<SocketAddr> = None;
+        let mut enc_key: Vec<u8> = Vec::new();
+        let mut table = SsrcTable::default();
 
-        let ep2 = endpoint.clone(); let ek2 = enc_key.clone(); let tbl2 = table.clone();
-        let ws2 = self.ws.clone();
-        let recv = async {
+        let collect = async {
             loop {
-                let txt = {
-                    let mut ws = ws2.lock().await;
-                    if let Some(s) = ws.as_mut() {
-                        match s.next().await {
-                            Some(Ok(Message::Text(t))) => t,
-                            _ => continue,
-                        }
-                    } else { return; }
+                let v: Value = match rx.recv().await {
+                    Ok(v) => v,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                            "gateway connection closed before VOICE_SERVER_UPDATE"));
+                    }
                 };
-                let v: Value = match serde_json::from_str(&txt) { Ok(v) => v, Err(_) => continue };
                 let t = v.get("t").and_then(|x| x.as_str());
-                let d = v.get("d");
                 match t {
                     Some("VOICE_SERVER_UPDATE") => {
-                        if let Some(d) = d {
-                            if let Some(ep) = d.get("endpoint").and_then(|x| x.as_str()) {
-                                let host = ep.split(':').next().unwrap_or(ep);
-                                // IP discovery: the real public ip:port comes from the
-                                // type-0x1/0x2 UDP exchange now in `voice.rs::discover`.
-                                // We use :50001 as the initial UDP connect target
-                                // (discord.js does the same) — `VoiceSession::connect`
-                                // then runs `discover()` and exposes the real (ip, port)
-                                // as `session.discovered`, which main.rs feeds back to
-                                // the gateway via `select_protocol` (op 1). See
-                                // docs/mls_handshake.md §"Where we are today".
-                                let addr: SocketAddr = format!("{host}:50001").parse().unwrap();
-                                *ep2.lock().await = Some(addr);
-                                let key = d.get("key").and_then(|x| x.as_str()).unwrap_or("");
-                                *ek2.lock().await = base64::engine::general_purpose::STANDARD.decode(key).unwrap_or_default();
+                        let d = match v.get("d") { Some(d) => d, None => continue };
+                        if let Some(ep) = d.get("endpoint").and_then(|x| x.as_str()) {
+                            let host = ep.split(':').next().unwrap_or(ep);
+                            // IP discovery: the real public ip:port comes from the
+                            // type-0x1/0x2 UDP exchange in `voice.rs::discover`.
+                            // We use :50001 as the initial UDP connect target
+                            // (discord.js does the same) — `VoiceSession::connect`
+                            // then runs `discover()` and exposes the real (ip, port)
+                            // as `session.discovered`, which main.rs feeds back to
+                            // the gateway via `select_protocol` (op 1). See
+                            // docs/mls_handshake.md §"Where we are today".
+                            let addr = match lookup_host(format!("{host}:50001")).await {
+                                Ok(mut it) => match it.next() {
+                                    Some(a) => a,
+                                    None => {
+                                        return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                                            format!("voice endpoint {host} resolved to no addresses")));
+                                    }
+                                },
+                                Err(e) => {
+                                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                                        format!("bad voice endpoint {host}: {e}")));
+                                }
+                            };
+                            endpoint = Some(addr);
+                            let key = d.get("key").and_then(|x| x.as_str()).unwrap_or("");
+                            match base64::engine::general_purpose::STANDARD.decode(key) {
+                                Ok(k) if !k.is_empty() => enc_key = k,
+                                _ => {
+                                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                                        "missing or invalid voice encryption key"));
+                                }
                             }
                         }
                     }
                     Some("VOICE_STATE_UPDATE") => {
-                        if let Some(d) = d {
+                        if let Some(d) = v.get("d") {
                             if d.get("guild_id").and_then(|x| x.as_str()) == Some(&args.guild_id) {
                                 if let (Some(uid), Some(ssrc)) =
                                     (d.get("user_id").and_then(|x| x.as_str()),
                                      d.get("ssrc").and_then(|x| x.as_u64()))
                                 {
-                                    tbl2.lock().await.id.insert(ssrc as u32, uid.to_string());
+                                    table.id.insert(ssrc as u32, uid.to_string());
                                     info!("ssrc {ssrc} -> {uid}");
                                 }
                             }
@@ -138,60 +239,56 @@ impl DiscordGateway {
                     }
                     _ => {}
                 }
-                if ep2.lock().await.is_some() && !ek2.lock().await.is_empty() {
+                if endpoint.is_some() && !enc_key.is_empty() {
                     break;
                 }
             }
+            Ok(())
         };
 
-        // 4. Heartbeat so Discord doesn't drop the session before voice lands.
-        let seq2 = self.seq.clone();
-        let hb_ws = self.ws.clone();
-        let hb = async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let mut interval = tokio::time::interval(Duration::from_secs(40));
-            loop {
-                interval.tick().await;
-                let s = *seq2.lock().await;
-                let payload = serde_json::json!({ "op": 10, "d": s });
-                let mut ws = hb_ws.lock().await;
-                if let Some(s) = ws.as_mut() { let _ = s.send(Message::Text(payload.to_string())).await; }
-            }
-        };
-
-        tokio::pin!(recv, hb);
-        // Timeout the recv branch so a bad token/guild/channel (no VOICE_SERVER_UPDATE)
+        // Timeout the collect so a bad token/guild/channel (no VOICE_SERVER_UPDATE)
         // fails fast instead of hanging forever with a blind heartbeat.
-        let res = tokio::select! {
-            _ = tokio::time::timeout(Duration::from_secs(15), &mut recv) => { None::<Box<dyn std::error::Error + Send + Sync>> }
-            _ = &mut hb => { None }
-        };
+        tokio::time::timeout(Duration::from_secs(15), collect)
+            .await
+            .map_err(|_| Box::<dyn std::error::Error + Send + Sync>::from(
+                "never received VOICE_SERVER_UPDATE (timeout or disconnect)"))??;
 
-        let Some(addr) = endpoint.lock().await.take() else {
-            return Err("never received VOICE_SERVER_UPDATE (timeout or disconnect)".into());
-        };
-        let key = enc_key.lock().await.split_off(0);
-        let table = table.lock().await.clone();
-        let _ = res;
-        Ok(JoinResult { endpoint: addr, key, ssrc_table: table })
+        let addr = endpoint.ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(
+            "never received VOICE_SERVER_UPDATE (timeout or disconnect)"))?;
+        Ok(JoinResult { endpoint: addr, key: enc_key, ssrc_table: table })
+    }
+
+    /// Future that completes once the gateway connection is lost (server close,
+    /// read/write/heartbeat error). `main` awaits this to learn that the voice
+    /// stream died while the parent was still listening.
+    pub async fn closed(&self) -> Option<String> {
+        let mut rx = self.close.subscribe();
+        if let Some(r) = rx.borrow().as_ref() {
+            return Some(r.clone());
+        }
+        loop {
+            if rx.changed().await.is_err() {
+                return None;
+            }
+            if let Some(r) = rx.borrow().as_ref() {
+                return Some(r.clone());
+            }
+        }
     }
 
     pub async fn leave_voice(&self, guild_id: &str) {
-        self.send(4, serde_json::json!({ "guild_id": guild_id, "channel_id": None::<&str>, "self_mute": false, "self_deaf": false })).await;
-        info!("left voice");
-    }
-
-    /// SelectProtocol (gateway op 1): feed the IP-discovered public ip:port back
-    /// to Discord over the voice WS so it routes UDP to the right 4-tuple.
-    /// `ip` is the public IP string returned by `discover`; `port` is the 16-bit port.
-    pub async fn select_protocol(&self, ip: &str, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send(1, serde_json::json!({ "ip": ip, "port": port })).await;
-        info!("select_protocol ip={ip} port={port}");
-        Ok(())
+        if let Err(e) = self.send(4, serde_json::json!({
+            "guild_id": guild_id,
+            "channel_id": None::<&str>,
+            "self_mute": false,
+            "self_deaf": false,
+        })).await {
+            warn!("leave_voice failed: {e}");
+        } else {
+            info!("left voice");
+        }
+        // The capture is over; stop heartbeating and drop the socket so the
+        // server actually sees us out of voice (the OP 4 was acked above).
+        let _ = self.cmds.send(GatewayCommand::Close);
     }
 }
-
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::time::{SystemTime, UNIX_EPOCH};

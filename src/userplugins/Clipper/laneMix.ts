@@ -69,6 +69,7 @@
 import { Logger } from "@utils/Logger";
 
 import { loadVoiceTrack } from "./clips";
+import { prepareRemote } from "./laneMix.worker";
 import { hasVoiceTracks, readNativeAudio } from "./nativeTracks";
 import { type VoiceFileMeta, voiceGainOf, type VoiceLevels } from "./voice";
 import { cascade, LOW_HZ, SECTIONS } from "./voiceBand";
@@ -315,14 +316,18 @@ let held: Held | null = null;
 const bare = new Set<string>();
 
 /**
- * The decode currently running, so two callers wait on one of them.
+ * The decodes currently running, so two callers wait on one of them.
  *
  * The cache above only answers once a decode has finished, and a decode is
  * seconds of work on every track of the clip. A slider released while a render
  * is starting reaches here twice, and without this both of them would decode
  * the same files and hold two copies of them at once.
+ *
+ * One entry per clip, not one slot: the studio can be asked for a second clip
+ * while the first is still decoding, and a single slot had the second caller
+ * start a duplicate decode of the first instead of waiting on it.
  */
-let loading: { key: string; work: Promise<Held | null>; } | null = null;
+const loading = new Map<string, Promise<Held | null>>();
 
 /**
  * Speech-band RMS per hop of one channel, on the clip's clock.
@@ -330,8 +335,16 @@ let loading: { key: string; work: Promise<Held | null>; } | null = null;
  * The band is one pole each way rather than a proper filter: what it is for is
  * deciding when somebody talks and how loud they are next to the same voice in
  * the bed, and for both of those a rolloff is as good as a wall.
+ *
+ * The loop was already the expensive half of the first measurement - every
+ * sample of the bed and of each track - and on a cold cache it used to run all
+ * of it without yielding, which is what froze the renderer. It is the same
+ * loop with the same state and the same answer, handed back to the thread
+ * between slices.
  */
-function envelopeOf(buffer: AudioBuffer, offset: number, points: number): Float32Array {
+const ENV_SLICE = 65536;
+
+async function envelopeIdle(buffer: AudioBuffer, offset: number, points: number): Promise<Float32Array> {
     const out = new Float32Array(points);
     const rate = buffer.sampleRate;
     const hop = Math.max(1, Math.round(rate / ENV_HZ));
@@ -349,25 +362,43 @@ function envelopeOf(buffer: AudioBuffer, offset: number, points: number): Float3
     let sum = 0;
     let taken = 0;
 
-    for (let i = 0; i < data.length; i++) {
-        low = lowCoeff * low + (1 - lowCoeff) * data[i];
-        high = highCoeff * high + (1 - highCoeff) * low;
+    for (let start = 0; start < data.length; start += ENV_SLICE) {
+        const end = Math.min(data.length, start + ENV_SLICE);
 
-        const value = low - high;
-        sum += value * value;
+        for (let i = start; i < end; i++) {
+            low = lowCoeff * low + (1 - lowCoeff) * data[i];
+            high = highCoeff * high + (1 - highCoeff) * low;
 
-        if (++taken < hop) continue;
+            const value = low - high;
+            sum += value * value;
 
-        if (at >= 0 && at < points) out[at] = Math.sqrt(sum / hop);
+            if (++taken < hop) continue;
 
-        at++;
-        sum = 0;
-        taken = 0;
+            if (at >= 0 && at < points) out[at] = Math.sqrt(sum / hop);
+
+            at++;
+            sum = 0;
+            taken = 0;
+
+            if (at >= points) break;
+        }
+
+        await idle();
 
         if (at >= points) break;
     }
 
     return out;
+}
+
+/**
+ * Hands the thread back until the browser is idle, or the next frame at worst.
+ */
+function idle(): Promise<void> {
+    return new Promise(resolve => {
+        if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: 64 });
+        else setTimeout(resolve, 0);
+    });
 }
 
 /** Turns loudness into a 0/1 gate, opened either side of every loud hop. */
@@ -597,21 +628,52 @@ function place(ctx: OfflineAudioContext, buffer: AudioBuffer, offset: number): A
     return node;
 }
 
-/** Measures each track against the bed: when it really happened, and how loud. */
-function prepare(
+/**
+ * Measures each track against the bed: when it really happened, and how loud.
+ *
+ * The first cold measurement of a clip is seconds of arithmetic, so it is sent
+ * to a worker (`prepareRemote`) rather than run here. When no worker can be
+ * started, `prepareChunked` does the same arithmetic on this thread, in slices
+ * that cannot hold it. Either way the answer is the same shape and the same
+ * numbers as the synchronous version this replaced.
+ */
+async function prepare(
     bed: AudioBuffer | null,
     bedOffset: number,
     raw: RawLane[],
     points: number
-): { lanes: Lane[]; bedEnvelope: Float32Array; } {
-    const bedEnvelope = bed ? envelopeOf(bed, bedOffset, points) : new Float32Array(points);
+): Promise<{ lanes: Lane[]; bedEnvelope: Float32Array; }> {
+    try {
+        const remote = await prepareRemote(bed, bedOffset, raw, points);
+        if (remote) {
+            return {
+                bedEnvelope: remote.bedEnvelope,
+                lanes: raw.map((lane, index) => ({ ...lane, ...remote.lanes[index] }))
+            };
+        }
+    } catch {
+        // The worker did not answer; measure on this thread instead.
+    }
+
+    return await prepareChunked(bed, bedOffset, raw, points);
+}
+
+/** The measurement itself, a step at a time so it never holds the thread. */
+async function prepareChunked(
+    bed: AudioBuffer | null,
+    bedOffset: number,
+    raw: RawLane[],
+    points: number
+): Promise<{ lanes: Lane[]; bedEnvelope: Float32Array; }> {
+    const bedEnvelope = bed ? await envelopeIdle(bed, bedOffset, points) : new Float32Array(points);
     // `offset` is carried here rather than written back onto `lane`: what was
     // handed in describes the file and is read again on the next clip.
-    const measured = raw.map(lane => ({
-        lane,
-        offset: lane.offset,
-        rms: envelopeOf(lane.buffer, lane.offset, points)
-    }));
+    const measured: { lane: RawLane; offset: number; rms: Float32Array; }[] = [];
+
+    for (const lane of raw) {
+        measured.push({ lane, offset: lane.offset, rms: await envelopeIdle(lane.buffer, lane.offset, points) });
+        await idle();
+    }
 
     if (!bed) {
         // Nothing to line up against and nothing to match: every track in a
@@ -672,6 +734,8 @@ function prepare(
 
         entry.rms = shiftBy(entry.rms, -lag);
         entry.offset = entry.lane.offset - lag / ENV_HZ;
+
+        await idle();
     }
 
     /*
@@ -711,7 +775,10 @@ function prepare(
 
     floor = quiet ? floor / quiet : 0;
 
-    const lanes = measured.map((entry, index) => {
+    const lanes: Lane[] = [];
+
+    for (let index = 0; index < measured.length; index++) {
+        const entry = measured[index];
         const alone = new Float32Array(points);
 
         // Alone means nobody else: their own gate is taken back off the count
@@ -722,14 +789,16 @@ function prepare(
             alone[i] = entry.rms[i] >= ENV_FLOOR && talking[i] === (mine[i] ? 1 : 0) ? 1 : 0;
         }
 
-        return {
+        lanes.push({
             ...entry.lane,
             offset: entry.offset,
             gain: matchGain(bedEnvelope, entry.rms, alone, floor),
             rms: entry.rms,
             gate: gates[index]
-        };
-    });
+        });
+
+        await idle();
+    }
 
     return { lanes, bedEnvelope };
 }
@@ -741,15 +810,17 @@ async function heldFor(
 ): Promise<Held | null> {
     if (held?.key === key) return held;
     if (bare.has(key)) return null;
-    if (loading?.key === key) return await loading.work;
+
+    const busy = loading.get(key);
+    if (busy) return await busy;
 
     const work = decodeInto(key, load);
-    loading = { key, work };
+    loading.set(key, work);
 
     try {
         return await work;
     } finally {
-        if (loading?.work === work) loading = null;
+        if (loading.get(key) === work) loading.delete(key);
     }
 }
 
@@ -760,8 +831,12 @@ async function decodeInto(
 ): Promise<Held | null> {
     const found = await load();
 
+    // The studio may have closed while the clips were decoding; the cache is
+    // then gone and must not be repopulated by a result nobody is waiting for.
+    const wanted = loading.has(key);
+
     if (!found?.raw.length) {
-        bare.add(key);
+        if (wanted) bare.add(key);
         return null;
     }
 
@@ -773,15 +848,16 @@ async function decodeInto(
         ? Math.max(2, Math.ceil((bedOffset + bed.duration) * ENV_HZ))
         : Math.max(2, ...raw.map(lane => Math.ceil((lane.offset + lane.buffer.duration) * ENV_HZ)));
 
-    const { lanes, bedEnvelope } = prepare(bed, bedOffset, raw, points);
+    const { lanes, bedEnvelope } = await prepare(bed, bedOffset, raw, points);
 
     logger.info(
         `"${key}" rebuilt from ${lanes.length} separate track(s): `
         + lanes.map(lane => `${lane.name} x${lane.gain.toFixed(2)} @${(lane.offset * 1000).toFixed(0)}ms`).join(", ")
     );
 
-    held = { key, bed, bedOffset, bedEnvelope, lanes, points, why: found.why ?? {} };
-    return held;
+    const fresh: Held = { key, bed, bedOffset, bedEnvelope, lanes, points, why: found.why ?? {} };
+    if (wanted) held = fresh;
+    return fresh;
 }
 
 /**
@@ -1258,4 +1334,7 @@ export async function laneMixFor(
 export function forgetLaneMixes(): void {
     held = null;
     bare.clear();
+    // In-flight decodes too, or their result lands in `held` on a clip the
+    // studio has already left - and the whole recording stays decoded.
+    loading.clear();
 }

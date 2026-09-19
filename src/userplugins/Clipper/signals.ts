@@ -122,7 +122,7 @@ interface Fired {
     at: number;
 }
 
-export interface Reading {
+interface Reading {
     /** The board's total, in the same units as ./highlights' bar. */
     value: number;
     /** Every kind contributing, biggest first, for the marker's reason. */

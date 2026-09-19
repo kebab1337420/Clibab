@@ -28,7 +28,7 @@ import { Logger } from "@utils/Logger";
 
 import { Container, mimeTypeChain } from "./settings";
 
-const logger = new Logger("Clipper");
+const logger = new Logger("Clipper", "#f0b132");
 
 /** How long each container is given to produce bytes. */
 const RUN_MS = 600;
@@ -77,23 +77,30 @@ export async function probeEncoders(): Promise<EncoderReport[]> {
 
     // The soundtrack matters: MP4 asks for AAC, and a machine whose AAC encoder
     // is the broken half would otherwise pass a video-only test.
-    const audio = new AudioContext();
-    const silence = audio.createGain();
-    silence.gain.value = 0;
-
-    const tone = audio.createOscillator();
-    tone.connect(silence);
-
-    const sink = audio.createMediaStreamDestination();
-    silence.connect(sink);
-    tone.start();
-
-    for (const track of sink.stream.getAudioTracks()) stream.addTrack(track);
+    //
+    // Kept in `let`s so the finally can reach them: had the AudioContext been
+    // created before the try like it used to be, a throw here would have left
+    // the ticker interval running on its detached canvas forever.
+    let audio: AudioContext | null = null;
+    let tone: OscillatorNode | null = null;
 
     const seen = new Set<string>();
     const reports: EncoderReport[] = [];
 
     try {
+        audio = new AudioContext();
+        const silence = audio.createGain();
+        silence.gain.value = 0;
+
+        tone = audio.createOscillator();
+        tone.connect(silence);
+
+        const sink = audio.createMediaStreamDestination();
+        silence.connect(sink);
+        tone.start();
+
+        for (const track of sink.stream.getAudioTracks()) stream.addTrack(track);
+
         for (const container of [Container.Mp4H264, Container.WebmVp9, Container.WebmVp8]) {
             for (const mimeType of mimeTypeChain(container)) {
                 if (seen.has(mimeType)) continue;
@@ -104,9 +111,9 @@ export async function probeEncoders(): Promise<EncoderReport[]> {
         }
     } finally {
         clearInterval(ticker);
-        tone.stop();
+        tone?.stop();
         stream.getTracks().forEach(t => t.stop());
-        await audio.close().catch(() => void 0);
+        if (audio) void audio.close().catch(() => void 0);
     }
 
     logger.info("Encoder probe", reports);

@@ -12,10 +12,8 @@
  */
 
 import { createHash } from "crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import type { Writable } from "stream";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
 import { basename, extname, isAbsolute, join } from "path";
 
@@ -44,6 +42,9 @@ const IS_WINDOWS = process.platform === "win32";
 const IS_WAYLAND = process.platform === "linux"
     && (process.env.XDG_SESSION_TYPE === "wayland" || !!process.env.WAYLAND_DISPLAY);
 
+/** The largest clip the editor will pull over IPC, so a bad file cannot fill the renderer's memory. */
+const MAX_CLIP_BYTES = 500 * 1024 * 1024;
+
 /**
  * Vesktop (and its forks) install their own display-media handler at startup
  * for their picker and their Linux audio capture. Electron only keeps one, and
@@ -52,154 +53,6 @@ const IS_WAYLAND = process.platform === "linux"
  * name is a backstop for the case it does not.
  */
 const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
-
-/*
- * ---------------------------------------------------- discord voice capture --
- *
- * `rust-voice-capture` is an alternate Discord client that speaks the voice
- * gateway + RTP UDP directly in Rust, demuxes one .wav per participant (by
- * SSRC), and writes them into ./clips. The renderer never holds a per-person
- * MediaStream (Discord decodes and mixes the call itself), so the only way to
- * get per-person tracks is to capture the RTP outside the renderer — which is
- * exactly what this binary does, bypassing Discord's own `discord_voice.node`
- * (the source of the `EXCEPTION_BREAKPOINT` / renderer-reload crash).
- *
- * The binary is driven over JSON lines on stdin/stdout:
- *   stdin:  {"cmd":"start","token":"...","guild_id":"...","channel_id":"..."}
- *   stdin:  {"cmd":"stop"}
- *   stdout: {"event":"wav_ready","user_id":"...","path":"clips/...wav"}
- *   stdout: {"event":"connected","endpoint":"1.2.3.4:50001"}
- *   stdout: {"event":"error","detail":"..."}
- *
- * It is spawned by `startVoiceCapture` below; the renderer reads the resulting
- * ./clips/*.wav via the existing `readVoiceTrack`/`listClips` handlers (no
- * stdout→IPC fan-out needed — the folder is the contract).
- */
-
-/** Path to the precompiled `discord-voice-capture` binary; null when not shipped. */
-function voiceBinaryPath(): string | null {
-    // Dev: repo sibling of the plugin source. Packaged: sits next to the asar.
-    const candidates = [
-        join(__dirname, "..", "..", "..", "..", "rust-voice-capture", "target", "release", "discord-voice-capture"),
-        join(__dirname, "..", "..", "discord-voice-capture"),
-        join(process.resourcesPath ?? "", "discord-voice-capture"),
-    ];
-    for (const c of candidates) {
-        if (existsSync(c)) return c;
-    }
-    return null;
-}
-
-let voiceProc: ChildProcessWithoutNullStreams | null = null;
-let voiceStdin: Writable | null = null;
-
-/**
- * Captures the Discord user token the first time a Discord API request goes
- * through this session, then holds it for the lifetime of the process.
- *
- * Discord never exposes the token to renderer/plugin JS directly, so the main
- * process sniffs the `Authorization` header off `/api/*` request headers. This
- * is the same surface Vencord itself uses for cloud-sync and the ReviewDB auth
- * flow. Reading once (not every request) keeps the hook cheap.
- */
-let cachedToken: string | null = null;
-function captureDiscordToken() {
-    session.defaultSession.webRequest.onBeforeSendHeaders(
-        { urls: ["https://*.discord.com/api/*"] },
-        details => {
-            if (cachedToken != null) return;
-            for (const h of details.requestHeaders?.["Authorization"] ?? []) {
-                const v = Array.isArray(h) ? h[0] : h;
-                const s = String(v ?? "");
-                if (s.length > 8 && !s.includes("*")) { cachedToken = s; }
-            }
-        },
-    );
-}
-
-// Lazily install the header hook so it's only active from the moment the binary
-// is first requested. Called once, on first startVoiceCapture.
-let tokenHookInstalled = false;
-function ensureTokenHook() {
-    if (tokenHookInstalled) return;
-    tokenHookInstalled = true;
-    captureDiscordToken();
-}
-
-/** Starts the Rust `discord-voice-capture` binary in stdio mode. */
-export function startVoiceCapture(_: IpcMainInvokeEvent, args: {
-    token?: string;
-    guildId: string;
-    channelId: string;
-}): { started: boolean; pid?: number; error?: string } {
-    if (voiceProc && voiceProc.exitCode === null) {
-        return { started: false, error: "already running" };
-    }
-
-    const bin = voiceBinaryPath();
-    if (!bin) {
-        return { started: false, error: "discord-voice-capture binary not found" };
-    }
-
-    ensureTokenHook();
-    const token = args.token ?? process.env.DISCORD_TOKEN ?? cachedToken;
-    if (!token) {
-        return { started: false, error: "no Discord token available yet (make one API request, or pass DISCORD_TOKEN)" };
-    }
-
-    try {
-        const proc = spawn(bin, ["--stdio"], {
-            stdio: ["pipe", "pipe", "pipe"],
-            env: { ...process.env, DISCORD_TOKEN: token },
-        });
-        voiceProc = proc;
-        voiceStdin = proc.stdin;
-
-        // Forward the start cmd + the runtime stdout back over IPC so the
-        // renderer can react to connected/error in near-real time.
-        proc.stdout?.on("data", (b: Buffer) => {
-            const line = b.toString().trim();
-            if (!line) return;
-            // Re-emit onto the renderer via an async webContents.send-style
-            // broadcast. Vencord plugins read this through the reply channel
-            // below; kept simple: log + let the renderer poll ./clips.
-            console.log("[clipper-voice]", line);
-        });
-        proc.stderr?.on("data", (b: Buffer) => console.error("[clipper-voice]", b.toString()));
-
-        proc.on("exit", () => { voiceProc = null; voiceStdin = null; });
-
-        // Send the start envelope.
-        const envelope = JSON.stringify({
-            cmd: "start",
-            token,
-            guild_id: args.guildId,
-            channel_id: args.channelId,
-        });
-        voiceStdin?.write(envelope + "\n", "utf8");
-
-        return { started: true, pid: proc.pid };
-    } catch (e) {
-        return { started: false, error: (e as Error).message };
-    }
-}
-
-/** Stops the Rust capture binary (writes {"cmd":"stop"} to its stdin). */
-export function stopVoiceCapture(_: IpcMainInvokeEvent): { stopped: boolean; error?: string } {
-    const proc = voiceProc;
-    if (!proc || proc.exitCode !== null) {
-        return { stopped: false, error: "not running" };
-    }
-    voiceStdin?.write(JSON.stringify({ cmd: "stop" }) + "\n", "utf8");
-    return { stopped: true };
-}
-
-/** Status for the renderer to toggle UI state. */
-export function voiceCaptureStatus(_: IpcMainInvokeEvent): { running: boolean; pid?: number } {
-    const proc = voiceProc;
-    const running = proc != null && proc.exitCode === null;
-    return { running, pid: proc?.pid };
-}
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
@@ -217,6 +70,9 @@ function resolveDirectory(dir: string): string {
  * an extension of its own choosing: `..\..\autorun.bat` must not escape the clip
  * folder, and nothing but a video file may be written.
  */
+/** Windows device names are reserved whatever the extension; a clip must not be named one. */
+const RESERVED_DEVICE_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
 function clipName(name: string): string | null {
     const flat = basename(String(name ?? "").replace(/[\\/]/g, "_")).trim();
     const cleaned = flat.replace(/[<>:"|?*\x00-\x1f]/g, "_").replace(/^\.+/, "");
@@ -226,8 +82,13 @@ function clipName(name: string): string | null {
     // that is what the thumbnails are, and gif because a clip exported as one
     // is written into the same folder and read back out of it to be attached.
     const match = /^([\w.\-+ ()[\]]{1,120})\.(webm|mp4|png|jpg|gif)$/i.exec(cleaned);
+    if (!match) return null;
 
-    return match ? `${match[1]}.${match[2].toLowerCase()}` : null;
+    // "con.webm", "nul.png"... would hit a console device on Windows rather
+    // than the file system. Prefix the stem so the name lands as a plain file.
+    const stem = RESERVED_DEVICE_NAMES.test(match[1]) ? `_${match[1]}` : match[1];
+
+    return `${stem}.${match[2].toLowerCase()}`;
 }
 
 /** Same, with a generated name for a write that must land somewhere. */
@@ -241,7 +102,12 @@ function freePath(dir: string, name: string): string {
     const stem = name.slice(0, name.length - ext.length);
 
     let path = join(dir, name);
-    for (let i = 2; existsSync(path) && i < 1000; i++) path = join(dir, `${stem} (${i})${ext}`);
+    let i = 2;
+    while (existsSync(path) && i < 1000) path = join(dir, `${stem} (${i++})${ext}`);
+
+    // Every suffix up to " (999)" is taken: returning the colliding name would
+    // silently overwrite it on the next write, so fail loudly instead.
+    if (existsSync(path)) throw new Error(`No free name left for ${name}; rename or clear the folder`);
 
     return path;
 }
@@ -252,16 +118,52 @@ function freePath(dir: string, name: string): string {
  * `keep` never overwrites an existing file: the editor exports under a name
  * derived from the source clip, which collides as soon as the same clip is
  * trimmed twice.
+ *
+ * Written the way `writeLibrary` is - a temp file beside the target, then a
+ * rename - so a crash never leaves a truncated clip listed. Concurrent saves
+ * of the same name are serialised so two of them cannot size up the same free
+ * path and clobber each other.
  */
-export function saveClip(_: IpcMainInvokeEvent, dir: string, name: string, data: Uint8Array, keep = false): string {
+
+/** One in-flight save per target name; the next save of that name waits for it. */
+const clipWrites = new Map<string, Promise<string>>();
+
+/** Atomically puts the bytes at `path`: temp file in the same dir, then rename. */
+function writeClipBytes(path: string, data: Uint8Array): void {
+    const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(temp, Buffer.from(data));
+    try {
+        renameSync(temp, path);
+    } catch (e) {
+        try { unlinkSync(temp); } catch { /* nothing to clean */ }
+        throw e;
+    }
+}
+
+export function saveClip(_: IpcMainInvokeEvent, dir: string, name: string, data: Uint8Array, keep = false): Promise<string> {
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
 
     const safe = safeClipName(name);
-    const path = keep ? freePath(target, safe) : join(target, safe);
+    const key = join(target, safe);
 
-    writeFileSync(path, Buffer.from(data));
-    return path;
+    // Chain onto the previous save of this name (if any), wiping its failure
+    // so one bad write does not gate the next - but never overlapping it.
+    const mine = (clipWrites.get(key) ?? Promise.resolve())
+        .catch(() => { })
+        .then(async () => {
+            const path = keep ? freePath(target, safe) : join(target, safe);
+            writeClipBytes(path, data);
+            return path;
+        });
+
+    mine.then(
+        () => { if (clipWrites.get(key) === mine) clipWrites.delete(key); },
+        () => { if (clipWrites.get(key) === mine) clipWrites.delete(key); },
+    );
+    clipWrites.set(key, mine);
+
+    return mine;
 }
 
 /**
@@ -271,12 +173,49 @@ export function saveClip(_: IpcMainInvokeEvent, dir: string, name: string, data:
  * back a duration - so the renderer needs the same name resolution `saveClip`
  * does, minus the write: the folder created, the name made safe, and a " (2)"
  * appended if something is already sitting there.
+ *
+ * `freePath` only sees what is already on disk, and clip names only carry a
+ * whole second (`timestampName`), so two saves in the same second reserve the
+ * same path and the second write lands on the first one's file before it is
+ * read back. Paths handed out but not yet written are therefore remembered
+ * here, and a second reservation of the same path walks `-1`, `-2`... until it
+ * finds one nobody holds. Synchronous like the rest of this file: reserving is
+ * not writing, so there is nothing to await.
  */
+const reservedClipPaths = new Set<string>();
+
 export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string): string {
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
 
-    return freePath(target, safeClipName(name));
+    const first = freePath(target, safeClipName(name));
+    if (!reservedClipPaths.has(first)) {
+        reservedClipPaths.add(first);
+        return first;
+    }
+
+    const ext = extname(first);
+    const stem = first.slice(0, first.length - ext.length);
+
+    let i = 1;
+    let next = `${stem}-${i}${ext}`;
+    while (reservedClipPaths.has(next) || existsSync(next)) next = `${stem}-${++i}${ext}`;
+
+    reservedClipPaths.add(next);
+    return next;
+}
+
+/*
+ * Gives a reservation back.
+ *
+ * The set only guards names nobody has written yet: once the engine has
+ * answered, the file is on disk (or nothing was written at all) and
+ * `freePath` sees the truth again. Without this every save leaks one entry
+ * for the rest of the session, and a stale entry can push a later save onto
+ * a `-1` suffix for a name that is actually free.
+ */
+export function releaseClipPath(_: IpcMainInvokeEvent, path: string): void {
+    reservedClipPaths.delete(path);
 }
 
 /*
@@ -412,14 +351,35 @@ export function listClips(_: IpcMainInvokeEvent, dir: string): StoredClip[] {
  * ever read a video file sitting directly in the clip folder.
  */
 export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint8Array {
-    const path = join(resolveDirectory(dir), safeClipName(name));
-    return new Uint8Array(readFileSync(path));
+    // A name that is not a name is a read of nothing in particular. The
+    // generated fallback is for writes only; reading through it would open
+    // somebody else's `clip-<ts>.webm`, so fail loudly instead.
+    const safe = clipName(name);
+    if (!safe) throw new Error("That is not a clip name");
+
+    const path = join(resolveDirectory(dir), safe);
+
+    // A clip that has been edited to gigabytes never loads in the studio
+    // anyway; refusing it before it is copied into the renderer keeps a bad
+    // file from filling the renderer's memory on its way to the failure. The
+    // cap is taken from the opened handle, so a file that grew between stat
+    // and read still cannot get past it.
+    const fd = openSync(path, "r");
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
+
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /** Moves a clip to the trash, so a mis-click stays undoable. */
 export async function deleteClip(_: IpcMainInvokeEvent, dir: string, name: string): Promise<void> {
     const target = resolveDirectory(dir);
-    const clip = safeClipName(name);
+    const clip = clipName(name);
+    if (!clip) throw new Error("That is not a clip name");
     const path = join(target, clip);
 
     try {
@@ -452,7 +412,8 @@ export async function deleteClip(_: IpcMainInvokeEvent, dir: string, name: strin
 /** Renames a clip inside the folder. Returns the name it ended up with. */
 export function renameClip(_: IpcMainInvokeEvent, dir: string, name: string, next: string): string {
     const target = resolveDirectory(dir);
-    const current = safeClipName(name);
+    const current = clipName(name);
+    if (!current) throw new Error("That is not a clip name");
     const from = join(target, current);
 
     // The extension is the source of truth for the container, so it is kept
@@ -557,16 +518,23 @@ export function readVideoFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
         throw new Error("Not a video file");
     }
 
-    const stat = statSync(path);
-    if (stat.size > MAX_IMPORT_BYTES) {
-        // The file is read here, copied across IPC and held as a Blob in the
-        // renderer: three copies of whatever passes through. Half a gigabyte is
-        // already an uncomfortable amount to hold while the timeline is open.
-        const mb = Math.round(stat.size / (1024 * 1024));
-        throw new Error(`That video is ${mb} MB; imports are capped at 512 MB. Trim it or lower its bitrate first.`);
-    }
+    // Sized from the opened handle, so a file that grows between a stat and
+    // the read cannot slip past the cap.
+    const fd = openSync(path, "r");
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_IMPORT_BYTES) {
+            // The file is read here, copied across IPC and held as a Blob in the
+            // renderer: three copies of whatever passes through. Half a gigabyte is
+            // already an uncomfortable amount to hold while the timeline is open.
+            const mb = Math.round(size / (1024 * 1024));
+            throw new Error(`That video is ${mb} MB; imports are capped at 512 MB. Trim it or lower its bitrate first.`);
+        }
 
-    return new Uint8Array(readFileSync(path));
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /** Native picker for sounds to lay over the montage. */
@@ -594,13 +562,18 @@ export function readAudioFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
         throw new Error("Not an audio file");
     }
 
-    const stat = statSync(path);
-    if (stat.size > MAX_SOUND_BYTES) {
-        const mb = Math.round(stat.size / (1024 * 1024));
-        throw new Error(`That sound is ${mb} MB; the timeline caps them at 64 MB.`);
-    }
+    const fd = openSync(path, "r");
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_SOUND_BYTES) {
+            const mb = Math.round(size / (1024 * 1024));
+            throw new Error(`That sound is ${mb} MB; the timeline caps them at 64 MB.`);
+        }
 
-    return new Uint8Array(readFileSync(path));
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /**
@@ -645,20 +618,27 @@ export function readImageFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
     const moving = /\.(mp4|webm)$/i.test(path);
     const cap = moving ? MAX_OVERLAY_VIDEO_BYTES : MAX_IMAGE_BYTES;
 
-    const stat = statSync(path);
-    if (stat.size > cap) {
-        const mb = Math.round(stat.size / (1024 * 1024));
-        const capMb = Math.round(cap / (1024 * 1024));
+    const fd = openSync(path, "r");
+    try {
+        const { size } = fstatSync(fd);
+        if (size > cap) {
+            const mb = Math.round(size / (1024 * 1024));
+            const capMb = Math.round(cap / (1024 * 1024));
 
-        throw new Error(`That ${moving ? "clip" : "picture"} is ${mb} MB; the montage caps them at ${capMb} MB.`);
+            throw new Error(`That ${moving ? "clip" : "picture"} is ${mb} MB; the montage caps them at ${capMb} MB.`);
+        }
+
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
     }
-
-    return new Uint8Array(readFileSync(path));
 }
 
 /** Shows the clip in the file explorer, with the file itself selected. */
 export function revealClip(_: IpcMainInvokeEvent, dir: string, name: string): void {
-    shell.showItemInFolder(join(resolveDirectory(dir), safeClipName(name)));
+    const safe = clipName(name);
+    if (!safe) throw new Error("That is not a clip name");
+    shell.showItemInFolder(join(resolveDirectory(dir), safe));
 }
 
 /** Absolute folder clips land in with the current setting. */
@@ -1104,10 +1084,6 @@ export function waitForVrEvent(_: IpcMainInvokeEvent, timeoutMs = 30_000): Promi
 // going away closes the port either way. This is for the tidy case.
 app.on("will-quit", () => {
     void closeFeeds();
-    // Kill the Rust voice capture binary if it's still alive.
-    if (voiceProc && voiceProc.exitCode === null) {
-        voiceProc.kill();
-    }
 });
 
 /*
@@ -1293,27 +1269,12 @@ const UPDATE_REPO = "kebab1337420/vencord-clipper";
 const UPDATE_AGENT = `VencordClipper (+https://github.com/${UPDATE_REPO})`;
 
 /**
- * What a release replaces when it carries no manifest of its own.
- *
- * Builds made by scripts\build-prebuilt.ps1 list their files, with a hash each,
- * in prebuilt\build-info.json; this list only covers a release published before
- * that existed. A name missing from such a release is skipped rather than
- * treated as a failure.
+ * No release file legitimately passes a hundred megabytes, and a manifest is
+ * kilobytes. Anything answered over this is a broken or hostile release, and
+ * aborting while it streams beats buffering the whole thing and finding out
+ * after the fact.
  */
-const BUNDLE_FILES = [
-    "patcher.js",
-    "patcher.js.LEGAL.txt",
-    "preload.js",
-    "renderer.css",
-    "renderer.js",
-    "renderer.js.LEGAL.txt",
-    "vencordDesktopMain.js",
-    "vencordDesktopMain.js.LEGAL.txt",
-    "vencordDesktopPreload.js",
-    "vencordDesktopRenderer.css",
-    "vencordDesktopRenderer.js",
-    "vencordDesktopRenderer.js.LEGAL.txt"
-];
+const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
 interface Fetched {
     status: number;
@@ -1338,7 +1299,25 @@ function httpGet(url: string, redirects = 0): Promise<Fetched> {
             }
 
             const chunks: Buffer[] = [];
-            response.on("data", chunk => chunks.push(chunk));
+            let received = 0;
+
+            // Refuse on the header when it gives the size away up front.
+            const { "content-length": contentLength } = response.headers;
+            if (contentLength && Number(contentLength) > MAX_DOWNLOAD_BYTES) {
+                response.destroy(new Error(`${url} answered ${contentLength} bytes, over the ${MAX_DOWNLOAD_BYTES} byte cap`));
+                return;
+            }
+
+            // And cap as it streams, in case the length was hidden or a
+            // redirect target grew.
+            response.on("data", (chunk: Buffer) => {
+                received += chunk.length;
+                if (received > MAX_DOWNLOAD_BYTES) {
+                    response.destroy(new Error(`${url} exceeded the ${MAX_DOWNLOAD_BYTES} byte cap`));
+                    return;
+                }
+                chunks.push(chunk);
+            });
             response.on("end", () => resolve({ status, body: Buffer.concat(chunks) }));
             response.on("error", reject);
         });
@@ -1486,7 +1465,16 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string): Promis
     if (!canWrite(dir)) throw new Error(`${dir} is read-only`);
 
     const manifest = await fetchManifest(tag);
-    const names = manifest ? Object.keys(manifest) : BUNDLE_FILES;
+
+    /*
+     * No file list, no integrity check: the manifest is what carries the sizes
+     * and hashes, and installing a bundle nothing was compared against is
+     * exactly the moment a tampered or mislabeled release gets in. A release
+     * published without one is skipped, not forgiven.
+     */
+    if (!manifest) throw new Error(`The release under ${tag} carries no file list; refusing to install it unchecked`);
+
+    const names = Object.keys(manifest);
 
     const staging = join(dir, ".clipper-update");
     rmSync(staging, { recursive: true, force: true });
@@ -1502,21 +1490,21 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string): Promis
 
             const { status, body } = await httpGet(`https://raw.githubusercontent.com/${UPDATE_REPO}/${tag}/prebuilt/dist/${name}`);
 
-            // Without a manifest the list is a guess, so a name the release does
-            // not carry is simply not part of it.
-            if (status === 404 && !manifest) continue;
+            // Every name here is listed by the release itself, so a 404 is a
+            // broken release rather than an innocent extra name.
             if (status !== 200) throw new Error(`${name} answered ${status}`);
             if (body.length === 0) throw new Error(`${name} came back empty`);
 
-            const expected = manifest?.[name];
-            if (expected?.size !== undefined && body.length !== expected.size) {
+            const expected = manifest[name];
+            if (expected?.size === undefined || !expected?.sha256) {
+                throw new Error(`${name} has no size and hash in the release's file list`);
+            }
+            if (body.length !== expected.size) {
                 throw new Error(`${name} is ${body.length} bytes, the release says ${expected.size}`);
             }
 
-            if (expected?.sha256) {
-                const got = createHash("sha256").update(body).digest("hex");
-                if (got.toLowerCase() !== expected.sha256.toLowerCase()) throw new Error(`${name} does not match its hash`);
-            }
+            const got = createHash("sha256").update(body).digest("hex");
+            if (got.toLowerCase() !== expected.sha256.toLowerCase()) throw new Error(`${name} does not match its hash`);
 
             writeFileSync(join(staging, name), body);
             written.push(name);

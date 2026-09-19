@@ -81,7 +81,7 @@ function context(): AudioContext {
 }
 
 /** The configured volume as a linear gain, 0 to 1. */
-export function clipSoundVolume(): number {
+function clipSoundVolume(): number {
     const raw = Number(settings.store.clipSoundVolume ?? DEFAULT_CLIP_SOUND_VOLUME);
     if (!Number.isFinite(raw)) return DEFAULT_CLIP_SOUND_VOLUME / 100;
 

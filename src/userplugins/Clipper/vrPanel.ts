@@ -120,13 +120,13 @@ function paint(title: string, note: string): ImageData | null {
 
     ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
-    ctx.fillStyle = "rgba(14, 15, 18, 0.92)";
+    ctx.fillStyle = "rgba(20, 21, 24, 0.92)";
     panelPath(ctx, 0, 0, WIDTH, HEIGHT, 28);
     ctx.fill();
 
-    // The plugin's own red, down the left edge. At a glance and from the corner
-    // of an eye this is the part that says which program is talking.
-    ctx.fillStyle = "#ed4245";
+    // The live red, down the left edge. At a glance and from the corner of an
+    // eye this is the part that says which program is talking.
+    ctx.fillStyle = "#da373c";
     ctx.fillRect(0, 40, 8, HEIGHT - 80);
 
     ctx.textBaseline = "alphabetic";

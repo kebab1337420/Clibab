@@ -17,7 +17,7 @@
  */
 
 import { localStorage } from "@utils/localStorage";
-import { Toasts, useEffect, useMemo, useRef, useState } from "@webpack/common";
+import { React, Toasts, useCallback, useEffect, useMemo, useRef, useState } from "@webpack/common";
 
 import { ANGLE_PACES, type AngleTrack, cutBetweenAngles } from "../angleCut";
 import { fetchAngle, type PostedAngle, postedAngles } from "../angles";
@@ -67,7 +67,7 @@ import {
     setMeta,
     UNCATEGORISED
 } from "../library";
-import { logger } from "../recorder";
+import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
 import { Container, extensionFor, pickMimeType } from "../settings";
@@ -118,7 +118,7 @@ import {
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
 import { formatBytes, formatTime } from "../utils";
-import { fromMeta, mutedFraction, voiceDuckAt, voiceGainOf, voiceLevelsTouched,type VoiceTrack } from "../voice";
+import { fromMeta, mutedFraction, VOICE_HZ, voiceDuckAt, voiceGainOf, voiceLevelsTouched, type VoiceTrack } from "../voice";
 import { createVoiceBand, type VoiceBand } from "../voiceBand";
 import { forgetVoiceMixes, type VoiceMix, voiceMixFor } from "../voiceMix";
 import { AudioMixerInput } from "./AudioMixer";
@@ -133,15 +133,114 @@ export const STUDIO_CSS = `
     /* The drop veil is laid over this and nothing else. Without it the veil
        would anchor to the backdrop and grey out the whole screen. */
     position: relative;
+    /* The shell lifts the whole editor one round above the generic modal:
+       a clean corner and the faintest fall of light from the top edge. */
+    border-radius: 12px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .02), transparent 96px),
+        var(--modal-background, #313338);
+}
+/* The emblem sits beside the title: a record dot in a brand tile, the one
+   logo the studio owns. */
+.vc-clipper-studio-emb {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--brand-experiment, #5865f2), var(--brand-experiment-560, #4752c4));
+    box-shadow: 0 2px 8px rgba(88, 101, 242, .35);
+}
+.vc-clipper-studio-emb i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, .22);
 }
 /* The title is the whole header here: the panels underneath say what each does. */
 .vc-clipper-studio .vc-clipper-head {
     align-items: center;
-    padding: 12px 16px 10px;
+    padding: 16px 20px 14px;
+    border-bottom: 1px solid var(--background-modifier-accent, rgba(78, 80, 88, .28));
 }
 .vc-clipper-studio .vc-clipper-head h2 {
-    font-size: 16px;
-    line-height: 20px;
+    margin: 0;
+    font-size: 18px;
+    line-height: 24px;
+    font-weight: 700;
+    letter-spacing: .01em;
+    color: var(--header-primary, #f2f3f5);
+}
+.vc-clipper-studio-head-title {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    margin-right: auto;
+}
+.vc-clipper-studio-head-title small {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted, #949ba4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* The far end of the header: a status line, the done action and the close,
+   standing together so the title reads alone on the left. */
+.vc-clipper-studio-head-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.vc-clipper-studio-ok {
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    background: linear-gradient(135deg, var(--brand-experiment, #5865f2), var(--brand-experiment-560, #4752c4));
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(88, 101, 242, .3);
+    transition: background-color .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.vc-clipper-studio-ok:hover:not(:disabled) {
+    box-shadow: 0 3px 12px rgba(88, 101, 242, .45);
+    transform: translateY(-1px);
+}
+.vc-clipper-studio-ok:active:not(:disabled) {
+    transform: scale(.97);
+}
+.vc-clipper-studio-ok:disabled {
+    opacity: .5;
+    cursor: default;
+}
+.vc-clipper-studio-close {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--interactive-normal, #b5bac1);
+    cursor: pointer;
+    transition: background-color .12s ease, color .12s ease;
+}
+.vc-clipper-studio-close:hover:not(:disabled) {
+    background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
+    color: var(--interactive-active, #fff);
+}
+.vc-clipper-studio-close:disabled {
+    opacity: .5;
+    cursor: default;
 }
 .vc-clipper-studio.vc-clipper-dropping {
     outline: 2px dashed var(--brand-experiment, #5865f2);
@@ -182,7 +281,11 @@ export const STUDIO_CSS = `
     display: flex;
     flex: 1;
     min-height: 0;
-    background: var(--background-secondary, #2b2d31);
+    /* The faintest light from above, falling away into a gentler dusk below,
+       so the body reads as a soft surface rather than a flat slab. */
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .035), transparent 160px),
+        linear-gradient(180deg, var(--background-secondary, #2b2d31), var(--background-secondary-alt, #232428));
 }
 
 /* Discord's own scrollbars, so a panel does not sprout a fat native one. */
@@ -205,8 +308,8 @@ export const STUDIO_CSS = `
     flex: 1;
     flex-direction: column;
     min-width: 0;
-    padding: 12px 14px;
-    gap: 8px;
+    padding: 16px 18px;
+    gap: 12px;
     background: var(--background-primary, #313338);
 }
 /* ----------------------------------------------------------------- stage -- */
@@ -222,8 +325,91 @@ export const STUDIO_CSS = `
     justify-content: center;
     border-radius: 8px;
     overflow: hidden;
-    background: #000;
-    box-shadow: var(--elevation-low, 0 1px 3px rgba(0, 0, 0, .3));
+    /* A monitor rather than a mat: the frame is not pitch black, it carries the
+       faintest lift toward the top so the picture sits on a surface. */
+    background: radial-gradient(120% 90% at 50% 0%, #232428 0%, #000 62%);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .4), inset 0 0 0 1px rgba(255, 255, 255, .06);
+}
+/* A soft vignette so the picture sits in a monitor rather than on a mat: the
+   corners fall away instead of ending at a hard edge. */
+.vc-clipper-stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: radial-gradient(120% 120% at 50% 42%, transparent 62%, rgba(0, 0, 0, .32));
+}
+/* The big play in the middle of a paused picture, the one obvious thing a
+   paused player has. It floats over the frame and only exists while a segment
+   is picked and nothing is playing. */
+.vc-clipper-bigplay {
+    position: absolute;
+    z-index: 4;
+    width: 68px;
+    height: 68px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-experiment, #5865f2), var(--brand-experiment-560, #4752c4));
+    color: #fff;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .45), 0 0 0 6px rgba(255, 255, 255, .10);
+    transition: transform .12s ease, box-shadow .12s ease, opacity .15s ease;
+}
+.vc-clipper-bigplay:hover:not(:disabled) {
+    transform: scale(1.07);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .5), 0 0 0 8px rgba(255, 255, 255, .14);
+}
+.vc-clipper-bigplay:active:not(:disabled) {
+    transform: scale(.96);
+}
+.vc-clipper-bigplay:disabled {
+    opacity: .6;
+    cursor: default;
+}
+/* The transport lives on the picture, as a player's does, in a glass pill at
+   the bottom. The strip around it is a fade that does not eat clicks, so the
+   overlays can still be grabbed under it. */
+.vc-clipper-stage-controls {
+    position: absolute;
+    z-index: 5;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    justify-content: center;
+    padding: 18px 16px 14px;
+    background: linear-gradient(180deg, transparent, rgba(0, 0, 0, .5));
+    opacity: 1;
+    transition: opacity .15s ease;
+    pointer-events: none;
+}
+.vc-clipper-stage-controls.vc-clipper-hide {
+    opacity: 0;
+}
+.vc-clipper-stage-controls .vc-clipper-transport {
+    width: 100%;
+    max-width: 560px;
+    gap: 12px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, .72);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(255, 255, 255, .08);
+    pointer-events: auto;
+}
+.vc-clipper-stage-controls .vc-clipper-transport button {
+    width: 36px;
+    height: 36px;
+    font-size: 13px;
+}
+.vc-clipper-stage-controls .vc-clipper-time {
+    background: rgba(255, 255, 255, .08);
 }
 .vc-clipper-stage canvas {
     max-width: 100%;
@@ -241,43 +427,86 @@ export const STUDIO_CSS = `
 .vc-clipper-transport {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 0 2px;
+    gap: 12px;
+    padding: 2px 0;
 }
-/* Round, so the one control that is pressed constantly reads as the one that is. */
+/* Round, so the one control that is pressed constantly reads as the one that
+   is. A head bigger than the scrubber around it, too: the play button is the
+   only control the transport has, so it should not read as one of three.
+   The gradient and the glow make it the hero of the row, like a player's. */
 .vc-clipper-transport button {
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     border: none;
     border-radius: 50%;
-    background: var(--brand-experiment, #5865f2);
+    background: linear-gradient(135deg, var(--brand-experiment, #5865f2), var(--brand-experiment-560, #4752c4));
     color: #fff;
-    font-size: 12px;
+    font-size: 14px;
     line-height: 1;
     cursor: pointer;
-    transition: background-color .12s ease, transform .12s ease;
+    box-shadow: 0 2px 10px rgba(88, 101, 242, .35);
+    transition: background-color .12s ease, transform .12s ease, box-shadow .12s ease;
 }
 .vc-clipper-transport button:hover:not(:disabled) {
     background: var(--brand-experiment-560, #4752c4);
     transform: scale(1.06);
+    box-shadow: 0 3px 14px rgba(88, 101, 242, .5);
+}
+.vc-clipper-transport button:active:not(:disabled) {
+    transform: scale(.94);
 }
 .vc-clipper-transport button:disabled {
     background: var(--button-secondary-background, #4e5058);
+    box-shadow: none;
     opacity: .4;
     cursor: default;
 }
+/* The scrubber is a progress bar of its own: a filled track plus a white knob
+   ringed in brand, fed by the same --vc-fill the element's style carries. */
 .vc-clipper-transport input[type="range"] {
     flex: 1;
-    min-width: 0;
-    accent-color: var(--brand-experiment, #5865f2);
+    min-width: 60px;
+    height: 6px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--brand-experiment, #5865f2) var(--vc-fill, 0%), var(--background-modifier-accent, rgba(78, 80, 88, .5)) var(--vc-fill, 0%));
+    outline: none;
+    cursor: pointer;
+}
+.vc-clipper-transport input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border: none;
+    border-radius: 50%;
+    background: var(--interactive-active, #fff);
+    box-shadow: 0 0 0 3px var(--brand-experiment, #5865f2), 0 1px 4px rgba(0, 0, 0, .45);
+    cursor: pointer;
+}
+.vc-clipper-transport input[type="range"]:disabled {
+    opacity: .4;
+    cursor: default;
+}
+.vc-clipper-transport input[type="range"]:disabled::-webkit-slider-thumb {
+    cursor: default;
+}
+.vc-clipper-transport input[type="range"]:focus-visible {
+    box-shadow: 0 0 0 2px var(--brand-experiment, #5865f2);
 }
 .vc-clipper-time {
     flex: 0 0 auto;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--background-secondary-alt, #232428);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     color: var(--text-muted, #949ba4);
@@ -296,29 +525,49 @@ export const STUDIO_CSS = `
 .vc-clipper-tracks {
     display: flex;
     flex-direction: column;
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--background-secondary, #2b2d31);
-    box-shadow: inset 0 0 0 1px var(--background-modifier-accent, rgba(78, 80, 88, .48));
+    box-shadow: 0 2px 12px rgba(0, 0, 0, .22), inset 0 0 0 1px var(--background-modifier-accent, rgba(78, 80, 88, .35)), inset 0 1px 0 rgba(255, 255, 255, .04);
     overflow: hidden;
 }
 .vc-clipper-track {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 7px 10px;
+    gap: 14px;
+    padding: 12px 14px;
 }
 .vc-clipper-track + .vc-clipper-track {
-    border-top: 1px solid var(--background-modifier-accent, rgba(78, 80, 88, .32));
+    border-top: 1px solid var(--background-modifier-accent, rgba(78, 80, 88, .24));
 }
 .vc-clipper-track-label {
     flex: 0 0 auto;
-    width: 44px;
+    width: 58px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: .04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-muted, #949ba4);
     user-select: none;
+    /* A dot in the gutter, one per lane, so the strip reads as a key: cut,
+       clips, sound and voices each keep an identity in the stack. */
+}
+.vc-clipper-track-label::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--brand-experiment, #5865f2);
+    opacity: .75;
+}
+.vc-clipper-track:nth-of-type(2) .vc-clipper-track-label::before {
+    background: var(--text-normal, #dbdee1);
+}
+.vc-clipper-track:nth-of-type(n + 3) .vc-clipper-track-label::before {
+    background: var(--yellow-330, #f0b132);
 }
 .vc-clipper-track-body {
     flex: 1;
@@ -335,13 +584,15 @@ export const STUDIO_CSS = `
 .vc-clipper-sounds {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 }
 .vc-clipper-sound-lane {
     position: relative;
-    height: 40px;
-    border-radius: 6px;
-    background: var(--background-tertiary, #1e1f22);
+    height: 48px;
+    border-radius: 8px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .02), transparent),
+        var(--background-tertiary, #1e1f22);
     overflow: hidden;
     cursor: crosshair;
 }
@@ -349,7 +600,7 @@ export const STUDIO_CSS = `
     position: absolute;
     top: 4px;
     bottom: 4px;
-    border-radius: 5px;
+    border-radius: 8px;
     border: 1px solid var(--brand-experiment, #5865f2);
     background: color-mix(in srgb, var(--brand-experiment, #5865f2) 26%, transparent);
     overflow: hidden;
@@ -419,7 +670,7 @@ export const STUDIO_CSS = `
     gap: 10px;
     margin-bottom: 8px;
     padding: 8px;
-    border-radius: 6px;
+    border-radius: 8px;
     background: var(--background-secondary, #2b2d31);
 }
 .vc-clipper-voice-face {
@@ -452,24 +703,24 @@ export const STUDIO_CSS = `
 }
 
 .vc-clipper-side {
-    width: 312px;
+    width: 316px;
     flex: 0 0 auto;
     overflow-y: auto;
-    padding: 12px;
+    padding: 16px;
     background: var(--background-secondary, #2b2d31);
 }
 .vc-clipper-side.vc-clipper-side-left {
-    width: 268px;
+    width: 280px;
 }
 .vc-clipper-side > h4:first-child {
     margin-top: 0;
 }
 .vc-clipper-side h4 {
-    margin: 14px 0 8px;
+    margin: 18px 0 10px;
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: .02em;
+    letter-spacing: .03em;
     color: var(--header-secondary, #b5bac1);
 }
 
@@ -477,23 +728,27 @@ export const STUDIO_CSS = `
 .vc-clipper-side-clip {
     display: block;
     width: 100%;
-    margin-bottom: 4px;
-    padding: 7px 8px;
+    margin-bottom: 8px;
+    padding: 10px;
     border: 1px solid transparent;
     border-radius: 8px;
-    background: none;
+    background: var(--background-secondary, #2b2d31);
     color: var(--text-normal, #dbdee1);
     text-align: left;
     font-size: 13px;
     cursor: pointer;
-    transition: background-color .12s ease, border-color .12s ease;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
+    transition: background-color .12s ease, border-color .12s ease, transform .12s ease, box-shadow .12s ease;
 }
 .vc-clipper-side-clip:hover:not(:disabled) {
     background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
+    transform: translateY(-1px);
+    box-shadow: 0 3px 8px rgba(0, 0, 0, .22);
 }
 .vc-clipper-side-clip.vc-clipper-active {
     border-color: var(--brand-experiment, #5865f2);
     background: var(--background-modifier-selected, #43444b);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
 }
 .vc-clipper-side-clip:disabled {
     opacity: .5;
@@ -534,10 +789,10 @@ export const STUDIO_CSS = `
     flex: 1;
 }
 .vc-clipper-thumb {
-    width: 64px;
-    height: 36px;
+    width: 76px;
+    height: 44px;
     flex: 0 0 auto;
-    border-radius: 4px;
+    border-radius: 8px;
     object-fit: cover;
     background: var(--background-tertiary, #1e1f22);
 }
@@ -626,15 +881,15 @@ export const STUDIO_CSS = `
 
 .vc-clipper-tabs {
     display: flex;
-    gap: 2px;
-    margin-bottom: 12px;
-    padding: 3px;
+    gap: 4px;
+    margin-bottom: 14px;
+    padding: 5px;
     border-radius: 8px;
     background: var(--background-tertiary, #1e1f22);
 }
 .vc-clipper-tabs button {
     flex: 1 1 0;
-    padding: 6px 4px;
+    padding: 8px 8px;
     border: none;
     border-radius: 6px;
     background: none;
@@ -646,46 +901,100 @@ export const STUDIO_CSS = `
 }
 .vc-clipper-tabs button:hover:not(.vc-clipper-active) {
     color: var(--interactive-hover, #dbdee1);
-    background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
+    background: var(--background-modifier-hover, rgba(78, 80, 88, .48));
 }
 .vc-clipper-tabs button.vc-clipper-active {
-    background: var(--brand-experiment, #5865f2);
+    background: linear-gradient(135deg, var(--brand-experiment, #5865f2), var(--brand-experiment-560, #4752c4));
     color: #fff;
+    box-shadow: 0 2px 6px rgba(88, 101, 242, .3);
 }
 
-/* The mixer draws itself with inline styles; the sidebar only has to keep its
-   sliders usable at half the width of the settings panel. */
-.vc-clipper-mixer input[type="range"] {
+/* Every slider in the editor speaks the same visual language: a thin track
+   (brand up to the value, mute beyond it), a white knob ringed in brand that
+   grows as you grab it, a focus ring for keyboard users. The 4px track keeps
+   the knob the thing your eye lands on. */
+.vc-clipper-mixer input[type="range"],
+.vc-clipper-field input[type="range"] {
     min-width: 96px;
+    height: 4px;
+    margin: 8px 0;
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--brand-experiment, #5865f2) var(--vc-fill, 0%), var(--background-modifier-accent, rgba(78, 80, 88, .5)) var(--vc-fill, 0%));
+    outline: none;
+    cursor: pointer;
+}
+.vc-clipper-field input[type="range"] {
+    width: 100%;
+    background: var(--background-modifier-accent, rgba(78, 80, 88, .35));
+}
+.vc-clipper-mixer input[type="range"]::-webkit-slider-thumb,
+.vc-clipper-field input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: none;
+    border-radius: 50%;
+    background: var(--interactive-active, #fff);
+    box-shadow: 0 0 0 2px var(--brand-experiment, #5865f2), 0 1px 4px rgba(0, 0, 0, .45);
+    cursor: grab;
+    transition: box-shadow .12s ease, transform .12s ease;
+}
+.vc-clipper-mixer input[type="range"]::-webkit-slider-thumb:active,
+.vc-clipper-field input[type="range"]::-webkit-slider-thumb:active {
+    cursor: grabbing;
+    transform: scale(1.15);
+}
+.vc-clipper-mixer input[type="range"]:hover:not(:disabled)::-webkit-slider-thumb,
+.vc-clipper-field input[type="range"]:hover:not(:disabled)::-webkit-slider-thumb {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 3px var(--brand-experiment, #5865f2), 0 1px 4px rgba(0, 0, 0, .45);
+}
+.vc-clipper-mixer input[type="range"]:focus-visible,
+.vc-clipper-field input[type="range"]:focus-visible {
+    box-shadow: 0 0 0 2px var(--brand-experiment, #5865f2);
+}
+.vc-clipper-mixer input[type="range"]:disabled,
+.vc-clipper-field input[type="range"]:disabled {
+    opacity: .45;
+    cursor: default;
 }
 
 /* -------------------------------------------------------------- timeline -- */
 .vc-clipper-timeline {
     display: flex;
-    gap: 4px;
+    gap: 8px;
     overflow-x: auto;
-    padding: 2px 0 4px;
-    min-height: 56px;
+    padding: 6px 0 8px;
+    min-height: 66px;
 }
 .vc-clipper-block {
     flex: 0 0 auto;
-    min-width: 74px;
-    padding: 6px 9px;
-    border: 2px solid transparent;
-    border-radius: 6px;
-    background: var(--background-tertiary, #1e1f22);
+    min-width: 84px;
+    padding: 8px 12px;
+    border: 1px solid var(--background-modifier-accent, rgba(78, 80, 88, .4));
+    border-radius: 8px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .03), transparent),
+        var(--background-tertiary, #1e1f22);
     color: var(--text-normal, #dbdee1);
     text-align: left;
     font-size: 12px;
     cursor: pointer;
     overflow: hidden;
-    transition: border-color .12s ease, transform .12s ease;
+    transition: border-color .12s ease, transform .12s ease, box-shadow .12s ease;
 }
 .vc-clipper-block:hover:not(:disabled) {
     transform: translateY(-1px);
+    border-color: var(--background-modifier-accent, rgba(78, 80, 88, .7));
 }
 .vc-clipper-block.vc-clipper-active {
     border-color: var(--brand-experiment, #5865f2);
+    box-shadow: 0 0 0 1px rgba(88, 101, 242, .18), 0 2px 10px rgba(0, 0, 0, .25);
 }
 .vc-clipper-block .vc-clipper-name {
     overflow: hidden;
@@ -704,8 +1013,8 @@ export const STUDIO_CSS = `
 }
 .vc-clipper-ruler {
     position: relative;
-    height: 24px;
-    border-radius: 6px;
+    height: 26px;
+    border-radius: 8px;
     background: var(--background-tertiary, #1e1f22);
     cursor: crosshair;
     overflow: hidden;
@@ -715,7 +1024,7 @@ export const STUDIO_CSS = `
     position: absolute;
     top: 3px;
     bottom: 3px;
-    border-radius: 3px;
+    border-radius: 4px;
     background: var(--background-modifier-accent, rgba(78, 80, 88, .6));
     box-shadow: inset 0 0 0 1px var(--background-tertiary, #1e1f22);
 }
@@ -752,7 +1061,7 @@ export const STUDIO_CSS = `
     bottom: 0;
     width: 2px;
     margin-left: -1px;
-    background: var(--yellow-330, #f0b232);
+    background: var(--yellow-330, #f0b132);
     box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
     pointer-events: none;
 }
@@ -773,15 +1082,15 @@ export const STUDIO_CSS = `
     flex: 0 0 auto;
 }
 .vc-clipper-ruler-actions button {
-    padding: 3px 8px;
+    padding: 6px 12px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     background: var(--background-tertiary, #1e1f22);
     color: var(--text-muted, #949ba4);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
-    transition: background-color .12s ease, color .12s ease;
+    transition: background-color .12s ease, color .12s ease, transform .1s ease;
 }
 .vc-clipper-ruler-actions button:hover:not(:disabled) {
     background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
@@ -809,8 +1118,8 @@ export const STUDIO_CSS = `
 .vc-clipper-lanes {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    max-height: 116px;
+    gap: 4px;
+    max-height: 128px;
     overflow-y: auto;
 }
 .vc-clipper-lane {
@@ -830,9 +1139,9 @@ export const STUDIO_CSS = `
 .vc-clipper-lane-track {
     position: relative;
     flex: 1;
-    height: 20px;
+    height: 24px;
     min-width: 0;
-    border-radius: 4px;
+    border-radius: 6px;
     background: var(--background-tertiary, #1e1f22);
     cursor: pointer;
     overflow: hidden;
@@ -882,10 +1191,6 @@ export const STUDIO_CSS = `
     color: var(--text-muted, #949ba4);
     font-size: 11px;
 }
-.vc-clipper-field input[type="range"] {
-    width: 100%;
-    accent-color: var(--brand-experiment, #5865f2);
-}
 .vc-clipper-field input[type="checkbox"] {
     accent-color: var(--brand-experiment, #5865f2);
 }
@@ -923,6 +1228,10 @@ export const STUDIO_CSS = `
     padding: 2px 8px;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .vc-clipper-caption-item {
     margin-bottom: 8px;
@@ -966,9 +1275,9 @@ export const STUDIO_CSS = `
 .vc-clipper-studio-foot {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     flex-wrap: wrap;
-    padding-top: 10px;
+    padding-top: 14px;
     border-top: 1px solid var(--background-modifier-accent, rgba(78, 80, 88, .48));
 }
 .vc-clipper-progress {
@@ -999,13 +1308,19 @@ export const STUDIO_CSS = `
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: background-color .12s ease, opacity .12s ease;
+    transition: background-color .12s ease, transform .1s ease, opacity .12s ease;
 }
 .vc-clipper-side-actions button:hover:not(:disabled),
 .vc-clipper-row button:hover:not(:disabled),
 .vc-clipper-caption-row button:hover:not(:disabled),
 .vc-clipper-studio-foot button:hover:not(:disabled) {
     background: var(--button-secondary-background-hover, #6d6f78);
+}
+.vc-clipper-side-actions button:active:not(:disabled),
+.vc-clipper-row button:active:not(:disabled),
+.vc-clipper-caption-row button:active:not(:disabled),
+.vc-clipper-studio-foot button:active:not(:disabled) {
+    transform: scale(.97);
 }
 .vc-clipper-side-actions button:focus-visible,
 .vc-clipper-row button:focus-visible,
@@ -1214,6 +1529,17 @@ export const STUDIO_CSS = `
 .vc-clipper-side h4 + .vc-clipper-group {
     margin-top: 0;
 }
+
+/* Nobody asked for the motion; nobody gets it. */
+@media (prefers-reduced-motion: reduce) {
+    .vc-clipper-studio *,
+    .vc-clipper-studio *::before,
+    .vc-clipper-studio *::after {
+        transition-duration: .01ms !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+    }
+}
 `;
 
 /**
@@ -1356,7 +1682,24 @@ function readSaved(): SavedProject | null {
             images: Array.isArray(parsed.images) ? parsed.images.filter(i => i?.path) : [],
             project: {
                 ...parsed.project,
-                segments: parsed.project.segments.map(s => ({ ...s, effects: { ...DEFAULT_EFFECTS, ...s.effects } })),
+                // Numbers, not whatever the stored document claims: a
+                // hand-edited project with a non-numeric in/out point would
+                // otherwise poison projectLength with NaN all the way to the
+                // render clock. Zero-length cuts are kept: the render refuses
+                // an empty timeline with a proper error instead.
+                segments: parsed.project.segments.map(s => {
+                    const from = Number(s?.from);
+                    const to = Number(s?.to);
+                    const speed = Number(s?.speed);
+
+                    return {
+                        ...s,
+                        from: Number.isFinite(from) ? Math.max(0, from) : 0,
+                        to: Number.isFinite(to) ? Math.max(0, to) : 0,
+                        speed: Number.isFinite(speed) && speed > 0 ? speed : 1,
+                        effects: { ...DEFAULT_EFFECTS, ...s?.effects }
+                    };
+                }),
                 audioClips: parsed.project.audioClips ?? [],
                 // Filled in rather than trusted: a project saved before overlays
                 // could carry sound has no volume on them at all.
@@ -1495,6 +1838,237 @@ function Group({ title, note, start = false, children }: {
     );
 }
 
+/** What a playhead-frame needs from the editor, kept dead current. */
+interface PlayheadContext {
+    project: Project;
+    segment: Segment | null;
+    segmentIndex: number;
+    total: number;
+    lanes: VoiceTrack[];
+}
+
+/**
+ * The playhead's own paint loop, behind the state graph.
+ *
+ * Reading the position into React state on every `timeupdate` the preview
+ * fires - four to sixty times a second while something plays - re-rendered the
+ * whole editor per frame. The markers, the transport and the lane readouts
+ * have to move that fast, but nothing else does, so this dedicated child reads
+ * the element straight off in a requestAnimationFrame loop and writes the
+ * handful of DOM nodes that show the position directly: no state, no render.
+ * The editor only ever hears about the playhead at rest - a seek, a stop, a
+ * swap of file - through ClipStudio's own discrete listeners.
+ */
+function PlayheadScope({ video, live, transport, timeIn, timeRest, ruler, sounds, lanes }: {
+    video: React.MutableRefObject<HTMLVideoElement | null>;
+    live: React.MutableRefObject<PlayheadContext>;
+    transport: React.MutableRefObject<HTMLInputElement | null>;
+    timeIn: React.MutableRefObject<HTMLElement | null>;
+    timeRest: React.MutableRefObject<HTMLElement | null>;
+    ruler: React.MutableRefObject<HTMLDivElement | null>;
+    sounds: React.MutableRefObject<HTMLDivElement | null>;
+    lanes: React.MutableRefObject<HTMLDivElement | null>;
+}) {
+    useEffect(() => {
+        let frame = 0;
+
+        const tick = () => {
+            frame = requestAnimationFrame(tick);
+
+            const element = video.current;
+            if (!element) return;
+
+            const at = element.currentTime || 0;
+            const length = Number.isFinite(element.duration) ? element.duration : 0;
+            const { project, segment, segmentIndex, total, lanes: tracks } = live.current;
+
+            /* The playhead in project time, as the ruler and the lane see it. */
+            const inside = segment && segmentIndex >= 0
+                ? segmentStart(project, segmentIndex) + Math.max(0, at - segment.from) / Math.max(0.25, segment.speed)
+                : 0;
+
+            /*
+             * The scrubber is a controlled input; setting its value off the
+             * element keeps the thumb on the frame that is actually being
+             * watched, drag or no drag, while the fill paints its track.
+             */
+            const min = segment?.from ?? 0;
+            const max = segment?.to ?? 1;
+            const value = Math.min(Math.max(at, min), max);
+            const slider = transport.current;
+            if (slider) {
+                slider.value = String(value);
+                slider.style.setProperty("--vc-fill", `${max > min ? Math.round(((value - min) / (max - min)) * 100) : 0}%`);
+            }
+
+            /* The readout under the transport: in the segment / its length · in
+               the montage. The still parts are baked in; only the two numbers
+               that move are rewritten. */
+            const into = timeIn.current;
+            if (into) into.textContent = formatTime(Math.max(0, at - (segment?.from ?? 0)));
+            const rest = timeRest.current;
+            if (rest) rest.textContent = ` / ${formatTime(segment ? segmentLength(segment) * segment.speed : 0)} · ${formatTime(inside)}`;
+
+            /*
+             * The three timelines render their own head marker; each one is
+             * moved in place rather than re-rendered. Exactly the same
+             * percentage - and clamp - each component's own render applies.
+             */
+            const rulerHead = ruler.current?.querySelector<HTMLElement>(".vc-clipper-ruler-head");
+            if (rulerHead) {
+                const span = Math.max(0.5, total);
+                rulerHead.style.left = `${(Math.max(0, Math.min(span, inside)) / span) * 100}%`;
+            }
+
+            const soundHead = sounds.current?.querySelector<HTMLElement>(".vc-clipper-sound-head");
+            if (soundHead) {
+                const span = Math.max(1, total);
+                soundHead.style.left = `${(Math.max(0, Math.min(span, inside)) / span) * 100}%`;
+            }
+
+            const laneHeads = lanes.current?.querySelectorAll<HTMLElement>(".vc-clipper-lane-head");
+            if (laneHeads?.length && laneHeads.length === tracks.length) {
+                for (let i = 0; i < laneHeads.length; i++) {
+                    const span = Math.max(0.1, length || tracks[i].levels.length / VOICE_HZ);
+                    laneHeads[i].style.left = `${(Math.max(0, at) / span) * 100}%`;
+                }
+            }
+        };
+
+        frame = requestAnimationFrame(tick);
+
+        return () => cancelAnimationFrame(frame);
+    }, []);
+
+    return null;
+}
+
+/*
+  * The three read-only surfaces of the editor are memoized where they live
+  * under the paint loop: their `playhead` prop changes on every frame the video
+  * plays, and nothing in them should re-render for it. The moving marker each
+  * one draws is rewritten straight onto the DOM by PlayheadScope; the props are
+  * only what a needle at rest needs.
+  *
+  * The wrap is built inside the component rather than at module scope: the
+  * `React` binding is only guaranteed after Vencord finds the webpack main
+  * instance, and calling `React.memo` before that crashes the whole plugin.
+  */
+
+/**
+ * A range control whose dragging stays local.
+ *
+ * Every `input` event of a native range slider while the thumb is pinned
+ * re-rendered the whole editor, because `patchSegment` walks every segment on
+ * each one. The thumb and the readout now live in this component's own state,
+ * and what the editor hears is a single commit when the drag ends. The cursor
+ * keys never press a pointer, so their steps commit per change exactly as a
+ * pressed arrow would before.
+ */
+function ClampedSlider({ value, min, max, step, onChange, disabled }: {
+    value: number;
+    min: number;
+    max: number;
+    step: number;
+    onChange(v: number): void;
+    disabled?: boolean;
+}) {
+    const [local, setLocal] = useState(value);
+    const dragging = useRef(false);
+
+    // Something outside (undo, a reset button, a commit from another control)
+    // moved the value while nobody was dragging; follow it.
+    useEffect(() => {
+        if (!dragging.current) setLocal(value);
+    }, [value]);
+
+    return (
+        <input
+            type="range"
+            min={min}
+            max={max}
+            step={step}
+            value={local}
+            disabled={disabled}
+            onPointerDown={() => { dragging.current = true; }}
+            onChange={e => {
+                const next = Number(e.currentTarget.value);
+                setLocal(next);
+
+                // A held pointer commits on release, below; a keyboard step has
+                // no pointer at all, so it commits right away.
+                if (!dragging.current) onChange(next);
+            }}
+            onPointerUp={() => {
+                if (!dragging.current) return;
+                dragging.current = false;
+                if (local !== value) onChange(local);
+            }}
+            onPointerCancel={() => {
+                if (!dragging.current) return;
+                dragging.current = false;
+                if (local !== value) onChange(local);
+            }}
+        />
+    );
+}
+
+/**
+ * The same deferred-commit range control with the editor's usual field chrome:
+ * a label whose readout is the dragged position while the thumb is held.
+ */
+function SliderField({ label, value, min, max, step, onChange, suffix = "", disabled }: {
+    label: string;
+    value: number;
+    min: number;
+    max: number;
+    step: number;
+    onChange(v: number): void;
+    suffix?: string;
+    disabled?: boolean;
+}) {
+    const [local, setLocal] = useState(value);
+    const dragging = useRef(false);
+
+    useEffect(() => {
+        if (!dragging.current) setLocal(value);
+    }, [value]);
+
+    return (
+        <div className="vc-clipper-field">
+            <label>
+                <span>{label}</span>
+                <span>{local}{suffix}</span>
+            </label>
+            <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={local}
+                disabled={disabled}
+                onPointerDown={() => { dragging.current = true; }}
+                onChange={e => {
+                    const next = Number(e.currentTarget.value);
+                    setLocal(next);
+
+                    if (!dragging.current) onChange(next);
+                }}
+                onPointerUp={() => {
+                    if (!dragging.current) return;
+                    dragging.current = false;
+                    if (local !== value) onChange(local);
+                }}
+                onPointerCancel={() => {
+                    if (!dragging.current) return;
+                    dragging.current = false;
+                    if (local !== value) onChange(local);
+                }}
+            />
+        </div>
+    );
+}
+
 export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: string; }) {
     const [clips, setClips] = useState<StoredClip[] | null>(null);
     const [sources, setSources] = useState<StudioSource[]>([]);
@@ -1523,6 +2097,26 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     /** Decoded pictures, kept out of the project for the same reason. */
     const [images, setImages] = useState<ImageSource[]>([]);
     const [pickedOverlay, setPickedOverlay] = useState("");
+
+    /**
+     * The drag being followed on the stage, so an unmount does not leave the
+     * window listeners behind - they would keep calling `patchOverlay` (a
+     * commit) on a project that is no longer on screen.
+     */
+    const dragCleanupRef = useRef<(() => void) | null>(null);
+
+    /*
+     * Memoized shells of the three playhead-driven surfaces, built here so the
+     * `React.memo` call only ever runs while React is on the table (see above).
+     */
+    const MemoAudioTimeline = useMemo(() => React.memo(AudioTimeline), []);
+    const MemoCutRuler = useMemo(() => React.memo(CutRuler), []);
+    const MemoVoiceLanes = useMemo(() => React.memo(VoiceLanes), []);
+
+    useEffect(() => () => {
+        dragCleanupRef.current?.();
+        dragCleanupRef.current = null;
+    }, []);
 
     /**
      * The caption the keyboard acts on.
@@ -1618,6 +2212,21 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const sourcesRef = useRef<StudioSource[]>([]);
 
     /*
+     * The DOM nodes PlayheadScope rewrites while something plays.
+     *
+     * The scrubber's value, the two numbers under it and every timeline's head
+     * marker are moved in place by its paint loop; these refs are the handles
+     * it reaches them through. The `playhead` state above only ever holds the
+     * position at rest, which is why nothing here reads it per frame.
+     */
+    const transportRef = useRef<HTMLInputElement | null>(null);
+    const timeInRef = useRef<HTMLElement | null>(null);
+    const timeRestRef = useRef<HTMLElement | null>(null);
+    const rulerRef = useRef<HTMLDivElement | null>(null);
+    const soundsRef = useRef<HTMLDivElement | null>(null);
+    const voiceLanesElRef = useRef<HTMLDivElement | null>(null);
+
+    /*
      * One audio context for the whole modal.
      *
      * Chromium caps how many a page may hold open, and this one is used for
@@ -1658,6 +2267,18 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
     /** True until the modal unmounts, so async work can stop touching state. */
     const aliveRef = useRef(true);
+
+    /*
+     * Which folder read is the newest.
+     *
+     * A save landing while the studio is open fires a read, and so do a rename
+     * and a delete: the answers come back in whatever order the disk feels like,
+     * so each one takes a number and only the newest is allowed to touch the
+     * list, the picking or the categories. A stale answer applying after a fresh
+     * one is the list jumping back in time, and its prune running on yesterday's
+     * listing is a category deleted out from under a clip that just arrived.
+     */
+    const refreshGen = useRef(0);
     const projectRef = useRef(project);
     const cancelRef = useRef(false);
 
@@ -1683,7 +2304,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * updater reading it throws on a null. Read the value in the handler and
      * close over it instead.
      */
-    const commit = (updater: (p: Project) => Project, tag = "") => {
+    const commit = useCallback((updater: (p: Project) => Project, tag = "") => {
         const history = historyRef.current;
         const now = Date.now();
         const last = lastEditRef.current;
@@ -1697,7 +2318,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         lastEditRef.current = { tag, at: now };
         setProject(updater);
         setDepth({ past: history.past.length, future: history.future.length });
-    };
+    }, []);
 
     const step = (from: "past" | "future", to: "past" | "future") => {
         const history = historyRef.current;
@@ -1792,6 +2413,16 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     // clip switch just to see the new tracks.
     const lanesRef = useRef<VoiceTrack[]>([]);
     lanesRef.current = lanes;
+
+    /*
+     * The editor facts the paint loop reads each frame, kept dead current.
+     *
+     * PlayheadScope mounts once and must not be re-armed every time the picked
+     * segment or the montage changes, so the values it turns into marker
+     * positions are handed over through this ref instead of through props.
+     */
+    const playheadLiveRef = useRef<PlayheadContext>({ project, segment, segmentIndex, total, lanes });
+    playheadLiveRef.current = { project, segment, segmentIndex, total, lanes };
 
     const chatRef = useRef<ChatLine[]>([]);
     chatRef.current = chatLines;
@@ -1948,10 +2579,13 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
     // One lookup table rather than a scan per timeline block; a long montage
     // redraws this list on every slider move.
-    const byId = new Map(sources.map(s => [s.id, s]));
+    const byId = useMemo(() => new Map(sources.map(s => [s.id, s])), [sources]);
 
     /** Source name per segment id, for the blocks on the cut ruler. */
-    const rulerNames = new Map(project.segments.map(s => [s.id, byId.get(s.sourceId)?.name ?? "?"]));
+    const rulerNames = useMemo(
+        () => new Map(project.segments.map(s => [s.id, byId.get(s.sourceId)?.name ?? "?"])),
+        [project.segments, byId]
+    );
 
     /**
      * Every marker of every segment, moved onto the montage's clock.
@@ -1962,7 +2596,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * marker a trim left outside its segment is not on the montage at all, and
      * is not drawn.
      */
-    const rulerMarkers = (() => {
+    const rulerMarkers = useMemo(() => {
         const out: number[] = [];
         let elapsed = 0;
 
@@ -1978,7 +2612,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         }
 
         return out;
-    })();
+    }, [project.segments, meta, byId]);
 
     /** Every category present in the folder, for the filter dropdown. */
     const categories = categoriesOf((clips ?? []).map(c => c.name), meta);
@@ -1995,20 +2629,36 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * Rereads the clip folder and its categories.
      *
      * Categories live in a sidecar file, so clips deleted from the file explorer
-     * leave entries behind: the listing is what decides what is still real.
+     * leave entries behind: the listing is what decides what is still real. Only
+     * the newest read applies: an older one resolving late would put yesterday's
+     * list on screen, and its prune would throw away the categories of whatever
+     * arrived since. The save-during-studio refresh this guards is the same one
+     * the recorder subscription below asks for, so that path is unchanged.
      */
     const refreshClips = async (pick?: string) => {
+        const mine = ++refreshGen.current;
+
         try {
             const found = await listClips();
+            if (mine !== refreshGen.current) return;
             setClips(found);
             setError(current => current === FOLDER_ERROR ? "" : current);
 
+            // Still the newest: the prune below deletes every category whose
+            // clip is missing from this listing, so a stale one must never
+            // reach it - a clip saved between the two reads would lose its
+            // meta to the older answer.
             await pruneMeta(found.map(c => c.name));
+            if (mine !== refreshGen.current) return;
             setMetaState({ ...await readMeta() });
 
+            if (mine !== refreshGen.current) return;
             if (pick !== undefined) setPicked(pick);
             else setPicked(current => found.some(c => c.name === current) ? current : "");
         } catch (e) {
+            // A failed older read must not wipe a newer one's list either: the
+            // error line is only true for the read that is still current.
+            if (mine !== refreshGen.current) return;
             logger.warn("Could not list clips for the studio", e);
             setError(FOLDER_ERROR);
             setClips([]);
@@ -2228,8 +2878,20 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             if (initial) await onAddClip(initial);
         })();
 
+        /*
+         * A save lands while the studio is open: a keybind caught a moment of
+         * the buffer, the chat button wrote a clip out. The folder is the only
+         * source of truth, so reread it once the write is done.
+         */
+        let wasSaving = false;
+        const stateOff = recorder.subscribe(s => {
+            if (wasSaving && s !== "saving") void refreshClips();
+            wasSaving = s === "saving";
+        });
+
         // The object URLs live as long as the modal does; nothing else holds them.
         return () => {
+            stateOff();
             aliveRef.current = false;
             urlsRef.current.forEach(url => URL.revokeObjectURL(url));
             urlsRef.current.clear();
@@ -2256,23 +2918,30 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const video = videoRef.current;
         if (!video) return;
 
-        const follow = () => setPlayhead({ at: video.currentTime || 0, length: Number.isFinite(video.duration) ? video.duration : 0 });
+        /*
+         * The position is pushed into state only when it is worth re-rendering
+         * for: an explicit seek, a swap of file, or the video coming to rest.
+         * The moving playhead while something plays lives in PlayheadScope's
+         * paint loop, which writes the markers and the scrubber straight onto
+         * the DOM; reading it into state here is what used to re-render the
+         * whole editor on every `timeupdate`.
+         */
+        const settle = () => setPlayhead({ at: video.currentTime || 0, length: Number.isFinite(video.duration) ? video.duration : 0 });
         const running = () => setPlaying(!video.paused && !video.ended);
+        const stop = () => { running(); settle(); };
 
-        video.addEventListener("timeupdate", follow);
-        video.addEventListener("seeked", follow);
-        video.addEventListener("loadedmetadata", follow);
+        video.addEventListener("seeked", settle);
+        video.addEventListener("loadedmetadata", settle);
         video.addEventListener("play", running);
-        video.addEventListener("pause", running);
-        video.addEventListener("ended", running);
+        video.addEventListener("pause", stop);
+        video.addEventListener("ended", stop);
 
         return () => {
-            video.removeEventListener("timeupdate", follow);
-            video.removeEventListener("seeked", follow);
-            video.removeEventListener("loadedmetadata", follow);
+            video.removeEventListener("seeked", settle);
+            video.removeEventListener("loadedmetadata", settle);
             video.removeEventListener("play", running);
-            video.removeEventListener("pause", running);
-            video.removeEventListener("ended", running);
+            video.removeEventListener("pause", stop);
+            video.removeEventListener("ended", stop);
         };
     }, []);
 
@@ -2505,7 +3174,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const dropAngle = (index: number) => {
         if (!segment) return;
 
-        const angles = (segment.angles ?? []).filter((unused, i) => i !== index);
+        const angles = (segment.angles ?? []).filter((_, i) => i !== index);
         patchSegment(segment.id, { angles });
     };
 
@@ -3137,7 +3806,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * is the one that gets picked up - which is what a user expects from two
      * overlapping images.
      */
-    const overlaysHere = (project.overlays ?? []).filter(o => projectAt >= o.from && projectAt <= o.to && imagesById.has(o.sourceId));
+    const overlaysHere = useMemo(
+        () => (project.overlays ?? []).filter(o => projectAt >= o.from && projectAt <= o.to && imagesById.has(o.sourceId)),
+        [project.overlays, projectAt, imagesById]
+    );
 
     /**
      * Moves a picture by dragging it on the preview.
@@ -3148,7 +3820,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * bounding box before it means anything to the frame.
      */
     const onStageDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-        if (busy || !overlaysHere.length) return;
+        if (busy) return;
+
+        /* Read off the element rather than off `overlaysHere`, which only
+           tracks the playhead at rest: a picture draggable under the moving
+           playhead has to stay grabbable in the middle of a take. */
+        const at = projectTime();
+        const here = (project.overlays ?? []).filter(o => at >= o.from && at <= o.to && imagesById.has(o.sourceId));
+        if (!here.length) return;
 
         const canvas = e.currentTarget;
         const box = canvas.getBoundingClientRect();
@@ -3162,8 +3841,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const start = toFrame(e.clientX, e.clientY);
 
         let hit: Overlay | null = null;
-        for (let i = overlaysHere.length - 1; i >= 0; i--) {
-            const overlay = overlaysHere[i];
+        for (let i = here.length - 1; i >= 0; i--) {
+            const overlay = here[i];
             const source = imagesById.get(overlay.sourceId);
             if (!source) continue;
 
@@ -3198,8 +3877,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const up = () => {
             window.removeEventListener("mousemove", move);
             window.removeEventListener("mouseup", up);
+            if (dragCleanupRef.current === up) dragCleanupRef.current = null;
         };
 
+        dragCleanupRef.current = up;
         window.addEventListener("mousemove", move);
         window.addEventListener("mouseup", up);
     };
@@ -3253,9 +3934,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         commit(p => ({ ...p, voiceLevels: { ...p.voiceLevels, [userId]: gain } }), tag);
     };
 
-    const patchSound = (id: string, patch: Partial<AudioClip>, tag = "") => {
+    const patchSound = useCallback((id: string, patch: Partial<AudioClip>, tag = "") => {
         commit(p => ({ ...p, audioClips: (p.audioClips ?? []).map(c => c.id === id ? { ...c, ...patch } : c) }), tag);
-    };
+    }, [commit]);
 
     /**
      * Trims a sound at the playhead.
@@ -4123,7 +4804,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * it. A click on the sound lane is exactly that, which is how a sting gets
      * placed against the frame it belongs to.
      */
-    const seekProject = (at: number) => {
+    const seekProject = useCallback((at: number) => {
         let elapsed = 0;
 
         for (let i = 0; i < project.segments.length; i++) {
@@ -4144,16 +4825,18 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
             elapsed += length;
         }
-    };
+    }, [project.segments, selected]);
 
     const addCaption = () => {
         const video = videoRef.current;
         const index = project.segments.findIndex(s => s.id === selected);
 
         // Anchor the caption where the eye is: the playhead inside the selected
-        // segment, translated to project time.
+        // segment, translated to project time. The speed is clamped the same
+        // way the rest of the editor sees it, so a segment with no speed set
+        // anchors on its own timeline rather than on NaN.
         const at = video && segment && index >= 0
-            ? segmentStart(project, index) + Math.max(0, video.currentTime - segment.from) / segment.speed
+            ? segmentStart(project, index) + Math.max(0, video.currentTime - segment.from) / Math.max(0.25, segment.speed)
             : 0;
 
         const caption: Caption = { id: newId(), from: at, to: Math.min(total, at + 3), text: "" };
@@ -4603,6 +5286,59 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     /** True while the drag carries files rather than, say, a Discord message. */
     const dragHasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
 
+    /** The transport's own numbers, so the scrubber can paint its own fill. */
+    const transport = (() => {
+        const min = segment?.from ?? 0;
+        const max = segment?.to ?? 1;
+        const value = Math.min(Math.max(playhead.at, min), max);
+        const pct = max > min ? Math.round(((value - min) / (max - min)) * 100) : 0;
+        return { min, max, value, pct };
+    })();
+
+    /** Play or pause the picked segment, whichever it is not. */
+    const togglePlay = useCallback(() => {
+        const video = videoRef.current;
+        if (!video) return;
+        if (video.paused) void video.play().catch(() => void 0);
+        else video.pause();
+    }, []);
+
+    /* Stable handlers for the memoized timelines: same identity across renders,
+       or the memo of the block they are passed to would render anyway. */
+    const selectSegment = useCallback((id: string) => { setSelected(id); setTab("segment"); }, []);
+    const selectSound = useCallback((id: string) => { setPickedSound(id); setTab("audio"); }, []);
+    const seekVoice = useCallback((at: number) => {
+        const video = videoRef.current;
+        if (video) video.currentTime = at;
+    }, []);
+
+    /*
+     * The transport sits over the picture, like a player's, and slips away while
+     * something is playing. Any mouse move over the stage brings it back and
+     * settles a moment after the last move; nothing is ever hidden on a pause.
+     */
+    const [controls, setControls] = useState(true);
+    const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const onStageMove = () => {
+        setControls(true);
+        if (controlsTimer.current) clearTimeout(controlsTimer.current);
+        controlsTimer.current = setTimeout(() => setControls(false), 2600);
+    };
+    const onStageLeave = () => {
+        setControls(true);
+        if (controlsTimer.current) clearTimeout(controlsTimer.current);
+        controlsTimer.current = null;
+    };
+    useEffect(() => () => {
+        if (controlsTimer.current) clearTimeout(controlsTimer.current);
+    }, []);
+    const hideControls = playing && !controls;
+
+    /** One line under the title: what is being edited right now. */
+    const headline = segment
+        ? `${source?.name ? `${source.name} · ` : ""}${formatTime(segmentLength(segment))}`
+        : (picked || "Cut, trim and send");
+
     return (
         <div className="vc-clipper-backdrop" onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
             <div
@@ -4633,10 +5369,19 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                     </div>
                 )}
                 <div className="vc-clipper-head">
-                    <div>
+                    <span className="vc-clipper-studio-emb" aria-hidden="true"><i /></span>
+                    <div className="vc-clipper-studio-head-title">
                         <h2>Clip studio</h2>
+                        <small>{headline}</small>
                     </div>
-                    <button className="vc-clipper-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+                    <div className="vc-clipper-studio-head-right">
+                        <button className="vc-clipper-studio-ok" disabled={busy} onClick={onClose}>Done</button>
+                        <button className="vc-clipper-studio-close" onClick={onClose} disabled={busy} aria-label="Close">
+                            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                                <path fill="currentColor" d="M18.3 5.71 12 11.99l6.3 6.27a1 1 0 1 1-1.41 1.42l-6.3-6.27-6.29 6.27a1 1 0 0 1-1.42-1.42L10.58 12 4.28 5.71A1 1 0 0 1 5.7 4.29l6.3 6.27 6.3-6.27a1 1 0 1 1 1.41 1.42Z" />
+                            </svg>
+                        </button>
+                    </div>
                 </div>
 
                 <div className="vc-clipper-studio-body">
@@ -4819,7 +5564,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                         {error && <div className="vc-clipper-note vc-clipper-error">{error}</div>}
                         {note && <div className="vc-clipper-note">{note}</div>}
 
-                        <div className="vc-clipper-stage">
+                        <div className="vc-clipper-stage" onMouseMove={onStageMove} onMouseLeave={onStageLeave}>
                             {/*
                               * The element is the decoder, the canvas is the
                               * picture: everything the render will do is done to
@@ -4836,41 +5581,68 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 className={overlaysHere.length ? "vc-clipper-stage-live" : ""}
                                 onMouseDown={onStageDown}
                             />
+
+                            {segment && !playing && (
+                                <button
+                                    className="vc-clipper-bigplay"
+                                    aria-label="Play"
+                                    title="Play"
+                                    onClick={togglePlay}
+                                    disabled={busy}
+                                >▶</button>
+                            )}
+
+                            <div className={`vc-clipper-stage-controls${hideControls ? " vc-clipper-hide" : ""}`}>
+                                <div className="vc-clipper-transport">
+                                    <button
+                                        disabled={busy || !segment}
+                                        aria-label={playing ? "Pause" : "Play"}
+                                        title={playing ? "Pause" : "Play"}
+                                        onClick={togglePlay}
+                                    >
+                                        {playing ? "❚❚" : "▶"}
+                                    </button>
+
+                                    <input
+                                        ref={transportRef}
+                                        type="range"
+                                        disabled={busy || !segment}
+                                        min={transport.min}
+                                        max={transport.max}
+                                        step={0.02}
+                                        value={transport.value}
+                                        style={{ "--vc-fill": `${transport.pct}%` } as React.CSSProperties}
+                                        onChange={e => {
+                                            const video = videoRef.current;
+                                            if (video) video.currentTime = Number(e.currentTarget.value);
+                                        }}
+                                    />
+
+                                    <span className="vc-clipper-time" title="In the segment / segment length - position in the montage">
+                                        <b ref={timeInRef}>{formatTime(Math.max(0, playhead.at - (segment?.from ?? 0)))}</b>
+                                        <span ref={timeRestRef}>
+                                            {" / "}{formatTime(segment ? segmentLength(segment) * segment.speed : 0)}
+                                            {" · "}{formatTime(projectAt)}
+                                        </span>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
 
-                        <div className="vc-clipper-transport">
-                            <button
-                                disabled={busy || !segment}
-                                onClick={() => {
-                                    const video = videoRef.current;
-                                    if (!video) return;
-
-                                    if (video.paused) void video.play().catch(() => void 0);
-                                    else video.pause();
-                                }}
-                            >
-                                {playing ? "❚❚" : "▶"}
-                            </button>
-
-                            <input
-                                type="range"
-                                disabled={busy || !segment}
-                                min={segment?.from ?? 0}
-                                max={segment?.to ?? 1}
-                                step={0.02}
-                                value={Math.min(Math.max(playhead.at, segment?.from ?? 0), segment?.to ?? 1)}
-                                onChange={e => {
-                                    const video = videoRef.current;
-                                    if (video) video.currentTime = Number(e.currentTarget.value);
-                                }}
-                            />
-
-                            <span className="vc-clipper-time" title="In the segment / segment length - position in the montage">
-                                <b>{formatTime(Math.max(0, playhead.at - (segment?.from ?? 0)))}</b>
-                                {" / "}{formatTime(segment ? segmentLength(segment) * segment.speed : 0)}
-                                {" · "}{formatTime(projectAt)}
-                            </span>
-                        </div>
+                        {/* The playhead's paint loop, behind the state graph. It
+                            returns nothing and rewrites the transport, the
+                            readouts and the three head markers directly; the
+                            editor hears about the position again only at rest. */}
+                        <PlayheadScope
+                            video={videoRef}
+                            live={playheadLiveRef}
+                            transport={transportRef}
+                            timeIn={timeInRef}
+                            timeRest={timeRestRef}
+                            ruler={rulerRef}
+                            sounds={soundsRef}
+                            lanes={voiceLanesElRef}
+                        />
 
                         {/*
                           * One card, four rows: what is being cut, what is on
@@ -4882,8 +5654,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                             <div className="vc-clipper-track">
                                 <span className="vc-clipper-track-label">Cut</span>
 
-                                <div className="vc-clipper-track-body">
-                                    <CutRuler
+                                <div className="vc-clipper-track-body" ref={rulerRef}>
+                                    <MemoCutRuler
                                         segments={project.segments}
                                         names={rulerNames}
                                         markers={rulerMarkers}
@@ -4894,7 +5666,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         disabled={busy}
                                         onMark={setMark}
                                         onSeek={seekProject}
-                                        onSelect={id => { setSelected(id); setTab("segment"); }}
+                                        onSelect={selectSegment}
                                     />
                                 </div>
 
@@ -4965,8 +5737,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 <div className="vc-clipper-track">
                                     <span className="vc-clipper-track-label">Sound</span>
 
-                                    <div className="vc-clipper-track-body">
-                                        <AudioTimeline
+                                    <div className="vc-clipper-track-body" ref={soundsRef}>
+                                        <MemoAudioTimeline
                                             clips={audioClips}
                                             sources={soundsById}
                                             length={total}
@@ -4974,7 +5746,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                             disabled={busy}
                                             selected={pickedSound}
                                             onChange={patchSound}
-                                            onSelect={id => { setPickedSound(id); setTab("audio"); }}
+                                            onSelect={selectSound}
                                             onSeek={seekProject}
                                         />
                                     </div>
@@ -4985,17 +5757,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 <div className="vc-clipper-track">
                                     <span className="vc-clipper-track-label">Voices</span>
 
-                                    <div className="vc-clipper-track-body">
-                                        <VoiceLanes
+                                    <div className="vc-clipper-track-body" ref={voiceLanesElRef}>
+                                        <MemoVoiceLanes
                                             tracks={lanes}
                                             length={playhead.length}
                                             current={playhead.at}
                                             from={segment.from}
                                             to={segment.to}
-                                            onSeek={at => {
-                                                const video = videoRef.current;
-                                                if (video) video.currentTime = at;
-                                            }}
+                                            onSeek={seekVoice}
                                         />
                                     </div>
                                 </div>
@@ -5117,7 +5886,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 </Group>
 
                                 <Group title="Speed and sound" note={`${segment.speed}x · ${Math.round(segment.volume * 100)}%`} start>
-                                    {slider("Speed", segment.speed, 0.25, 4, 0.25, v => patchSegment(segment.id, { speed: v }, "speed"), "x")}
+                                    <SliderField label="Speed" value={segment.speed} min={0.25} max={4} step={0.25} suffix="x" disabled={busy} onChange={v => patchSegment(segment.id, { speed: v }, "speed")} />
 
                                     {segment.speed !== 1 && (
                                         <div className="vc-clipper-field">
@@ -5134,7 +5903,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         </div>
                                     )}
 
-                                    {slider("Volume", Math.round(segment.volume * 100), 0, 100, 5, v => patchSegment(segment.id, { volume: v / 100 }, "volume"), "%")}
+                                    <SliderField label="Volume" value={Math.round(segment.volume * 100)} min={0} max={100} step={5} suffix="%" disabled={busy} onChange={v => patchSegment(segment.id, { volume: v / 100 }, "volume")} />
                                 </Group>
 
                                 <Group title="Look">
@@ -5208,7 +5977,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
                                     {segmentIndex > 0 && (
                                         <>
-                                            {slider("Dissolve from the last shot", segment.transition ?? 0, 0, 1.5, 0.1, v => patchSegment(segment.id, { transition: v }, "transition"), "s")}
+                                            <SliderField label="Dissolve from the last shot" value={segment.transition ?? 0} min={0} max={1.5} step={0.1} suffix="s" disabled={busy} onChange={v => patchSegment(segment.id, { transition: v }, "transition")} />
                                             <small className="vc-clipper-note">
                                                 The frame the previous segment ended on fades out over the opening of
                                                 this one. Zero cuts straight in. Shown in the render, not in the
@@ -5272,12 +6041,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                 </select>
                                             </div>
                                             <small>
-                                                Whoever the moment is happening to is the loudest angle of it, so that is
-                                                who the edit stays on - and after their peak it cuts to somebody watching
-                                                rather than back to them. This shot becomes several, each one an ordinary
-                                                segment: trim them, drop one, or undo the whole thing in one step. The
-                                                sound stays on this angle throughout, and the list of angles goes with the
-                                                shot that held it.
+                                                The edit stays on whoever is loudest at the moment, then cuts to
+                                                somebody watching. This shot becomes several ordinary segments - trim
+                                                them, drop one, or undo the whole thing in one step.
                                             </small>
                                         </div>
                                     )}
@@ -5313,14 +6079,13 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                     <span title={from?.name}>{from?.name ?? "missing angle"}</span>
                                                     <b>{angle.offset >= 0 ? "+" : ""}{angle.offset.toFixed(2)}s</b>
                                                 </label>
-                                                <input
-                                                    type="range"
+                                                <ClampedSlider
+                                                    value={angle.offset}
                                                     min={angle.offset - 5}
                                                     max={angle.offset + 5}
                                                     step={0.05}
-                                                    value={angle.offset}
                                                     disabled={busy}
-                                                    onChange={e => nudgeAngle(i, Number(e.currentTarget.value))}
+                                                    onChange={v => nudgeAngle(i, v)}
                                                 />
                                                 <div className="vc-clipper-row">
                                                     <button disabled={busy} onClick={() => nudgeAngle(i, angle.offset - 0.2)}>Earlier</button>
@@ -5532,24 +6297,15 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
                                         {voiceMix?.exact ? (
                                             <Hint summary="One track per person - a mute is exact">
-                                                Discord's own engine recorded this clip, and it kept every person on a
-                                                track of their own with the game on another. A level here moves that
-                                                person and nobody else; a mute leaves them out of the mix entirely, the
-                                                others carrying on over the hole where they were. Nothing is estimated
-                                                and nothing is ducked.
+                                                Each person has their own track: a level moves them alone, a mute
+                                                leaves them out entirely while the others carry on.
                                             </Hint>
                                         ) : (
                                             <Hint summary="One mixed track - a mute is a dip, not a cut">
-                                                The call reached this client already mixed, everybody summed into one
-                                                signal, so a level here can only move the band a voice lives in while
-                                                that person is making noise. A mute takes 15dB out of that band for
-                                                as long as they are audible, which puts them under the game rather
-                                                than out of the clip: the game, the music and the low end play on at
-                                                full level, and anybody talking across them is dulled for those
-                                                instants. The percentage beside a mute is how much of the clip the
-                                                dip covers. Turn the native engine on in the plugin's settings and a
-                                                recording keeps one track per person, where a mute is exact and costs
-                                                nobody else anything.
+                                                The call reached this client already mixed into one signal, so a level
+                                                moves the band that voice lives in while they are making noise, and a
+                                                mute dips it 15dB rather than cutting it. The native engine records a
+                                                track per person instead, where a mute is exact.
                                             </Hint>
                                         )}
 
@@ -5616,14 +6372,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                             track and the call carries on - so the warning is only for the rest. */}
                                         {!voiceMix?.exact && Object.values(project.voiceLevels ?? {}).some(v => v === 0) && (
                                             <Hint summary="What this mute costs">
-                                                The mute works on the band that voice lives in, not on the whole
-                                                soundtrack: the game, the music and the low end carry on at full
-                                                volume while the muted person is pushed down under them. What it
-                                                cannot do is tell two voices apart - two people talking at once are
-                                                literally the same samples - so anybody talking across them is dulled
-                                                for those instants, and the muted person is quiet rather than gone.
-                                                A recording with a track per person is the only place a mute is
-                                                absolute.
+                                                The mute works on the band that voice lives in: they are pushed under
+                                                the mix, not removed. Only a recording with a track per person can
+                                                cut them out cleanly.
                                             </Hint>
                                         )}
 
@@ -5653,8 +6404,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         />
                                     </label>
                                     <small>
-                                        What the call typed while the clip was recorded, in the bottom corner as it
-                                        arrived. Only the clips recorded with this version carry it.
+                                        What the call typed while this clip was recorded, in the bottom corner.
                                     </small>
                                 </div>
 
@@ -5669,8 +6419,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         />
                                     </label>
                                     <small>
-                                        The music and stings drop back while somebody talks, following the clip's own
-                                        voice lanes. Needs a clip that carries them.
+                                        Music and stings drop back while somebody talks.
                                     </small>
                                 </div>
 
@@ -5703,9 +6452,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
                                 {!audioClips.length && (
                                     <div className="vc-clipper-note">
-                                        No sound yet. One lands at the playhead, then moves and trims on the lane
-                                        under the picture.
-                                    </div>
+                                            Nothing placed yet - one lands at the playhead, then moves and trims on the lane.
+                                        </div>
                                 )}
 
                                 {audioClips.map(clip => {
@@ -5813,7 +6561,11 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                 >
                                                     Paste
                                                 </button>
-                                                <button disabled={busy} onClick={() => patchSound(clip.id, { muted: !clip.muted })}>
+                                                <button
+                                                    disabled={busy}
+                                                    title={clip.muted ? "Let its audio back into the clip" : "Leave its audio out of the clip"}
+                                                    onClick={() => patchSound(clip.id, { muted: !clip.muted })}
+                                                >
                                                     {clip.muted ? "Unmute" : "Mute"}
                                                 </button>
                                                 <button className="vc-clipper-danger" disabled={busy} onClick={() => removeSound(clip.id)}>
@@ -5844,8 +6596,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     <Hint summary="Nothing over the picture yet">
                                         A PNG, a GIF or a short MP4 all work, and the moving ones play while the
                                         montage does. One lands in the middle of the frame for {OVERLAY_SECONDS}
-                                        {" "}seconds from the playhead; drag it on the preview to move it, and the
-                                        two buttons under it set how long it stays.
+                                        seconds from the playhead; drag it on the preview to move it.
                                     </Hint>
                                 )}
 
@@ -6034,7 +6785,17 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     <select
                                         value={String(project.height)}
                                         disabled={busy}
-                                        onChange={e => { const height = Number(e.currentTarget.value); commit(p => ({ ...p, height })); }}
+                                        onChange={e => {
+                                            const height = Number(e.currentTarget.value);
+                                            // A phone frame is not just a smaller 16:9 box: the width has to
+                                            // follow the height or the crop stops being 9:16. Wide output has no
+                                            // stored width, and changing height must not invent one.
+                                            commit(p => ({
+                                                ...p,
+                                                height,
+                                                width: p.width === verticalWidth(p.height) ? verticalWidth(height) : p.width
+                                            }));
+                                        }}
                                     >
                                         {OUTPUT_HEIGHTS.map(h => <option key={h} value={String(h)}>{h}p</option>)}
                                     </select>
@@ -6056,7 +6817,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     </div>
                                     <small>
                                         The crop sits where each shot is framed. Track the action on a shot, in Look,
-                                        to have it follow what moves instead of holding the middle.
+                                        to follow what moves.
                                     </small>
                                 </div>
 
@@ -6084,10 +6845,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 </div>
 
                                 <Hint summary={`About ${formatTime(total)} to render, roughly ${formatBytes(estimatedSize(project))}`}>
-                                    The render plays the whole timeline through the encoder in real time and lands
-                                    next to your clips. The bitrate and the container follow the plugin settings.
-                                    Keep the window visible while it runs: a hidden one stops painting frames and the
-                                    sound drifts away from the picture.
+                                    Plays the whole timeline in real time and lands next to your clips. Keep the
+                                    window visible while it runs.
                                 </Hint>
 
                                 <Hint summary="Shortcuts">

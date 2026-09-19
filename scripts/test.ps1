@@ -15,9 +15,12 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 
+# The preload gives Node the bundler's resolution for relative imports, which
+# the shipped parsers depend on (`./boxes` is `./boxes.ts` to TypeScript and
+# esbuild, but Node only knows the exact file). See register-ts-resolver.mjs.
 Push-Location $root
 try {
-    node --test "tests/*.test.ts"
+    node --import "./tests/register-ts-resolver.mjs" --test "tests/*.test.ts"
     exit $LASTEXITCODE
 } finally {
     Pop-Location

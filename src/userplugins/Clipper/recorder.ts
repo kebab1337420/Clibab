@@ -21,20 +21,20 @@ import { type ChatLine, chatLog, shiftChat } from "./chat";
 import { playClipSound } from "./clipSound";
 import { runningGame, watchRunningGame } from "./game";
 import { highlights } from "./highlights";
-import { dropMeta, tagSavedClip } from "./library";
+import { dropMeta, readMeta, setMeta, tagSavedClip } from "./library";
 import { MicInput } from "./micInput";
 import { gainOf, MIC_CHANNEL, type MixerLevel, readMixer, SYSTEM_CHANNEL, voiceLevelsFrom } from "./mixer";
 import { probeAudioTracks } from "./mp4";
 import { muxNativeAudio } from "./mux";
 import type { CaptureSource } from "./native";
-import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, setOnIdleCallback, saveNativeClip, setRecordUser, watchRecording } from "./nativeClips";
+import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, saveNativeClip, setOnIdleCallback, setRecordUser, watchRecording } from "./nativeClips";
 import { hasVideoTrack } from "./nativeTracks";
 import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
 import { toast } from "./toasts";
-import { shiftTracks, toMeta, voiceActivity, voiceChannelId, voiceParticipants, type VoiceFileMeta, type VoiceTrack } from "./voice";
-import { errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
+import { captureFrameRate, captureHeight, captureVideoBitrate, clipRetentionSeconds, errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
+import { shiftTracks, toMeta, voiceActivity, voiceChannelId, type VoiceFileMeta, voiceParticipants, type VoiceTrack } from "./voice";
 import { voiceBuffers } from "./voiceRecord";
 
 export const logger = new Logger("Clipper", "#f0b132");
@@ -359,6 +359,7 @@ class ClipRecorder {
         // to "recording", so `stop` is what actually ends the buffer.
         void this.save(settings.store.autoClipEndLength)
             .then(() => this.stop())
+            .catch(e => logger.error("Could not save the clip that the call end asked for", e))
             .finally(() => {
                 this.autoClipPending = false;
             });
@@ -462,6 +463,25 @@ class ClipRecorder {
      * until its own timeout instead of waking it with the chunk it asked for.
      */
     private nextChunk: Array<() => void> = [];
+
+    /**
+     * The track-ended handler, so a stop can take it back off.
+     *
+     * The capture is the user's own screen pick: they can end it from the
+     * browser's own UI, and the buffer has to notice. One handler, registered
+     * once per start and always removed on cleanup, so a long session does not
+     * accumulate a handler per start.
+     */
+    private onTrackEnded: (() => void) | null = null;
+
+    /**
+     * The 500 ms flush timers still armed when a save/stop gives up.
+     *
+     * `cleanup` resolves the `nextChunk` waiters, which leaves the timeout in
+     * this list pending for another half a second; clearing it here lets the
+     * closures and this object go together instead of half a second late.
+     */
+    private flushTimers = new Set<ReturnType<typeof setTimeout>>();
 
     /**
      * The containers left to try, best first, and where in that list we are.
@@ -661,7 +681,14 @@ class ClipRecorder {
             if (!videoTrack) throw new Error("The picked source returned no video track");
 
             // User stopped the capture from Discord's / the OS' own UI.
-            videoTrack.addEventListener("ended", () => this.stop());
+            this.onTrackEnded = () => {
+                // A track ending while a save has the state on "saving" would pull
+                // the rug from under the file being written: hold the stop until
+                // the save has handed back, then stop from there.
+                if (this.state === "saving") return;
+                void this.stop();
+            };
+            videoTrack.addEventListener("ended", this.onTrackEnded);
 
             const audioTrack = await this.buildMixedAudio(stream);
 
@@ -728,7 +755,7 @@ class ClipRecorder {
             // The microphone joins them, so the person recording is not the one
             // person a mute can silence.
             const me = UserStore.getCurrentUser();
-            if (this.mic && me?.id) voiceBuffers.attach(this.mic.track, me.id, (me as any).globalName || me.username || "You");
+            if (this.mic && me?.id) voiceBuffers.attach(this.mic.track, me.id, me.globalName || me.username || "You");
 
             this.setState("recording");
             toast(`Clip buffer running - last ${settings.store.clipLength}s kept`, Toasts.Type.SUCCESS);
@@ -1021,14 +1048,17 @@ class ClipRecorder {
                 if (done) return;
                 done = true;
                 clearTimeout(timer);
+                this.flushTimers.delete(timer);
                 resolve();
             };
 
             const timer = setTimeout(() => {
                 this.nextChunk = this.nextChunk.filter(waiting => waiting !== settle);
+                this.flushTimers.delete(timer);
                 settle();
             }, 500);
 
+            this.flushTimers.add(timer);
             this.nextChunk.push(settle);
 
             try {
@@ -1059,13 +1089,17 @@ class ClipRecorder {
      * as `chunksSince`: a save has to write something.
      */
     private chunksIn(from: number, to: number): TimedChunk[] {
-        const kept = this.chunks.filter(c => c.at > from && c.at - TIMESLICE < to);
+        // A chunk whose timeslice runs past `to` ends after the clip was cut;
+        // slicing on it would push the clip's tail past where the save drew
+        // the line. Chunks that start within the range are kept, up to and
+        // including the one that holds `to`.
+        const kept = this.chunks.filter(c => c.at > from && c.at <= to);
         return kept.length ? kept : this.chunks.slice(-1);
     }
 
     private prune() {
         // Keep one extra timeslice so the clip is never shorter than asked for.
-        const cutoff = Date.now() - (settings.store.clipLength * 1000 + TIMESLICE);
+        const cutoff = Date.now() - (clipRetentionSeconds(settings.store.clipLength) * 1000 + TIMESLICE);
         while (this.chunks.length && this.chunks[0].at < cutoff) this.chunks.shift();
 
         /*
@@ -1119,12 +1153,16 @@ class ClipRecorder {
          * for ten seconds was handing back three. Chromium reads this option
          * from Chrome 111; older builds ignore it and fall back on the guard
          * in the repair.
+         *
+         * The unit is seconds, not milliseconds: passing `TIMESLICE` whole put
+         * a keyframe every 1000 s instead of every second, which is the exact
+         * condition the comment above was written to avoid.
          */
         const options: MediaRecorderOptions & { videoKeyFrameIntervalDuration?: number; } = {
             mimeType: mime,
-            videoBitsPerSecond: videoBitrate * 1_000_000,
+            videoBitsPerSecond: captureVideoBitrate(videoBitrate),
             audioBitsPerSecond: audioBitrate * 1000,
-            videoKeyFrameIntervalDuration: TIMESLICE
+            videoKeyFrameIntervalDuration: TIMESLICE / 1000
         };
 
         let recorder: MediaRecorder;
@@ -1287,7 +1325,7 @@ class ClipRecorder {
         const live = track.getSettings();
         const width = evenSize(live.width || 1280);
         const height = evenSize(live.height || 720);
-        const fps = settings.store.fps || 30;
+        const fps = captureFrameRate(settings.store.fps);
 
         const video = document.createElement("video");
         video.srcObject = new MediaStream([track]);
@@ -1337,6 +1375,17 @@ class ClipRecorder {
         let ticker = 0;
         const onTimer = () => { ticker = window.setInterval(draw, Math.max(1, Math.round(1000 / fps))); };
 
+        // The fallback timer arms itself half a second in, on its own: a stop
+        // that lands inside that window clears it here rather than in the
+        // stopper below, which does not exist yet.
+        let fallback = 0;
+        const armTimer = () => {
+            fallback = window.setTimeout(() => {
+                fallback = 0;
+                if (!stopped && drawn < 2 && !ticker) onTimer();
+            }, 500);
+        };
+
         if (perFrame) {
             const step = () => {
                 if (stopped) return;
@@ -1345,14 +1394,12 @@ class ClipRecorder {
             };
 
             perFrame(step);
+            armTimer();
 
             // This video element is never in the document, and a client that
             // declines to call back for one that is not on screen would leave
             // the canvas on its first frame forever. Half a second without one
             // is that client, and the timer takes over.
-            setTimeout(() => {
-                if (!stopped && drawn < 2 && !ticker) onTimer();
-            }, 500);
         } else {
             onTimer();
         }
@@ -1367,6 +1414,7 @@ class ClipRecorder {
         this.relay = () => {
             stopped = true;
             if (ticker) clearInterval(ticker);
+            if (fallback) clearTimeout(fallback);
 
             video.pause();
             video.srcObject = null;
@@ -1405,10 +1453,15 @@ class ClipRecorder {
     stop() {
         if (this.state === "idle") return;
 
+        // Stopping a still-"starting" buffer never began a capture, so there is
+        // nothing a "stopped" toast would be honest about; arming already told
+        // the user it began.
+        const hadStarted = this.state !== "starting";
+
         this.cleanup();
         this.setState("idle");
         this.pickedByHand = false;
-        toast("Clip buffer stopped", Toasts.Type.MESSAGE);
+        if (hadStarted) toast("Clip buffer stopped", Toasts.Type.MESSAGE);
     }
 
     /**
@@ -1489,7 +1542,9 @@ class ClipRecorder {
                     return;
                 }
 
-                if (!processes.length) return;
+                // A report that is not a list (or that names nothing) is worth
+                // nothing: walking it would throw inside an interval callback.
+                if (!Array.isArray(processes) || !processes.length) return;
 
                 const at = Date.now();
                 const total = processes.reduce((sum, p) => sum + p.mb, 0);
@@ -1555,6 +1610,8 @@ class ClipRecorder {
         }
 
         for (const resolve of this.nextChunk.splice(0)) resolve();
+        for (const timer of this.flushTimers) clearTimeout(timer);
+        this.flushTimers.clear();
 
         voiceActivity.stop();
         voiceBuffers.stop();
@@ -1597,6 +1654,11 @@ class ClipRecorder {
 
         this.relay?.();
         this.relay = null;
+
+        if (this.onTrackEnded) {
+            this.stream?.getVideoTracks()[0]?.removeEventListener("ended", this.onTrackEnded);
+            this.onTrackEnded = null;
+        }
 
         this.recordStream?.getTracks().forEach(t => t.stop());
         this.recordStream = null;
@@ -1690,7 +1752,13 @@ class ClipRecorder {
      * asked for - the container is only cut where it can be cut.
      */
     async save(seconds?: number, window?: ClipWindow): Promise<void> {
-        if (this.state === "saving") return;
+        // Out loud rather than swallowed: the keybind and the button both
+        // reach here, and a second press during a long save (flush, repair,
+        // mux) would otherwise lose a clip with no word about it.
+        if (this.state === "saving") {
+            toast("Already saving a clip - this one was not taken", Toasts.Type.MESSAGE);
+            return;
+        }
 
         if (!this.isRecording) {
             toast("Clip buffer is not running", Toasts.Type.FAILURE);
@@ -1725,6 +1793,7 @@ class ClipRecorder {
 
         this.setState("saving");
         const mine = this.generation;
+        let failed = false;
 
         try {
             /*
@@ -1932,6 +2001,7 @@ class ClipRecorder {
                 toast(`Clip saved (${length}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             }
         } catch (e) {
+            failed = true;
             logger.error("Failed to save clip", e);
             toast(`Failed to save the clip: ${errorMessage(e)}`, Toasts.Type.FAILURE);
         } finally {
@@ -1943,7 +2013,13 @@ class ClipRecorder {
             // in that case "saving" must fall back to idle, not to "recording".
             // Cast: TS still narrows `state` from the guard at the top of save(),
             // but setState() has moved it since.
-            if ((this.state as RecorderState) === "saving") this.setState(this.recorder ? "recording" : "idle");
+            if ((this.state as RecorderState) === "saving") {
+                // A failed save is not the clean state to walk away from in
+                // silence: whatever the UI hears next, it should know the last
+                // clip did not make it, not that everything is fine.
+                if (failed) logger.warn("The last clip failed to save; the buffer's state goes back underneath it unchanged");
+                this.setState(this.recorder ? "recording" : "idle");
+            }
         }
     }
 
@@ -2061,23 +2137,22 @@ class ClipRecorder {
         const watch = watchRecording();
         this.nativeArmInFlight = true;
 
-        if (!arm({ sourceId, seconds: clipLength, resolution, frameRate: fps, applicationName: sourceName || "Clipper" })) {
-            this.nativeArmInFlight = false;
-            watch.stop();
-            toast("Recording mixed sound: the clip engine would not take this source", Toasts.Type.MESSAGE);
-            return;
-        }
+        try {
+            if (!arm({ sourceId, seconds: clipLength, resolution: captureHeight(resolution), frameRate: captureFrameRate(fps), applicationName: sourceName || "Clipper" })) {
+                watch.stop();
+                toast("Recording mixed sound: the clip engine would not take this source", Toasts.Type.MESSAGE);
+                return;
+            }
 
-        const verdict = await watch.settled;
-        this.nativeArmInFlight = false;
-        if (token !== this.nativeArmToken || this.state !== "recording") return;
+            const verdict = await watch.settled;
+            if (token !== this.nativeArmToken || this.state !== "recording") return;
 
-        if (!verdict.recording) {
-            logger.warn(`The native clip engine would not start: ${verdict.reason}`);
-            toast(`Recording mixed sound: ${verdict.reason}`, Toasts.Type.MESSAGE);
-            disarm();
-            return;
-        }
+            if (!verdict.recording) {
+                logger.warn(`The native clip engine would not start: ${verdict.reason}`);
+                toast(`Recording mixed sound: ${verdict.reason}`, Toasts.Type.MESSAGE);
+                disarm();
+                return;
+            }
 
         /*
          * The engine records nobody until it is told to.
@@ -2137,7 +2212,32 @@ class ClipRecorder {
          * report, and `saveNative` gives it.
          */
         logger.info(`The native clip engine is recording alongside the plugin's buffer (${verdict.confirmed ? "confirmed by the engine" : "no ready event, which is normal on this path"}).`);
-        toast("Native engine on - one sound track per person in the call", Toasts.Type.SUCCESS);
+            toast("Native engine on - one sound track per person in the call", Toasts.Type.SUCCESS);
+        } catch (e) {
+            // Anything thrown by the arm - setRecordUser, a dispatcher that refuses
+            // this observer, an engine call that throws instead of returning false -
+            // leaves the engine half-set-up. Back out of the whole thing rather than
+            // let a half-armed engine hold the helper process open with a stuck flag.
+            logger.warn("Failed to arm the native clip engine", e);
+            disarm();
+
+            if (this.consentBound) {
+                FluxDispatcher.unsubscribe("VOICE_STATE_UPDATES" as any, this.onVoiceStates);
+                this.consentBound = false;
+            }
+            if (this.consentTicker) clearInterval(this.consentTicker);
+            this.consentTicker = null;
+
+            if (this.nativeResetTicker) clearInterval(this.nativeResetTicker);
+            this.nativeResetTicker = null;
+            if (this.nativeResetTimeout) clearTimeout(this.nativeResetTimeout);
+            this.nativeResetTimeout = null;
+            setOnIdleCallback(null);
+        } finally {
+            // Owned by this call, whatever happened in it. A stuck `nativeArmInFlight`
+            // would have `cleanup` disarming a half-armed engine on every later stop.
+            this.nativeArmInFlight = false;
+        }
     }
 
     /**
@@ -2262,6 +2362,9 @@ class ClipRecorder {
             this.nativeFailures++;
             logger.warn(`The native clip engine had nothing buffered (it reported ${reported}); falling back to the plugin's own buffer.`);
             toast("The native engine had no footage buffered - saved the plugin's mixed recording instead", Toasts.Type.MESSAGE);
+            // Nothing was written, so the name is free again: holding it
+            // would only push a later save onto a `-1` suffix for no reason.
+            void Native.releaseClipPath(path).catch(() => void 0);
             return false;
         }
 
@@ -2300,6 +2403,9 @@ class ClipRecorder {
                 logger.warn(`Could not remove the pictureless clip ${saved}`, e);
             }
 
+            // The file is gone again (or never landed), so the reservation
+            // goes with it: save() carries on below and may reuse the name.
+            void Native.releaseClipPath(path).catch(() => void 0);
             return false;
         }
 
@@ -2347,6 +2453,9 @@ class ClipRecorder {
             toast(`Clip saved (${Math.round(seconds)}s, ${formatBytes(blob.size)}, ${layout})`, Toasts.Type.SUCCESS);
         }
 
+        // The clip is on disk under this name now, so `freePath` guards it
+        // from here on; the reservation has done its job.
+        void Native.releaseClipPath(path).catch(() => void 0);
         return true;
     }
 
@@ -2659,6 +2768,8 @@ async function gameScreen(sources: CaptureSource[], allowed: boolean): Promise<C
  * instead, with Vesktop's own picker as the last resort.
  */
 async function acquireStream(fps: number, resolution: number, follow: boolean): Promise<Capture> {
+    fps = captureFrameRate(fps);
+    resolution = captureHeight(resolution);
     const video: MediaTrackConstraints = {
         frameRate: { ideal: fps, max: fps },
         ...(resolution ? { height: { ideal: resolution } } : {})
@@ -2844,5 +2955,35 @@ function copy(text: string) {
 
 // Native helper (main process). Falls back to downloads when unavailable.
 const Native = VencordNative.pluginHelpers.Clipper as PluginNative<typeof import("./native")>;
+
+/**
+ * Adopts clips that reached the folder but never the library.
+ *
+ * A clip is written and then tagged, and the renderer can die between the
+ * two: the file is on disk, the library has no entry and nothing else would
+ * ever file it under anything. The folder is walked against the library and
+ * whatever is missing is tagged Uncategorised. Best effort, end to end - a
+ * clip the library already knows, an unreadable folder and a non-desktop
+ * client are all fine, each just means nothing local to adopt.
+ */
+export async function adoptOrphans(): Promise<void> {
+    if (!IS_DISCORD_DESKTOP && !IS_VESKTOP) return;
+
+    try {
+        const stored = await Native.listClips(settings.store.saveDirectory);
+        const meta = await readMeta();
+
+        let adopted = 0;
+        for (const clip of stored) {
+            if (clip.name in meta) continue;
+            await setMeta(clip.name, {});
+            adopted++;
+        }
+
+        if (adopted) logger.info(`Adopted ${adopted} clip${adopted === 1 ? "" : "s"} that never made it into the library`);
+    } catch (e) {
+        logger.warn("Could not adopt clips left out of the library", e);
+    }
+}
 
 export const recorder = new ClipRecorder();

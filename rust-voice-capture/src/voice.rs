@@ -58,6 +58,10 @@ use crate::wav::ParticipantWav;
 /// One participant = one SSRC (maps SSRC -> Discord user_id from the gateway).
 pub type Ssrc = u32;
 
+/// Hard ceiling on simultaneously-open voice lanes, so spoofed SSRCs on the
+/// wire cannot exhaust file descriptors or disk without bound.
+const MAX_LANES: usize = 128;
+
 /// SSRC table carried back by the gateway (from VOICE_STATE_UPDATE member
 /// updates). Each participant speaks on exactly one SSRC, which is the demux
 /// handle we key `.wav` files on.
@@ -82,7 +86,7 @@ impl RtpPacket {
         }
         let b0 = buf[0];
         let cc = (b0 & 0x0f) as usize;
-        let header_len = 4 + cc * 4;
+        let header_len = 12 + cc * 4;
         if buf.len() < header_len {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "RTP CC overrun"));
         }
@@ -163,6 +167,12 @@ impl TransportCipher {
                 datagram[ext_preamble_offset + 3],
             ]);
             aad_len += 4 + ext_words as usize * 4;
+        }
+        // A malicious/large extension length must not walk the slice past the
+        // datagram — after AAD we still need room for the 16-byte GCM tag and the
+        // 4-byte nonce suffix.
+        if aad_len > datagram.len() || datagram.len() - aad_len < 4 + 16 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "RTP AAD overruns datagram"));
         }
         let aad = &datagram[..aad_len];
 
@@ -297,7 +307,7 @@ pub struct VoiceSession {
     /// SSRC -> Discord user_id, populated by the gateway from VOICE_STATE_UPDATE.
     pub ssrc_table: SsrcTable,
     socket: Arc<UdpSocket>,
-    started: std::time::Instant,
+    lane_cap_warned: bool,
     /// Public ip:port as revealed by IP discovery (type-0x1/0x2 UDP exchange).
     /// Exposed so the caller can feed it back to the gateway via SelectProtocol.
     pub discovered: Option<(String, u16)>,
@@ -396,7 +406,7 @@ impl VoiceSession {
             lanes: HashMap::new(),
             ssrc_table,
             socket: Arc::new(socket),
-            started: std::time::Instant::now(),
+            lane_cap_warned: false,
             discovered,
             #[cfg(feature = "transport_decrypt")]
             cipher,
@@ -422,14 +432,17 @@ impl VoiceSession {
         let mut buf = [0u8; 74];
         match socket.recv(&mut buf[..]).await {
             Ok(n) => {
-                if n < 74 || buf[0..2] != [0x00, 0x02] {
-                    // Discord sometimes pads to a full datagram; tolerate longer.
-                    if buf[0..2] != [0x00, 0x02] {
-                        warn!("ip discovery: bad reply type");
-                        return None;
-                    }
-                }
                 // Layout: type(2) + length(2) + ssrc(4) + address(64, null-term) + port(2).
+                // A truncated reply cannot be trusted past byte 8, and any reply
+                // with a wrong type is rejected — regardless of length.
+                if n < 8 {
+                    warn!("ip discovery: reply too short ({n}B)");
+                    return None;
+                }
+                if buf[0..2] != [0x00, 0x02] {
+                    warn!("ip discovery: bad reply type");
+                    return None;
+                }
                 let addr_start = 8;
                 let port = u16::from_be_bytes([buf[n - 2], buf[n - 1]]);
                 let null = buf[addr_start..addr_start + 64]
@@ -455,10 +468,31 @@ impl VoiceSession {
     }
 
     /// Resolve or create a lane for an SSRC seen on the wire.
-    pub async fn lane_for(&mut self, ssrc: Ssrc) -> io::Result<()> {
-        let user_id = self.ssrc_table.id.get(&ssrc).cloned()
-            .unwrap_or_else(|| format!("user-{:#x}", ssrc));
-        let path = format!("./clips/{}.wav", user_id);
+    pub fn lane_for(&mut self, ssrc: Ssrc) -> io::Result<()> {
+        self.ensure_lane(ssrc)
+    }
+
+    /// Shared lane-creation path, bounded by `MAX_LANES` so spoofed SSRCs cannot
+    /// grow the file-descriptor / disk footprint without limit.
+    fn ensure_lane(&mut self, ssrc: Ssrc) -> io::Result<()> {
+        if self.lanes.len() >= MAX_LANES {
+            if !self.lane_cap_warned {
+                warn!("lane cap reached ({MAX_LANES}); refusing to open more lanes");
+                self.lane_cap_warned = true;
+            }
+            return Err(io::Error::other("voice lane cap reached"));
+        }
+        let raw = self.ssrc_table.id.get(&ssrc).map(String::as_str).unwrap_or_default();
+        // `user_id` arrives from the network (VOICE_STATE_UPDATE) and names a
+        // file on disk, so only ASCII digits may pass through; anything else
+        // falls back to the locally-generated SSRC so no path can escape
+        // ./clips.
+        let user_id = if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) {
+            raw.to_string()
+        } else {
+            format!("user-{ssrc:08x}")
+        };
+        let path = format!("./clips/{user_id}.wav");
         let lane = VoiceLane::new(user_id.clone(), ssrc, &path)?;
         self.lanes.insert(ssrc, lane);
         info!("lane open for {} (ssrc {:#x})", user_id, ssrc);
@@ -469,11 +503,27 @@ impl VoiceSession {
     /// yields (main.rs wires this to Ctrl-C for a graceful drain instead of abort).
     pub async fn run(&mut self, mut shutdown: tokio::sync::broadcast::Receiver<()>) -> io::Result<()> {
         let mut buf = vec![0u8; 1280]; // typical Discord RTP max ~320 payload
+        let mut recv_errors: u64 = 0;
         loop {
             // select! between datagram arrival and the shutdown signal so a Ctrl-C
             // (or main signalling shutdown) drains cleanly instead of abort().
             let (n, _from) = tokio::select! {
-                r = self.socket.recv_from(&mut buf) => r?,
+                r = self.socket.recv_from(&mut buf) => match r {
+                    Ok(v) => {
+                        recv_errors = 0;
+                        v
+                    }
+                    // A transient UDP error (e.g. WSAECONNRESET on a connected
+                    // socket when an ICMP reply arrives) must not kill the whole
+                    // capture; log throttled and keep listening.
+                    Err(e) => {
+                        recv_errors += 1;
+                        if recv_errors == 1 || recv_errors.is_multiple_of(1000) {
+                            warn!("udp recv error (x{recv_errors}): {e}");
+                        }
+                        continue;
+                    }
+                },
                 _ = shutdown.recv() => {
                     info!("voice session received shutdown signal — stopping recv loop");
                     return Ok(());
@@ -486,22 +536,24 @@ impl VoiceSession {
                 if self.cipher.is_some() {
                     // process_datagram borrows self for the duration of decrypt+route;
                     // the cipher borrow ends before returning, so no clone is needed.
-                    match self.process_datagram(&buf[..n]) {
-                        Ok(true) => continue,
-                        Ok(false) => {}
-                        Err(e) => warn!("decrypt failed on {}B datagram: {e}", n),
+                    if let Err(e) = self.process_datagram(&buf[..n]) {
+                        // A packet that fails transport-decrrypt is discarded — never
+                        // recorded as if it were plaintext.
+                        warn!("decrypt failed on {}B datagram: {e}", n);
                     }
+                    continue;
                 }
             }
 
-            // Fallback: parse as plain RTP and record (stub decode path). In non-decrypt
-            // mode we gate on a sane RTP version header (v2) to reject garbage that
-            // would otherwise spawn runaway SSRC lanes on non-RTP UDP noise.
+            // Fallback: parse as plain RTP and record (stub decode path). Runs only
+            // when there is no cipher (cipher disabled / transport_decrypt off). In
+            // non-decrypt mode we gate on a sane RTP version header (v2) to reject
+            // garbage that would otherwise spawn runaway SSRC lanes on non-RTP noise.
             match RtpPacket::parse(&buf[..n]) {
                 Ok(pkt) if pkt.version_is_valid(buf[0]) => {
                     debug!("rtp ssrc={:#x} pt={} ts={} payload={}B", pkt.ssrc, pkt.payload_type, pkt.timestamp, pkt.payload.len());
                     if !self.lanes.contains_key(&pkt.ssrc) {
-                        if let Err(e) = self.lane_for(pkt.ssrc).await {
+                        if let Err(e) = self.lane_for(pkt.ssrc) {
                             warn!("lane open failed for {:#x}: {e}", pkt.ssrc);
                         }
                     }
@@ -513,11 +565,6 @@ impl VoiceSession {
                 }
                 Ok(_) => { /* parsed but version/header sanity-check failed (RTCP or noise) — ignore */ }
                 Err(e) => warn!("bad rtp: {e}"),
-            }
-
-            // Safety backstop against unbounded lane growth on very long calls.
-            if self.started.elapsed().as_secs() > 7200 && self.lanes.len() > 64 {
-                warn!("too many voice lanes ({}) after 2h — check SSRC table drift", self.lanes.len());
             }
         }
     }
@@ -550,12 +597,7 @@ impl VoiceSession {
 
         // Ensure a lane exists for this SSRC.
         if !self.lanes.contains_key(&pkt.ssrc) {
-            let user_id = self.ssrc_table.id.get(&pkt.ssrc).cloned()
-                .unwrap_or_else(|| format!("user-{:#x}", pkt.ssrc));
-            let path = format!("./clips/{}.wav", user_id);
-            let lane = VoiceLane::new(user_id.clone(), pkt.ssrc, &path)?;
-            self.lanes.insert(pkt.ssrc, lane);
-            info!("lane open for {} (ssrc {:#x})", user_id, pkt.ssrc);
+            self.lane_for(pkt.ssrc)?;
         }
 
         if let Some(lane) = self.lanes.get_mut(&pkt.ssrc) {

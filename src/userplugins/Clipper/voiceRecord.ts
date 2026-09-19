@@ -31,7 +31,7 @@ import { Logger } from "@utils/Logger";
 import { lengthBytes, repairBytes } from "./repair";
 import { settings } from "./settings";
 // The main buffer's own, so both sides cut on the same boundaries.
-import { TIMESLICE } from "./utils";
+import { clipRetentionSeconds, TIMESLICE } from "./utils";
 import { type VoiceTap, voiceTaps } from "./voiceTaps";
 
 const logger = new Logger("Clipper", "#f0b132");
@@ -73,8 +73,7 @@ interface Lane {
     /** First chunk, carrying the EBML header: useless alone, needed by all. */
     header: Blob | null;
     chunks: Chunk[];
-    /** Resolver for a flush in flight. */
-    next: (() => void) | null;
+    next: Array<() => void>;
 }
 
 /** One person's own audio, cut to the saved window. */
@@ -193,7 +192,7 @@ class VoiceBuffers {
                 audioBitsPerSecond: 96_000
             });
 
-            const lane: Lane = { tap, pinned, recorder, mimeType: mime, header: null, chunks: [], next: null };
+            const lane: Lane = { tap, pinned, recorder, mimeType: mime, header: null, chunks: [], next: [] };
 
             recorder.ondataavailable = e => this.onChunk(lane, e.data);
             recorder.onerror = e => {
@@ -217,8 +216,7 @@ class VoiceBuffers {
         this.lanes.delete(id);
 
         // A flush waiting on this lane would otherwise wait out its timeout.
-        lane.next?.();
-        lane.next = null;
+        for (const finish of lane.next.splice(0)) finish();
 
         try {
             if (lane.recorder.state !== "inactive") lane.recorder.stop();
@@ -233,14 +231,13 @@ class VoiceBuffers {
             else lane.chunks.push({ blob, at: Date.now() });
         }
 
-        lane.next?.();
-        lane.next = null;
+        for (const finish of lane.next.splice(0)) finish();
 
         this.prune(lane);
     }
 
     private prune(lane: Lane): void {
-        const cutoff = Date.now() - (settings.store.clipLength * 1000 + TIMESLICE);
+        const cutoff = Date.now() - (clipRetentionSeconds(settings.store.clipLength) * 1000 + TIMESLICE);
         while (lane.chunks.length && lane.chunks[0].at < cutoff) lane.chunks.shift();
     }
 
@@ -263,12 +260,12 @@ class VoiceBuffers {
                 if (timer != null) clearTimeout(timer);
                 timer = null;
 
-                if (lane.next === finish) lane.next = null;
+                lane.next = lane.next.filter(waiter => waiter !== finish);
 
                 resolve();
             };
 
-            lane.next = finish;
+            lane.next.push(finish);
 
             try {
                 lane.recorder.requestData();
