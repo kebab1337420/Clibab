@@ -37,9 +37,9 @@ import {
 } from "../audio";
 import type { ChatLine } from "../chat";
 import {
-    deleteClip,
     frameName,
     listClips,
+    listTrash,
     loadAudioFile,
     loadClipUrl,
     loadImageFile,
@@ -51,16 +51,19 @@ import {
     probeRange,
     renameClip,
     renderName,
+    restoreClip,
+    emptyTrash,
     revealClip,
     saveFrame,
     type StoredClip,
+    trashClip,
+    type TrashedClip,
     typeOfClip,
     writeClipCopy
 } from "../clips";
 import {
     categoriesOf,
     type ClipMeta,
-    dropMeta,
     moveMeta,
     pruneMeta,
     readMeta,
@@ -2233,6 +2236,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [note, setNote] = useState("");
     const [error, setError] = useState("");
     const [search, setSearch] = useState("");
+    const [showTrash, setShowTrash] = useState(false);
+    const [trash, setTrash] = useState<TrashedClip[] | null>(null);
 
     // The clip library, which used to be its own modal: the picked clip is the
     // one the rename, category and delete actions act on, and it is kept apart
@@ -2689,6 +2694,46 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
     );
 
+    /** Rereads the trash: what is waiting, and what expired since. */
+    const refreshTrash = async () => {
+        try {
+            setTrash(await listTrash());
+        } catch (e) {
+            logger.warn("Could not list the trash", e);
+            setTrash([]);
+        }
+    };
+
+    const onRestore = async (stored: string) => {
+        try {
+            const name = await restoreClip(stored);
+            await refreshTrash();
+            await refreshClips(name);
+            toast(`Restored ${name}`, Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Restore failed", e);
+            toast("Could not restore that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    const onEmptyTrash = async () => {
+        try {
+            await emptyTrash();
+            await refreshTrash();
+            toast("Trash emptied", Toasts.Type.MESSAGE);
+        } catch (e) {
+            logger.warn("Empty trash failed", e);
+            toast("Could not empty the trash", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Days left before a deletion goes for good. */
+    const trashLeft = (deletedAt: number) => {
+        const days = Math.max(0, Math.ceil((7 * 86400 * 1000 - (Date.now() - deletedAt)) / (86400 * 1000)));
+
+        return days <= 0 ? "last day" : `${days}d left`;
+    };
+
     /**
      * Rereads the clip folder and its categories.
      *
@@ -2764,9 +2809,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         setConfirmDelete(false);
 
         try {
-            await deleteClip(picked);
-            await dropMeta(picked);
+            await trashClip(picked);
+            toast("Clip moved to the trash - 7 days to change your mind", Toasts.Type.MESSAGE);
             await refreshClips("");
+            if (trash !== null) void refreshTrash();
         } catch (e) {
             logger.warn("Delete failed", e);
             toast("Could not delete that clip", Toasts.Type.FAILURE);
@@ -5542,6 +5588,43 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                             </div>
                         )}
 
+                        <div className="vc-clipper-field">
+                            <button
+                                disabled={busy}
+                                title="Deleted clips stay 7 days, then go for good"
+                                onClick={() => setShowTrash(showing => {
+                                    if (!showing) void refreshTrash();
+                                    return !showing;
+                                })}
+                            >
+                                {showTrash ? "Back to clips" : trash?.length ? `Trash (${trash.length})` : "Trash"}
+                            </button>
+                        </div>
+
+                        {showTrash ? (
+                            <>
+                                <div className="vc-clipper-note">Deleted clips stay 7 days, then go for good.</div>
+                                {trash === null && <div className="vc-clipper-note">Reading the trash…</div>}
+                                {trash?.length === 0 && <div className="vc-clipper-note">Trash is empty.</div>}
+                                {trash?.map(t => (
+                                    <div key={t.stored} className="vc-clipper-side-clip">
+                                        <div className="vc-clipper-clip-row">
+                                            <div className="vc-clipper-clip-text">
+                                                <div className="vc-clipper-name" title={t.name}>{t.name}</div>
+                                                <div className="vc-clipper-meta">
+                                                    {formatBytes(t.size)}{t.game ? ` - ${t.game}` : ""} - {trashLeft(t.deletedAt)}
+                                                </div>
+                                            </div>
+                                            <button disabled={busy} title="Bring it back to the folder" onClick={() => void onRestore(t.stored)}>Restore</button>
+                                        </div>
+                                    </div>
+                                ))}
+                                {!!trash?.length && (
+                                    <button disabled={busy} title="Delete everything in the trash for good" onClick={() => void onEmptyTrash()}>Empty trash</button>
+                                )}
+                            </>
+                        ) : (
+                            <>
                         {clips === null && <div className="vc-clipper-note">Reading the clip folder…</div>}
                         {clips?.length === 0 && <div className="vc-clipper-note">No clip saved yet.</div>}
                         {!!clips?.length && !shown.length && <div className="vc-clipper-note">No clip matches.</div>}
@@ -5573,6 +5656,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 </button>
                             );
                         })}
+                            </>
+                        )}
 
                         {!!picked && (
                             <div className="vc-clipper-side-manage">
@@ -5609,7 +5694,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     <button
                                         className={confirmDelete ? "vc-clipper-danger" : ""}
                                         disabled={busy}
-                                        title="Delete the file from the folder"
+                                        title="Move the file to the trash (7 days to restore it)"
                                         onClick={() => void onDeleteClip()}
                                     >
                                         {confirmDelete ? "Sure?" : "Delete"}

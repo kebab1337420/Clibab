@@ -352,6 +352,14 @@ export function listClips(_: IpcMainInvokeEvent, dir: string): StoredClip[] {
     const target = resolveDirectory(dir);
     if (!existsSync(target)) return [];
 
+    // Expired trash goes with any listing: the 7-day expiry must not wait
+    // for somebody to open the trash view.
+    try {
+        purgeTrash(target);
+    } catch {
+        // A stuck trash must never hide the clips themselves.
+    }
+
     const clips: StoredClip[] = [];
     const files = new Set<string>();
     const entries = readdirSync(target, { withFileTypes: true });
@@ -498,6 +506,239 @@ export function shareClip(_: IpcMainInvokeEvent, dir: string, name: string): Pro
         request.write(data);
         request.end(tail);
     });
+}
+
+/**
+ * Deleted clips wait here instead of going to the OS trash.
+ *
+ * A rename on the same volume is atomic and instant whatever the file weighs,
+ * and keeping the file next to the clips means restoring is the same rename
+ * backwards - including the thumbnail and the metadata the library dropped.
+ * Entries older than TRASH_KEEP_MS are removed for good whenever the trash
+ * is listed or the clip folder is.
+ */
+const TRASH_DIR = ".trash";
+const TRASH_INDEX = ".trash.json";
+const TRASH_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+interface TrashEntry {
+    /** File name inside the trash dir (deduped, so not the clip's name). */
+    stored: string;
+    /** Name the clip had in the folder, for the restore. */
+    name: string;
+    /** Epoch ms of the deletion, for the 7-day expiry. */
+    deletedAt: number;
+    /** Library entry as JSON, handed back on restore. */
+    meta: string | null;
+}
+
+function trashDir(target: string): string {
+    return join(target, TRASH_DIR);
+}
+
+function readTrashIndex(trash: string): Record<string, TrashEntry> {
+    try {
+        const parsed = JSON.parse(readFileSync(join(trash, TRASH_INDEX), "utf8"));
+        if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+        // Missing or corrupt: start the index over rather than losing the files.
+    }
+
+    return {};
+}
+
+function writeTrashIndex(trash: string, index: Record<string, TrashEntry>): void {
+    mkdirSync(trash, { recursive: true });
+    writeFileSync(join(trash, TRASH_INDEX), JSON.stringify(index));
+}
+
+/** Drops the per-person lanes left behind by a trashed stem. */
+function dropTrashedVoices(target: string, stem: string): void {
+    if (!stem) return;
+
+    const voices = join(target, VOICE_DIR);
+    let entries: string[];
+    try {
+        entries = readdirSync(voices);
+    } catch {
+        return;
+    }
+
+    for (const file of entries) {
+        if (file.startsWith(`${stem}.`) && file.toLowerCase().endsWith(".webm")) {
+            try {
+                unlinkSync(join(voices, file));
+            } catch {
+                // Already gone, or held open by a decoder.
+            }
+        }
+    }
+}
+
+/** Removes entries older than TRASH_KEEP_MS, with their files and voice lanes. */
+function purgeTrash(target: string): void {
+    const trash = trashDir(target);
+    if (!existsSync(trash)) return;
+
+    const index = readTrashIndex(trash);
+    const now = Date.now();
+    let changed = false;
+
+    for (const [stored, entry] of Object.entries(index)) {
+        if (!entry || now - (entry.deletedAt ?? 0) < TRASH_KEEP_MS) continue;
+
+        for (const file of [stored, thumbNameFor(stored)]) {
+            try {
+                unlinkSync(join(trash, file));
+            } catch {
+                // Already gone.
+            }
+        }
+
+        // The per-person lanes were left beside the voices under the clip's
+        // own stem; without the clip they are orphaned the same day.
+        dropTrashedVoices(target, (entry.name ?? "").replace(/\.(webm|mp4|png|jpg|gif)$/i, ""));
+
+        delete index[stored];
+        changed = true;
+    }
+
+    if (changed) writeTrashIndex(trash, index);
+}
+
+export interface TrashedClip {
+    /** File name inside the trash dir, the handle restore and empty use. */
+    stored: string;
+    /** Name the clip had in the folder. */
+    name: string;
+    size: number;
+    /** Epoch ms of the deletion. */
+    deletedAt: number;
+    /** Category the clip was filed under, when its metadata says. */
+    game: string;
+}
+
+/** Moves a clip into the trash, with its thumbnail and library entry. */
+export function trashClip(_: IpcMainInvokeEvent, dir: string, name: string, meta: string | null): void {
+    const clip = clipName(name);
+    if (!clip) throw new Error("That is not a clip name");
+
+    if (meta !== null && (typeof meta !== "string" || meta.length > 1024 * 1024)) {
+        throw new Error("That metadata is not metadata");
+    }
+
+    const target = resolveDirectory(dir);
+    const from = join(target, clip);
+    if (!existsSync(from)) throw new Error("That clip is already gone");
+
+    const trash = trashDir(target);
+    mkdirSync(trash, { recursive: true });
+
+    const stored = freePath(trash, clip).split(/[\\/]/).pop() || clip;
+    renameSync(from, join(trash, stored));
+
+    const thumb = thumbNameFor(clip);
+    if (existsSync(join(target, thumb))) {
+        try {
+            renameSync(join(target, thumb), join(trash, thumbNameFor(stored)));
+        } catch {
+            // A still frame is regenerable; the clip is not.
+        }
+    }
+
+    const index = readTrashIndex(trash);
+    index[stored] = { stored, name: clip, deletedAt: Date.now(), meta };
+    writeTrashIndex(trash, index);
+}
+
+/** Moves a trashed clip back into the folder, with its metadata. */
+export function restoreClip(_: IpcMainInvokeEvent, dir: string, stored: string): { name: string; meta: string | null; } {
+    const file = clipName(stored);
+    if (!file) throw new Error("That is not a clip name");
+
+    const target = resolveDirectory(dir);
+    const trash = trashDir(target);
+    const index = readTrashIndex(trash);
+    const entry = index[file];
+
+    if (!entry || !existsSync(join(trash, file))) {
+        delete index[file];
+        writeTrashIndex(trash, index);
+        throw new Error("That clip is no longer in the trash");
+    }
+
+    const name = freePath(target, entry.name).split(/[\\/]/).pop() || entry.name;
+    renameSync(join(trash, file), join(target, name));
+
+    const thumb = thumbNameFor(file);
+    if (existsSync(join(trash, thumb))) {
+        try {
+            renameSync(join(trash, thumb), join(target, thumbNameFor(name)));
+        } catch {
+            // Regenerable; the clip made it.
+        }
+    }
+
+    delete index[file];
+    writeTrashIndex(trash, index);
+
+    return { name, meta: entry.meta ?? null };
+}
+
+/** What is waiting in the trash, oldest deletions first. */
+export function listTrash(_: IpcMainInvokeEvent, dir: string): TrashedClip[] {
+    const target = resolveDirectory(dir);
+    purgeTrash(target);
+
+    const trash = trashDir(target);
+    const index = readTrashIndex(trash);
+    const out: TrashedClip[] = [];
+
+    for (const [stored, entry] of Object.entries(index)) {
+        if (!entry) continue;
+
+        let size = 0;
+        try {
+            size = statSync(join(trash, stored)).size;
+        } catch {
+            // Listed but unreadable: drop it rather than showing a dead row.
+            delete index[stored];
+            continue;
+        }
+
+        let game = "";
+        try {
+            const meta = entry.meta ? JSON.parse(entry.meta) : null;
+            if (meta && typeof meta.game === "string") game = meta.game;
+        } catch {
+            // Metadata is a bonus, not the listing.
+        }
+
+        out.push({ stored, name: entry.name ?? stored, size, deletedAt: entry.deletedAt ?? 0, game });
+    }
+
+    return out.sort((a, b) => a.deletedAt - b.deletedAt);
+}
+
+/** Empties the trash for good: files, index and orphaned voice lanes. */
+export function emptyTrash(_: IpcMainInvokeEvent, dir: string): void {
+    const target = resolveDirectory(dir);
+    const trash = trashDir(target);
+    if (!existsSync(trash)) return;
+
+    for (const [stored, entry] of Object.entries(readTrashIndex(trash))) {
+        for (const file of [stored, thumbNameFor(stored)]) {
+            try {
+                unlinkSync(join(trash, file));
+            } catch {
+                // Already gone.
+            }
+        }
+
+        if (entry) dropTrashedVoices(target, (entry.name ?? "").replace(/\.(webm|mp4|png|jpg|gif)$/i, ""));
+    }
+
+    writeTrashIndex(trash, {});
 }
 
 /** Moves a clip to the trash, so a mis-click stays undoable. */
