@@ -51,25 +51,10 @@ export type RecorderState = "idle" | "starting" | "recording" | "saving";
  */
 const CONSENT_MS = 1000;
 
-/** A slice of the buffer picked by hand, as epoch milliseconds. */
-interface ClipWindow {
+/** A slice of the buffer, as epoch milliseconds. Used by multi-POV sync. */
+export interface ClipWindow {
     from: number;
     to: number;
-}
-
-/**
- * The buffer handed over as something playable, written nowhere.
- *
- * `start` is the instant the footage begins at, which is what turns a position
- * in the player back into a window of the buffer, and the markers are already
- * relative to it so the preview can draw them without doing that sum again.
- */
-export interface BufferPreview {
-    blob: Blob;
-    mimeType: string;
-    start: number;
-    end: number;
-    marks: number[];
 }
 
 interface TimedChunk {
@@ -457,10 +442,6 @@ class ClipRecorder {
 
     /**
      * Resolved by the next chunk, used to flush the recorder before a save.
-     *
-     * A list rather than a slot: a preview opened while a save is running waits
-     * on the same chunk, and a single slot would leave the first of them parked
-     * until its own timeout instead of waking it with the chunk it asked for.
      */
     private nextChunk: Array<() => void> = [];
 
@@ -1089,10 +1070,6 @@ class ClipRecorder {
      * as `chunksSince`: a save has to write something.
      */
     private chunksIn(from: number, to: number): TimedChunk[] {
-        // A chunk whose timeslice runs past `to` ends after the clip was cut;
-        // slicing on it would push the clip's tail past where the save drew
-        // the line. Chunks that start within the range are kept, up to and
-        // including the one that holds `to`.
         const kept = this.chunks.filter(c => c.at > from && c.at <= to);
         return kept.length ? kept : this.chunks.slice(-1);
     }
@@ -1691,63 +1668,13 @@ class ClipRecorder {
     }
 
     /**
-     * The buffer as it stands, playable, written nowhere.
-     *
-     * The same assembly a save does, minus the file: the fragments are glued to
-     * the header and the timeline is rebased so the result starts at zero. It
-     * exists so that "save the last thirty seconds" can become "save that bit,
-     * the one I am looking at" - the buffer is watched before it is written,
-     * and what is written is a window picked in the player rather than a guess
-     * made from a keypress.
-     */
-    async preview(): Promise<BufferPreview | null> {
-        if (!this.isRecording || !this.header || !this.chunks.length) return null;
-
-        await this.flush();
-        this.prune();
-
-        const { chunks } = this;
-        if (!chunks.length) return null;
-
-        const start = chunks[0].at - TIMESLICE;
-        const raw = new Blob([this.header, ...chunks.map(c => c.blob)], { type: this.mimeType });
-
-        let blob = raw;
-        let cutOff = 0;
-
-        try {
-            // One read of the buffer: the repair and the two lengths that say
-            // what it took off all work on those same bytes.
-            const bytes = new Uint8Array(await raw.arrayBuffer());
-            const fixed = repairBytes(bytes, this.mimeType);
-
-            // Whatever the repair took off the front moves the markers with it,
-            // and moves the instant the footage begins at by exactly as much.
-            if (fixed) {
-                blob = new Blob([fixed as BlobPart], { type: this.mimeType });
-                cutOff = droppedBytes(bytes, fixed, this.mimeType);
-            }
-        } catch (e) {
-            logger.warn("Could not rebase the preview's timeline, playing it as recorded", e);
-        }
-
-        return {
-            blob,
-            mimeType: this.mimeType,
-            start: start + cutOff * 1000,
-            end: Date.now(),
-            marks: this.marks.map(m => (m - start) / 1000 - cutOff).filter(m => m >= 0)
-        };
-    }
-
-    /**
      * Writes the buffered footage to disk. Capture keeps running.
      *
      * @param seconds How much of the tail to keep, or nothing for the whole
      * buffer. Asking for less writes the shorter clip directly rather than
      * writing the long one and cutting it afterwards, which is a full copy of
      * footage nobody wanted.
-     * @param window A slice picked in the preview, which wins over `seconds`.
+     * @param window A slice to write instead of the tail (multi-POV sync).
      * Cut at chunk boundaries, so the edges land within a timeslice of what was
      * asked for - the container is only cut where it can be cut.
      */
@@ -1769,11 +1696,9 @@ class ClipRecorder {
             return;
         }
 
-        // Before the sound rather than after it: a window picked in the preview
-        // can have rolled out of the buffer while it was being watched, and a
-        // clip that is never written should not be announced as one that was.
-        // The buffer is checked again below, once the flush and the prune have
-        // moved it, but by then this has caught the ordinary case.
+        // Before the sound: a back-dated window (multi-POV) can have rolled
+        // out of the buffer, and a clip that is never written should not be
+        // announced as one that was.
         if (window && window.to <= this.bufferStart) {
             toast("That part of the buffer has already rolled past", Toasts.Type.FAILURE);
             return;
@@ -1805,7 +1730,7 @@ class ClipRecorder {
              * fallback: our own buffer has been filling all along, so an engine
              * that refuses at the last moment costs the layout, not the clip.
              *
-             * Not for a window picked in the preview: the engine saves its own
+             * Not for a back-dated window (multi-POV): the engine saves its own
              * last N seconds and has no way to be pointed at a moment further
              * back, so it would answer a precise request with a different clip
              * and report success.
@@ -1881,12 +1806,10 @@ class ClipRecorder {
              * fragments, and the repair below rebases what is left onto zero
              * exactly as it does for a full save.
              *
-             * A window is checked against the buffer first. It points at the
-             * buffer as it stood when the preview opened, and the buffer has
-             * been rolling since - `prune` drops whatever falls off the back of
-             * it - so left alone the "never empty" fallback in `chunksIn` would
-             * quietly write the newest second instead of the moment that was
-             * asked for.
+             * A window points at the buffer as it stood when the request was
+             * sent, and the buffer has been rolling since - `prune` drops
+             * whatever falls off the back of it - so it is checked again here,
+             * once the flush and the prune have moved it.
              */
             let picked = window;
             if (picked) {
@@ -1918,9 +1841,7 @@ class ClipRecorder {
              * Only the markers that fall inside what is being written.
              *
              * Clamping the older ones to zero, as this used to, put a tick on
-             * the first frame of every trimmed clip - one per marker dropped -
-             * and a window that ends before the buffer does would otherwise
-             * carry ticks past its own last frame.
+             * the first frame of every trimmed clip - one per marker dropped.
              */
             const markers = this.marks
                 .filter(m => m >= start && m <= end)

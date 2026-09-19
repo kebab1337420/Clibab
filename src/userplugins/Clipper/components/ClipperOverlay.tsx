@@ -28,7 +28,6 @@ import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
 import { toast } from "../toasts";
 import { formatBytes, formatTime } from "../utils";
-import { BufferPreview } from "./BufferPreview";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
 import { SimpleStudio } from "./SimpleStudio";
@@ -552,86 +551,6 @@ const CSS = `
     cursor: default;
 }
 
-.vc-clipper-preview {
-    width: min(760px, 82vw);
-}
-.vc-clipper-preview-video {
-    width: 100%;
-    max-height: 46vh;
-    border-radius: 8px;
-    background: #000;
-}
-
-.vc-clipper-scrub {
-    position: relative;
-    height: 26px;
-    margin-top: 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    background: var(--background-tertiary, #1e1f22);
-}
-.vc-clipper-range {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    border-radius: 4px;
-    background: var(--brand-experiment, #5865f2);
-    opacity: .32;
-}
-.vc-clipper-tick {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    width: 2px;
-    margin-left: -1px;
-    border-radius: 1px;
-    background: var(--status-warning, #f0b232);
-}
-.vc-clipper-playhead {
-    position: absolute;
-    top: -2px;
-    bottom: -2px;
-    width: 2px;
-    margin-left: -1px;
-    background: var(--text-normal, #dbdee1);
-    pointer-events: none;
-}
-.vc-clipper-handle {
-    position: absolute;
-    top: -3px;
-    bottom: -3px;
-    width: 10px;
-    margin-left: -5px;
-    border-radius: 3px;
-    cursor: ew-resize;
-    background: var(--brand-experiment, #5865f2);
-}
-
-.vc-clipper-preview-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    font-size: 13px;
-    color: var(--text-muted, #949ba4);
-}
-.vc-clipper-preview-actions button {
-    padding: 6px 12px;
-    border: none;
-    border-radius: 6px;
-    background: var(--button-secondary-background, #4e5058);
-    color: #fff;
-    font-size: 13px;
-    cursor: pointer;
-}
-.vc-clipper-preview-actions button:hover {
-    background: var(--button-secondary-background-hover, #6d6f78);
-}
-.vc-clipper-preview-actions span {
-    margin-left: auto;
-    font-variant-numeric: tabular-nums;
-}
-
 .vc-clipper-replay {
     position: fixed;
     left: 10px;
@@ -1013,10 +932,9 @@ function Picker({ onClose }: { onClose(): void; }) {
     );
 }
 
-function ActionMenu({ recording, onClose, onPreview, onStudio }: {
+function ActionMenu({ recording, onClose, onStudio }: {
     recording: boolean;
     onClose(): void;
-    onPreview(): void;
     onStudio(): void;
 }) {
     // The buffer grows while the menu is open, so the readout ticks with it.
@@ -1069,7 +987,6 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
             </div>
 
             <div className="vc-clipper-menu-row">
-                {item("Watch buffer", onPreview, !recording || !buffered, undefined, "Watch the buffer before saving")}
                 {item(
                     recorder.markCount ? `Marker (${recorder.markCount})` : "Marker",
                     () => recorder.mark(),
@@ -1114,7 +1031,6 @@ export function ClipperOverlay() {
     const [picker, setPicker] = useState(false);
     const [studio, setStudio] = useState<{ initial?: string; } | null>(null);
     const [menu, setMenu] = useState(false);
-    const [preview, setPreview] = useState(false);
     const [replay, setReplay] = useState<SavedClip | null>(null);
 
     useStyle();
@@ -1133,7 +1049,7 @@ export function ClipperOverlay() {
             /*
              * Only a clip that has not been played back already.
              *
-             * A save that comes to nothing - an empty window, a write that
+             * A save that comes to nothing - a write that
              * failed - still ends by going back to recording, and the last clip
              * in hand is then the one before it. Showing that again would pass
              * an old clip off as the moment that was just asked for, which is
@@ -1199,7 +1115,6 @@ export function ClipperOverlay() {
                         <ActionMenu
                             recording={recording}
                             onClose={() => setMenu(false)}
-                            onPreview={() => setPreview(true)}
                             onStudio={() => setStudio({})}
                         />
                     )}
@@ -1234,7 +1149,6 @@ export function ClipperOverlay() {
             )}
 
             {picker && <Picker onClose={() => setPicker(false)} />}
-            {preview && <BufferPreview onClose={() => setPreview(false)} />}
             {/*
               * Fenced off from the rest of the overlay.
               *

@@ -107,7 +107,6 @@ message, only a file that will not open — and it is the part the tests cover.
 | --- | --- | --- |
 | `components/ClipperOverlay.tsx` | 1142 | Everything mounted in the plugin's own React root: the button, the replay card, the studio's mount point. |
 | `components/ReplayCard.tsx` | 139 | The clip that was just saved, playing straight back. |
-| `components/BufferPreview.tsx` | 218 | Watching the buffer before deciding to write it. |
 | `components/VoicePanel.tsx` | 225 | One channel per person in the call. |
 | `components/AudioMixer.tsx` | 368 | The mixer rows in the plugin settings. |
 | `components/Meter.tsx` | 48 | What a channel is sending, right now. |
