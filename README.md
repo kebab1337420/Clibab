@@ -160,6 +160,9 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
   the limit first — the whole moment, softer, rather than the half of it that
   happened to fit. Resolution only comes down once the bitrate has been cut far
   enough that leaving it alone would spend it all on macroblocks.
+- **Share a link instead of the file.** The studio's *Link* button uploads the
+  clip to a file host (no account, nothing to configure) and copies the link,
+  so even a clip Discord would refuse to attach can be posted. Up to 200MB.
 - **GIF export.** The last seconds of a clip become a looping GIF small enough
   to post, written next to the clips and attached to the message box. The
   encoder is the plugin's own, with frame differencing and a median-cut palette,

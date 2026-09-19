@@ -193,6 +193,7 @@ The always-on-top window, and the two files that decide what it draws.
 | `clips.ts` | 329 | Access to the clip folder. |
 | `library.ts` | 408 | Clip metadata and categories. |
 | `send.ts` | 160 | Sending a clip to the channel that is open. |
+| `share.ts` | 60 | Uploading a clip for a share link and copying it. |
 | `updater.ts` | 269 | Checking for a new version and installing it. |
 | `utils.ts` | 371 | The shared helpers that had no better home. |
 | `toasts.ts` | 32 | The one line that shows a toast, which five files each had a copy of. |
