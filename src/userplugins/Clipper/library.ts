@@ -89,6 +89,7 @@ export interface ClipMeta {
      * Absent means unpinned, like every clip saved before this existed.
      */
     pinned?: boolean;
+    /**
      * What the automatic markers were, per marker in `markers`.
      *
      * Manual marks are blank strings. Absent on clips saved before this

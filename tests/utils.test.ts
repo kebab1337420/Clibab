@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
-import { CAPTURE_PRESETS, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
-import { CAPTURE_PRESETS, chaptersOf, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
 
 test("capture presets stay within sane bounds", () => {
     assert.ok(CAPTURE_PRESETS.length >= 2);
@@ -116,6 +115,8 @@ test("duplicates are same-game saves seconds apart", () => {
     const two = findDuplicates([at(0), at(30), at(1000), at(1030)]);
     assert.equal(two.length, 2);
     assert.deepEqual(two[0].map(e => e.name), ["c1000", "c1030"]);
+});
+
 test("chapters read like chapters", () => {
     assert.equal(chaptersOf([]), "");
     assert.equal(chaptersOf([75], ["a kill in Counter-Strike 2"]), "00:00 Start\n01:15 a kill in Counter-Strike 2");

@@ -2725,7 +2725,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const shown = (clips ?? [])
         .filter(c =>
             (!category || categoryOf(c.name) === category)
-            && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
+            && (!needle
+                || c.name.toLowerCase().includes(needle)
+                || categoryOf(c.name).toLowerCase().includes(needle)
+                || (meta[c.name]?.tags ?? []).some(t => t.includes(needle)))
         )
         // Pinned clips first, newest first inside each half.
         .sort((a, b) => Number(meta[b.name]?.pinned ?? false) - Number(meta[a.name]?.pinned ?? false));
@@ -2787,11 +2790,6 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         void refreshTrash();
         toast(removed ? `Deleted ${removed} duplicate${removed === 1 ? "" : "s"} (in the trash)` : "Nothing deleted", Toasts.Type.MESSAGE);
     };
-            && (!needle
-                || c.name.toLowerCase().includes(needle)
-                || categoryOf(c.name).toLowerCase().includes(needle)
-                || (meta[c.name]?.tags ?? []).some(t => t.includes(needle)))
-        )
 
     /** Rereads the trash: what is waiting, and what expired since. */
     const refreshTrash = async () => {

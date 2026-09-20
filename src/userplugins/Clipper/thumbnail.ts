@@ -119,6 +119,3 @@ function frameReady(video: HTMLVideoElement, at: number): Promise<void> {
         };
     });
 }
-        };
-    });
-}
