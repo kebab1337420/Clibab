@@ -61,3 +61,15 @@ test("a half level owns half the moment", () => {
     // Each owns half the instant, so half of x's dip lands: 1 - 0.5 * 0.5.
     assert.ok(Math.abs(mod.voiceDuckAt(tracks, { x: 0.5 }, 5) - 0.75) < 1e-9);
 });
+
+test("mask actors split the audible by mute", () => {
+    const tracks = [lane("x", 10, 200), lane("y", 10, 200)];
+
+    assert.deepEqual(mod.maskActors(tracks, { x: 0 }, 5), { muted: ["x"], others: ["y"] });
+    assert.deepEqual(mod.maskActors(tracks, undefined, 5), { muted: [], others: [] });
+    assert.deepEqual(mod.maskActors([], { x: 0 }, 5), { muted: [], others: [] });
+
+    // Silent tracks join neither side.
+    const quiet = [lane("x", 10, 0), lane("y", 10, 200)];
+    assert.deepEqual(mod.maskActors(quiet, { x: 0 }, 5), { muted: [], others: ["y"] });
+});

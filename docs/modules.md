@@ -97,6 +97,7 @@ message, only a file that will not open — and it is the part the tests cover.
 | `mixer.ts` | 181 | The mixer model the settings and the studio share. |
 | `voiceMix.ts` | 188 | One file's separated soundtrack, kept around so it is not rebuilt on every scrub. |
 | `voiceBand.ts` | 188 | Turning one voice down without turning the whole clip down with it. |
+| `spectralMask.ts` | 400 | Isolating a muted voice by its learned spectrum, where the notch only ducks. |
 | `components/AudioTimeline.tsx` | 202 | The sound lane. |
 | `components/CutRuler.tsx` | 188 | The ruler and its cut marks. |
 | `components/VoiceLanes.tsx` | 138 | Who was talking, drawn under the timeline. |

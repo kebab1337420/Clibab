@@ -28,8 +28,9 @@ import type { ChatLine } from "./chat";
 import { buildMixBus, logger } from "./recorder";
 import { pickMimeType, settings } from "./settings";
 import { seekVideo } from "./utils";
-import { speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
+import { maskActors, speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
 import { createVoiceBand, type VoiceBand } from "./voiceBand";
+import { createMaskNode, dropMaskModule, learnRenderProfiles, planMask, type MaskHandle } from "./spectralMask";
 import { type VoiceMix, voiceMixFor } from "./voiceMix";
 
 export interface Effects {
@@ -2482,6 +2483,44 @@ export async function renderProject(project: Project, sources: StudioSource[], o
     for (const [id, mix] of built) if (mix) mixes.set(id, mix);
 
     /*
+     * Spectral prints for the mask below, learned from each file's own solo
+     * stretches. Only when somebody was actually muted: untouched levels
+     * mean no mask, no extra decode, no extra node anywhere.
+     */
+    let maskPlan = { muted: [] as string[], engaged: false };
+    const masks = new Map<string, MaskHandle>();
+
+    if (voiceLevelsTouched(project.voiceLevels)) {
+        try {
+            const prints = await learnRenderProfiles(sources, audioCtx);
+            maskPlan = planMask(prints, project.voiceLevels);
+
+            if (maskPlan.engaged) {
+                for (const [id, entry] of loaded) {
+                    try {
+                        const mask = await createMaskNode(audioCtx);
+                        mask.setProfiles(prints);
+
+                        // The notch stays where it is; the mask sits behind it
+                        // and takes over exactly the frames it is told to.
+                        entry.band.output.disconnect();
+                        entry.band.output.connect(mask.node);
+                        mask.node.connect(entry.gain);
+
+                        masks.set(id, mask);
+                    } catch (e) {
+                        logger.warn("Could not insert the voice mask for a source", e);
+                    }
+                }
+
+                if (!masks.size) maskPlan = { muted: [], engaged: false };
+            }
+        } catch (e) {
+            logger.warn("Voice prints unavailable, muting the usual way", e);
+        }
+    }
+
+    /*
      * Avatars are decoded before the recorder is armed.
      *
      * They come off the network, and a badge that pops in three seconds into the
@@ -2832,22 +2871,36 @@ export async function renderProject(project: Project, sources: StudioSource[], o
                          * and the duck sits flat at 1.
                          */
                         if (base > 0 && ducking) {
-                            const level = voiceDuckAt(
-                                voices,
-                                voiceBand ? mix!.duck : project.voiceLevels,
-                                video.currentTime
-                            );
+                            const mask = !replacing ? masks.get(segment.sourceId) : undefined;
+                            const actors = mask
+                                ? maskActors(voices, project.voiceLevels, video.currentTime)
+                                : { muted: [] as string[], others: [] as string[] };
 
-                            /*
-                             * On the notch, not on the gain.
-                             *
-                             * The segment's own volume stays where it was put:
-                             * what a per-person level moves is the speech band
-                             * and nothing else, so a muted person digs a hole
-                             * where their voice is and the game carries on
-                             * through it at full level.
-                             */
-                            (voiceBand ?? band).set(level);
+                            if (mask && actors.muted.length) {
+                                // The mask isolates; the notch stands aside so
+                                // the two do not suppress the same voice twice.
+                                band.set(1);
+                                mask.setFrame(actors.muted, actors.others);
+                            } else {
+                                if (mask) mask.setFrame([], []);
+
+                                const level = voiceDuckAt(
+                                    voices,
+                                    voiceBand ? mix!.duck : project.voiceLevels,
+                                    video.currentTime
+                                );
+
+                                /*
+                                 * On the notch, not on the gain.
+                                 *
+                                 * The segment's own volume stays where it was put:
+                                 * what a per-person level moves is the speech band
+                                 * and nothing else, so a muted person digs a hole
+                                 * where their voice is and the game carries on
+                                 * through it at full level.
+                                 */
+                                (voiceBand ?? band).set(level);
+                            }
                         }
 
                         if (video.currentTime >= segment.to || video.ended) {
@@ -2895,6 +2948,10 @@ export async function renderProject(project: Project, sources: StudioSource[], o
         }
     } finally {
         document.removeEventListener("visibilitychange", onVisibility);
+
+        for (const mask of masks.values()) mask.disconnect();
+        dropMaskModule();
+
         current = null;
         cancelAnimationFrame(frame);
 
