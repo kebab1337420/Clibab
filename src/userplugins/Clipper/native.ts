@@ -11,7 +11,7 @@
  * here and written to the folder chosen in the settings.
  */
 
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet, request as httpsRequest } from "https";
@@ -1752,8 +1752,35 @@ interface Fetched {
     body: Buffer;
 }
 
+/**
+ * Where a download may come from: the API, the site itself for archives,
+ * and the file hosts both answer behind. Anything else - a release JSON
+ * pointing somewhere unexpected, a redirect off domain - is refused rather
+ * than followed, since every byte past this point lands in the client.
+ */
+function allowedUpdateUrl(url: string): boolean {
+    let host = "";
+
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:") return false;
+        host = parsed.hostname.toLowerCase();
+    } catch {
+        return false;
+    }
+
+    return host === "api.github.com"
+        || host === "github.com"
+        || host === "codeload.github.com"
+        || host === "raw.githubusercontent.com"
+        || host === "objects.githubusercontent.com"
+        || host.endsWith(".githubusercontent.com");
+}
+
 /** One GET, following redirects, with the whole body in memory. */
 function httpGet(url: string, redirects = 0): Promise<Fetched> {
+    if (!allowedUpdateUrl(url)) return Promise.reject(new Error(`Refusing to fetch outside the update hosts: ${url}`));
+
     return new Promise((resolve, reject) => {
         const request = httpsGet(url, { headers: { "User-Agent": UPDATE_AGENT, Accept: "*/*" } }, response => {
             const status = response.statusCode ?? 0;
@@ -1954,8 +1981,11 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, install
 
     const names = Object.keys(manifest);
 
-    const staging = join(dir, ".clipper-update");
-    rmSync(staging, { recursive: true, force: true });
+    // Unpredictable, and never shared: a fixed staging name lets anything
+    // else on the machine pre-plant a link where the swap walks, and the
+    // finally below sweeps this folder so failures leave nothing behind.
+    const staging = join(dir, `.clipper-update-${randomBytes(8).toString("hex")}`);
+    if (existsSync(staging)) throw new Error("An update staging folder is already there; refusing to share it");
     mkdirSync(staging, { recursive: true });
 
     try {

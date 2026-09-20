@@ -286,10 +286,10 @@ internal static class Program
 
                 // Extract the zip to a temporary directory
                 if (zipPath is null) throw new InvalidOperationException("No release archive was downloaded.");
-                temporaryExtractDir = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N"));
+                temporaryExtractDir = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + "-extract");
                 Directory.CreateDirectory(temporaryExtractDir);
                 status.Text = "Preparing the installer...";
-                ZipFile.ExtractToDirectory(zipPath, temporaryExtractDir);
+                ExtractChecked(zipPath, temporaryExtractDir);
 
                 // The bundle-only asset wraps itself in one folder, the way
                 // GitHub's source archive does, so either layout lands here.
@@ -384,6 +384,8 @@ internal static class Program
 
             // The bundle-only asset, looked up by name because that is the
             // contract: package-bundle.ps1 ships it as clipper-bundle-vX.zip.
+            // The URL still has to live on a host releases come from: the JSON
+            // above is data, and data does not get to pick download servers.
             string bundleDownloadUrl = "";
             if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
             {
@@ -399,7 +401,49 @@ internal static class Program
                 }
             }
 
+            if (bundleDownloadUrl.Length > 0 && !IsReleaseHost(bundleDownloadUrl))
+                throw new InvalidOperationException("The release points its bundle somewhere releases never come from.");
+
             return (tag, version, bundleDownloadUrl.Length > 0 ? bundleDownloadUrl : ArchiveUrl(tag));
+        }
+
+        private static bool IsReleaseHost(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+                return false;
+
+            string host = uri.Host.ToLowerInvariant();
+
+            return host == "github.com"
+                || host == "codeload.github.com"
+                || host == "objects.githubusercontent.com"
+                || host.EndsWith(".githubusercontent.com");
+        }
+
+        /// <summary>
+        /// Extracts with the traversal and size checks ExtractToDirectory
+        /// does not do: no absolute paths, no parent escapes, and a cap on
+        /// the unpacked total so a zip bomb dies before it lands.
+        /// </summary>
+        private static void ExtractChecked(string zipPath, string extractDir)
+        {
+            const long MaxUnpackedBytes = 2L * 1024 * 1024 * 1024;
+
+            using var archive = ZipFile.OpenRead(zipPath);
+            long total = 0;
+
+            foreach (var entry in archive.Entries)
+            {
+                if (Path.IsPathRooted(entry.FullName)
+                    || entry.FullName.Split('/', '\\').Contains(".."))
+                    throw new InvalidOperationException($"The release archive carries a path it must not: {entry.FullName}.");
+
+                total += entry.Length;
+                if (total > MaxUnpackedBytes)
+                    throw new InvalidOperationException("The release archive unpacks to more than it ever should.");
+            }
+
+            ZipFile.ExtractToDirectory(zipPath, extractDir);
         }
 
         /// <summary>
@@ -418,6 +462,12 @@ internal static class Program
         /// <summary>
         /// Checks the extracted repo's shipped bundle against the hashes the
         /// release published for it, failing rather than running an unmatched one.
+        ///
+        /// Newer releases also list the scripts the install runs
+        /// (`install.bat`, `VRinstaller.bat`) under a `root` section, and those
+        /// are checked the same way: verifying the bundle while running unchecked
+        /// scripts would check the wrong half. Releases predating that section
+        /// keep the old behavior.
         /// </summary>
         private static async Task VerifyBundleAsync(HttpClient client, string tag, string repoRoot)
         {
@@ -428,6 +478,8 @@ internal static class Program
                 throw new InvalidOperationException($"The release's file list answered {response.StatusCode}, so there is nothing to check the bundle against.");
 
             JsonElement files;
+            JsonElement root = default;
+            bool hasRoot = false;
             try
             {
                 await using var stream = await response.Content.ReadAsStreamAsync();
@@ -435,6 +487,12 @@ internal static class Program
                 // Cloned: the element below outlives the document, and reading
                 // an uncloned one after its Dispose throws ObjectDisposed.
                 files = doc.RootElement.GetProperty("files").Clone();
+                if (doc.RootElement.TryGetProperty("root", out var rootElement)
+                    && rootElement.ValueKind == JsonValueKind.Object)
+                {
+                    root = rootElement.Clone();
+                    hasRoot = true;
+                }
             }
             catch (Exception ex) when (ex is InvalidOperationException or JsonException)
             {
@@ -443,29 +501,44 @@ internal static class Program
 
             foreach (var entry in files.EnumerateObject())
             {
-                string name = entry.Name;
-                if (name != Path.GetFileName(name) || name.StartsWith('.'))
-                    throw new InvalidOperationException($"The release lists a file named {name}, which is refused.");
-
-                long size = entry.Value.TryGetProperty("size", out var sizeElement) ? sizeElement.GetInt64() : -1;
-                string sha256 = entry.Value.TryGetProperty("sha256", out var hashElement) ? hashElement.GetString() ?? "" : "";
-                if (size < 0 || sha256.Length == 0)
-                    throw new InvalidOperationException($"The release lists no size and hash for {name}.");
-
-                string file = Path.Combine(Path.Combine(Path.Combine(repoRoot, "prebuilt"), "dist"), name);
-                if (!File.Exists(file))
-                    throw new InvalidOperationException($"The release names {name} and the archive does not carry it.");
-
-                var info = new FileInfo(file);
-                if (info.Length != size)
-                    throw new InvalidOperationException($"{name} is {info.Length} bytes, the release says {size}.");
-
-                await using var fileStream = File.OpenRead(file);
-                using var hasher = System.Security.Cryptography.SHA256.Create();
-                string got = Convert.ToHexString(await hasher.ComputeHashAsync(fileStream)).ToLowerInvariant();
-                if (got != sha256.ToLowerInvariant())
-                    throw new InvalidOperationException($"{name} does not match its published hash.");
+                VerifyFile(Path.Combine(Path.Combine(Path.Combine(repoRoot, "prebuilt"), "dist"), entry.Name), entry.Value);
             }
+
+            // Only what the install actually runs, by exact name: anything else
+            // at the root is data, not code, and is not executed either way.
+            if (hasRoot)
+            {
+                foreach (var name in new[] { "install.bat", "VRinstaller.bat" })
+                {
+                    if (root.TryGetProperty(name, out var listed))
+                        VerifyFile(Path.Combine(repoRoot, name), listed);
+                }
+            }
+        }
+
+        private static void VerifyFile(string file, JsonElement listed)
+        {
+            string name = Path.GetFileName(file);
+            if (name != Path.GetFileName(name) || name.StartsWith('.'))
+                throw new InvalidOperationException($"The release lists a file named {name}, which is refused.");
+
+            long size = listed.TryGetProperty("size", out var sizeElement) ? sizeElement.GetInt64() : -1;
+            string sha256 = listed.TryGetProperty("sha256", out var hashElement) ? hashElement.GetString() ?? "" : "";
+            if (size < 0 || sha256.Length == 0)
+                throw new InvalidOperationException($"The release lists no size and hash for {name}.");
+
+            if (!File.Exists(file))
+                throw new InvalidOperationException($"The release names {name} and the archive does not carry it.");
+
+            var info = new FileInfo(file);
+            if (info.Length != size)
+                throw new InvalidOperationException($"{name} is {info.Length} bytes, the release says {size}.");
+
+            using var fileStream = File.OpenRead(file);
+            using var hasher = System.Security.Cryptography.SHA256.Create();
+            string got = Convert.ToHexString(hasher.ComputeHash(fileStream)).ToLowerInvariant();
+            if (got != sha256.ToLowerInvariant())
+                throw new InvalidOperationException($"{name} does not match its published hash.");
         }
 
         private static async Task RunBatchAsync(string file, string workingDirectory)

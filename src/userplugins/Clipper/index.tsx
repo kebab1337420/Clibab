@@ -91,6 +91,7 @@ const WATCHED: Array<readonly [string, () => void]> = [
     ["gameAudioWatch", () => recorder.restartHighlights()],
     ["gameVideoWatch", () => recorder.restartHighlights()],
     ["gameIntegrations", () => void syncGameEvents()],
+    ["vrInstalled", () => void syncVr()],
     ["vrControls", () => void syncVr()]
 ];
 
