@@ -59,7 +59,7 @@ echo.
 echo [2/2] Done.
 echo.
 echo Start Discord (or Vesktop), then enable "Clipper" in Settings ^> Vencord ^> Plugins.
-echo Default keybinds:  Alt+F9 start/stop buffer, Alt+F10 save clip.
+echo Default keybinds:  Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save clip.
 echo.
 echo Undo with:  install.bat --uninstall
 echo.
@@ -167,7 +167,7 @@ REM ---- 5. Done ------------------------------------------------
 echo [5/5] Done.
 echo.
 echo Restart Discord (and Vesktop), then enable "Clipper" in Settings ^> Vencord ^> Plugins.
-echo Default keybinds:  Alt+F9 start/stop buffer, Alt+F10 save clip.
+echo Default keybinds:  Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save clip.
 echo.
 pause
 exit /b 0

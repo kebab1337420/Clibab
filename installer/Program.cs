@@ -464,6 +464,38 @@ internal static class Program
         }
 
         /// <summary>
+        /// Downloads with the bar moving on the announced length, in megabytes
+        /// when the server names none.
+        /// </summary>
+        private async Task DownloadAsync(HttpClient client, string downloadUrl, string temporaryZip, string version)
+        {
+            using var download = await client.SendAsync(
+                new HttpRequestMessage(HttpMethod.Get, downloadUrl),
+                HttpCompletionOption.ResponseHeadersRead);
+            download.EnsureSuccessStatusCode();
+
+            long? total = download.Content.Headers.ContentLength;
+
+            await using var input = await download.Content.ReadAsStreamAsync();
+            await using var output = File.Create(temporaryZip);
+
+            var buffer = new byte[81920];
+            long received = 0;
+            int read;
+
+            while ((read = await input.ReadAsync(buffer)) > 0)
+            {
+                await output.WriteAsync(buffer.AsMemory(0, read));
+                received += read;
+
+                if (total > 0)
+                    Report(5 + (int)(received * 45 / total.Value), $"Downloading Clipper {version}... {received * 100 / total.Value}%");
+                else
+                    Report(5, $"Downloading Clipper {version}... {received / 1048576}MB");
+            }
+        }
+
+        /// <summary>
         /// Extracts with the traversal and size checks ExtractToDirectory
         /// does not do: no absolute paths, no parent escapes, and a cap on
         /// the unpacked total so a zip bomb dies before it lands.
@@ -547,17 +579,7 @@ internal static class Program
             foreach (var entry in listed)
             {
                 VerifyFile(Path.Combine(Path.Combine(Path.Combine(repoRoot, "prebuilt"), "dist"), entry.Name), entry.Value);
-            }
-
-            // Only what the install actually runs, by exact name: anything else
-            // at the root is data, not code, and is not executed either way.
-            if (hasRoot)
-            {
-                foreach (var name in new[] { "install.bat", "VRinstaller.bat" })
-                {
-                    if (root.TryGetProperty(name, out var listed))
-                        VerifyFile(Path.Combine(repoRoot, name), listed);
-                }
+                progress?.Invoke((double)++done / Math.Max(1, listed.Count));
             }
 
             // Only what the install actually runs, by exact name: anything else
@@ -570,31 +592,6 @@ internal static class Program
                         VerifyFile(Path.Combine(repoRoot, name), published);
                 }
             }
-        }
-
-        private static void VerifyFile(string file, JsonElement listed)
-        {
-            string name = Path.GetFileName(file);
-            if (name != Path.GetFileName(name) || name.StartsWith('.'))
-                throw new InvalidOperationException($"The release lists a file named {name}, which is refused.");
-
-            long size = listed.TryGetProperty("size", out var sizeElement) ? sizeElement.GetInt64() : -1;
-            string sha256 = listed.TryGetProperty("sha256", out var hashElement) ? hashElement.GetString() ?? "" : "";
-            if (size < 0 || sha256.Length == 0)
-                throw new InvalidOperationException($"The release lists no size and hash for {name}.");
-
-            if (!File.Exists(file))
-                throw new InvalidOperationException($"The release names {name} and the archive does not carry it.");
-
-            var info = new FileInfo(file);
-            if (info.Length != size)
-                throw new InvalidOperationException($"{name} is {info.Length} bytes, the release says {size}.");
-
-            using var fileStream = File.OpenRead(file);
-            using var hasher = System.Security.Cryptography.SHA256.Create();
-            string got = Convert.ToHexString(hasher.ComputeHash(fileStream)).ToLowerInvariant();
-            if (got != sha256.ToLowerInvariant())
-                throw new InvalidOperationException($"{name} does not match its published hash.");
         }
 
         private static void VerifyFile(string file, JsonElement listed)
