@@ -48,6 +48,30 @@ internal static class Program
             Text = "Ready to install Clipper."
         };
 
+        private readonly ProgressBar progress = new()
+        {
+            Style = ProgressBarStyle.Blocks,
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Location = new Point(24, 96),
+            Size = new Size(430, 20),
+            BackColor = Surface
+        };
+
+        private NotifyIcon? tray;
+
+        /// <summary>
+        /// Moves the bar and the status line together. Every step of the
+        /// install reports through here, so a stuck bar always names the step
+        /// it is stuck on.
+        /// </summary>
+        private void Report(int percent, string? statusText = null)
+        {
+            progress.Value = Math.Min(100, Math.Max(0, percent));
+            if (statusText is not null) status.Text = statusText;
+        }
+
         private readonly Label finishDetails = new();
 
         private readonly Button back = DarkButton("< Back");
@@ -87,6 +111,8 @@ internal static class Program
             };
 
             ShowPage(0);
+
+            FormClosed += (_, _) => tray?.Dispose();
         }
 
         private void BuildWelcomePage()
@@ -130,14 +156,7 @@ internal static class Program
             status.ForeColor = TextSoft;
             status.BackColor = Background;
             panel.Controls.Add(status);
-            panel.Controls.Add(new ProgressBar
-            {
-                Style = ProgressBarStyle.Marquee,
-                MarqueeAnimationSpeed = 20,
-                Location = new Point(24, 96),
-                Size = new Size(430, 20),
-                BackColor = Surface
-            });
+            panel.Controls.Add(progress);
         }
 
         private void BuildFinishPage()
@@ -216,6 +235,8 @@ internal static class Program
                       "In the headset, double-tap B on the right controller to save a clip, hold A to drop a marker."
                     : "Clipper is installed.\r\n\r\nRestart Discord, then enable \u201cClipper\u201d in Settings > Vencord > Plugins.\r\n\r\n" +
                       "Default keybinds:  Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save a clip.";
+
+                NotifyInstalled(steamVr.Checked);
             }
 
             Controls.Add(back);
@@ -226,12 +247,34 @@ internal static class Program
             cancel.Location = new Point(478 - 92 - 12, 264);
         }
 
+        /// <summary>
+        /// Puts the success where it cannot be missed: a system notification
+        /// on top of the finish page, since the wizard closes behind it.
+        /// </summary>
+        private void NotifyInstalled(bool withVr)
+        {
+            tray ??= new NotifyIcon
+            {
+                Icon = SystemIcons.Information,
+                Visible = true,
+                Text = "Clipper installer"
+            };
+
+            tray.ShowBalloonTip(
+                8000,
+                "Clipper installed",
+                withVr
+                    ? "Clipper and the SteamVR integration are installed. Restart Discord to use them."
+                    : "Clipper is installed. Restart Discord, then enable it in Settings > Vencord > Plugins.",
+                ToolTipIcon.Info);
+        }
+
         private static HttpClient NewClient() => new() { Timeout = TimeSpan.FromMinutes(10) };
 
         private async Task InstallAsync()
         {
             SetNavEnabled(false);
-            status.Text = "Looking up the newest release...";
+            Report(2, "Looking up the newest release...");
 
             string? zipPath = null;
             string? temporaryZip = null;
@@ -269,19 +312,18 @@ internal static class Program
 
                 if (!useCache)
                 {
-                    // Download to a temporary zip file
+                    // Download to a temporary zip file, reporting bytes against
+                    // the announced length so the bar moves with the download.
                     temporaryZip = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + ".zip");
-                    status.Text = $"Downloading Clipper {version}...";
-                    await using (var input = await client.GetStreamAsync(downloadUrl))
-                    await using (var output = File.Create(temporaryZip))
-                        await input.CopyToAsync(output);
+                    Report(5, $"Downloading Clipper {version}...");
+                    await DownloadAsync(client, downloadUrl, temporaryZip, version);
                     // Copy to cache for future use
                     File.Copy(temporaryZip, cachePath, true);
                     zipPath = temporaryZip;
                 }
                 else
                 {
-                    status.Text = "Using cached installer data...";
+                    Report(50, "Using cached installer data...");
                 }
 
                 // Extract the zip to a temporary directory
@@ -300,25 +342,26 @@ internal static class Program
                 // carries the hashes. Nothing is run until every shipped file has
                 // matched it: that is the one check that tells a genuine release
                 // from something slipped in on the way down.
-                status.Text = "Verifying the bundle against the release...";
-                await VerifyBundleAsync(client, tag, root);
+                Report(65, "Verifying the bundle against the release...");
+                await VerifyBundleAsync(client, tag, root, fraction => Report(65 + (int)(fraction * 15)));
 
+                Report(82, "Installing Clipper...");
                 await RunBatchAsync(Path.Combine(root, "install.bat"), root);
+                Report(92, "Clipper installed.");
 
                 if (steamVr.Checked)
                 {
-                    status.Text = "Installing SteamVR integration...";
+                    Report(94, "Installing SteamVR integration...");
                     await RunBatchAsync(Path.Combine(root, "VRinstaller.bat"), root);
+                    Report(98, "SteamVR integration installed.");
                 }
 
-                status.Text = steamVr.Checked
-                    ? "Clipper and SteamVR integration installed. Restart Discord."
-                    : "Clipper installed. Restart Discord.";
+                Report(100, "Done.");
                 ShowPage(3);
             }
             catch (Exception error)
             {
-                status.Text = "Installation failed.";
+                Report(0, "Installation failed.");
                 // A GUI app has no console to read an exit code from; this is the
                 // one channel automation has.
                 Environment.ExitCode = 1;
@@ -469,7 +512,7 @@ internal static class Program
         /// scripts would check the wrong half. Releases predating that section
         /// keep the old behavior.
         /// </summary>
-        private static async Task VerifyBundleAsync(HttpClient client, string tag, string repoRoot)
+        private static async Task VerifyBundleAsync(HttpClient client, string tag, string repoRoot, Action<double>? progress = null)
         {
             using var response = await client.GetAsync($"https://raw.githubusercontent.com/{UpdateRepo}/{tag}/prebuilt/build-info.json");
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -499,7 +542,9 @@ internal static class Program
                 throw new InvalidOperationException("The release's file list could not be read, so there is nothing to check the bundle against.");
             }
 
-            foreach (var entry in files.EnumerateObject())
+            var listed = files.EnumerateObject().ToList();
+            int done = 0;
+            foreach (var entry in listed)
             {
                 VerifyFile(Path.Combine(Path.Combine(Path.Combine(repoRoot, "prebuilt"), "dist"), entry.Name), entry.Value);
             }
