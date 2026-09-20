@@ -161,6 +161,21 @@ Get-ChildItem $prebuilt -File | Sort-Object Name | ForEach-Object {
     }
 }
 
+# The scripts the installer runs (install.bat, VRinstaller.bat) are checked
+# against these by the installer itself: verifying the bundle but running
+# unchecked scripts would check the wrong half.
+$root = [ordered] @{}
+foreach ($name in @("install.bat", "VRinstaller.bat")) {
+    $file = Join-Path $repo $name
+    if (Test-Path $file) {
+        $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+        $root[$name] = [ordered] @{
+            size   = (Get-Item $file).Length
+            sha256 = $hash
+        }
+    }
+}
+
 [ordered] @{
     vencordVersion = $version
     vencordCommit  = $commit
@@ -169,6 +184,7 @@ Get-ChildItem $prebuilt -File | Sort-Object Name | ForEach-Object {
     clipperCommit  = $clipperCommit
     builtAt        = (Get-Date).ToString("s")
     files          = $files
+    root           = $root
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path (Split-Path $prebuilt -Parent) "build-info.json") -Encoding UTF8
 
 $size = "{0:N1} MB" -f ((Get-ChildItem $prebuilt -File | Measure-Object Length -Sum).Sum / 1MB)

@@ -49,7 +49,7 @@ if (-not $Version) { $Version = "0" }
 $asset = "clipper-bundle-v$Version.zip"
 
 # ------------------------------------------------------------- stage the zip --
-$stage = Join-Path $env:TEMP "clipper-bundle-$(Get-Random)"
+$stage = Join-Path $env:TEMP "clipper-bundle-$([System.IO.Path]::GetRandomFileName())"
 $root = Join-Path $stage "clipper-bundle-v$Version"
 New-Item -ItemType Directory -Force $root | Out-Null
 
