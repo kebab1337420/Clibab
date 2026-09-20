@@ -194,6 +194,12 @@ interface NativeAvailability {
     available: boolean;
     /** Why not, in a form that can be shown to the user as it is. */
     reason: string;
+    /**
+     * Whether the verdict survives a restart: a voice module built without
+     * the engine will never grow one, while "not up yet" may be gone by the
+     * next buffer. Callers use it instead of matching the reason sentence.
+     */
+    permanent: boolean;
     /** The individual methods, for the diagnostic in the settings panel. */
     methods: Record<string, boolean>;
 }
@@ -795,7 +801,7 @@ export function nativeAvailability(): NativeAvailability {
         getSystemSteadyClockNowMs: typeof found?.getSystemSteadyClockNowMs === "function"
     };
 
-    if (!found) return { available: false, reason: "The media engine is not up yet.", methods };
+    if (!found) return { available: false, permanent: false, reason: "The media engine is not up yet.", methods };
 
     // The wrapper is always there; this asks the native module underneath it.
     let native = false;
@@ -806,20 +812,21 @@ export function nativeAvailability(): NativeAvailability {
     if (!native) {
         return {
             available: false,
+            permanent: true,
             reason: "This client's voice module was built without the clip engine - the Clips experiment is not on this account.",
             methods
         };
     }
 
     if (!methods.saveClipEx || !methods.setClipsSource) {
-        return { available: false, reason: "The clip engine is present but does not expose a way to save.", methods };
+        return { available: false, permanent: false, reason: "The clip engine is present but does not expose a way to save.", methods };
     }
 
     if (typeof found.getSystemSteadyClockNowMs?.() !== "number") {
-        return { available: false, reason: "The clip engine has no clock, so a clip's span cannot be asked for.", methods };
+        return { available: false, permanent: false, reason: "The clip engine has no clock, so a clip's span cannot be asked for.", methods };
     }
 
-    return { available: true, reason: "Ready.", methods };
+    return { available: true, permanent: false, reason: "Ready.", methods };
 }
 
 /** The engine's clock, which is the only clock a save request may be built on. */
