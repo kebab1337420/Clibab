@@ -41,6 +41,7 @@ import {
     listClips,
     listTrash,
     loadAudioFile,
+    loadClipFile,
     loadClipUrl,
     loadImageFile,
     loadThumbUrl,
@@ -2279,6 +2280,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [playhead, setPlayhead] = useState({ at: 0, length: 0 });
     const [playing, setPlaying] = useState(false);
     const [tagging, setTagging] = useState("");
+    const [tagInput, setTagInput] = useState("");
+    const [thumbAt, setThumbAt] = useState("");
+
+    // The rows edit the picked clip, so they follow it around.
+    useEffect(() => {
+        setTagInput(meta[picked]?.tags?.join(", ") ?? "");
+        setThumbAt("");
+    }, [picked]);
     const [confirmDelete, setConfirmDelete] = useState(false);
 
     /** Rough length the auto-montage aims for, in seconds. */
@@ -2710,10 +2719,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const categoryOf = (name: string) => meta[name]?.game?.trim() || UNCATEGORISED;
 
     const needle = search.trim().toLowerCase();
-    const shown = (clips ?? []).filter(c =>
-        (!category || categoryOf(c.name) === category)
-        && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
-    );
+    const shown = (clips ?? [])
+        .filter(c =>
+            (!category || categoryOf(c.name) === category)
+            && (!needle
+                || c.name.toLowerCase().includes(needle)
+                || categoryOf(c.name).toLowerCase().includes(needle)
+                || (meta[c.name]?.tags ?? []).some(t => t.includes(needle)))
+        )
 
     /** Rereads the trash: what is waiting, and what expired since. */
     const refreshTrash = async () => {
@@ -2860,6 +2873,61 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         } catch (e) {
             logger.warn("Could not tag that clip", e);
             toast("Could not save that category", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Saves the tags row, lower-cased and split on commas. */
+    const applyTags = async () => {
+        if (!picked) return;
+
+        const tags = tagInput.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+
+        try {
+            await setMeta(picked, { tags });
+            setMetaState({ ...await readMeta() });
+            toast(tags.length ? `Tagged ${tags.join(", ")}` : "Tags cleared", Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Could not save the tags", e);
+            toast("Could not save those tags", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Uses the frame at the typed seconds for the library picture. */
+    const onSetThumb = async () => {
+        if (!picked) return;
+
+        const at = Number(thumbAt);
+        if (!(at >= 0)) {
+            toast("Enter the seconds first", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        setThumbAt("");
+
+        try {
+            const file = await loadClipFile(picked);
+            await writeThumbnail(file, picked, at);
+            await refreshClips(picked);
+
+            const found = (await listClips()).find(c => c.name === picked);
+            const old = thumbs[picked];
+            if (old) {
+                URL.revokeObjectURL(old);
+                urlsRef.current.delete(old);
+            }
+
+            if (found?.thumb) {
+                const url = await loadThumbUrl(found);
+                if (url) {
+                    urlsRef.current.add(url);
+                    setThumbs(current => ({ ...current, [picked]: url }));
+                }
+            }
+
+            toast("Thumbnail updated", Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Could not set the thumbnail", e);
+            toast("Could not set that thumbnail", Toasts.Type.FAILURE);
         }
     };
 
@@ -5917,6 +5985,47 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     >
                                         Unfile
                                     </button>
+                                </div>
+
+                                <div className="vc-clipper-field">
+                                    <label><span>Tags</span><span>comma separated, searchable</span></label>
+                                    <input
+                                        type="text"
+                                        value={tagInput}
+                                        placeholder="clutch, overtime…"
+                                        disabled={busy}
+                                        onChange={e => setTagInput(e.currentTarget.value)}
+                                        onKeyDown={e => {
+                                            e.stopPropagation();
+                                            if (e.key === "Enter") void applyTags();
+                                            if (e.key === "Escape") setTagInput(meta[picked]?.tags?.join(", ") ?? "");
+                                        }}
+                                    />
+                                </div>
+
+                                <div className="vc-clipper-side-actions">
+                                    <button disabled={busy} onClick={() => void applyTags()}>Tag</button>
+                                </div>
+
+                                <div className="vc-clipper-field">
+                                    <label><span>Thumbnail</span><span>seconds into the clip</span></label>
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={thumbAt}
+                                        placeholder="1.5"
+                                        disabled={busy}
+                                        onChange={e => setThumbAt(e.currentTarget.value)}
+                                        onKeyDown={e => {
+                                            e.stopPropagation();
+                                            if (e.key === "Enter") void onSetThumb();
+                                            if (e.key === "Escape") setThumbAt("");
+                                        }}
+                                    />
+                                </div>
+
+                                <div className="vc-clipper-side-actions">
+                                    <button disabled={busy} title="Use that frame for the library picture" onClick={() => void onSetThumb()}>Set thumb</button>
                                 </div>
                             </div>
                         )}
