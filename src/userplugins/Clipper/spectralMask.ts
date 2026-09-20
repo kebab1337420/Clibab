@@ -30,6 +30,8 @@ export const MASK_FRAME = 1024;
 export const MASK_HOP = 256;
 /** Floor of the mask: what leaks through is game under speech, not a voice. */
 export const MASK_FLOOR = 0.05;
+/** Per-hop smoothing of the gains: sudden bins read as musical noise. */
+export const MASK_SMOOTH = 0.3;
 /** Cosine past which two voice prints count as the same voice. */
 const SIMILARITY_LIMIT = 0.93;
 /** Solo stretch shorter than this teaches nothing (a few hundred ms). */
@@ -297,13 +299,18 @@ export function planMask(profiles: Map<string, Float32Array>, levels: Record<str
 /*
  * The worklet twin of the math above.
  *
- * An AudioWorklet module cannot import this file, so the FFT and the gain
- * rule below mirror `fft` and `maskGains` line for line - same inputs, same
- * gains, no drift between the two copies. Touched together or not at all.
+ * An AudioWorklet module cannot import this file, so the constants below are
+ * injected into the source and the FFT and gain rule mirror `fft` and
+ * `maskGains` - same inputs, same gains. Touched together or not at all.
+ *
+ * Two deliberate properties: the windowed overlap-add divides by the summed
+ * window (a Hann applied twice is a gain, not unity), and the whole mix
+ * leaves ~one frame late (~21ms at 48kHz) - constant, under lip-sync notice,
+ * paid by every source through the node whether the mask is working or not.
  */
 const WORKLET_SOURCE = `
 "use strict";
-var W = 1024, H = 256, BINS = 513, FLOOR = 0.05, SMOOTH = 0.3;
+var W = ${MASK_FRAME}, H = ${MASK_HOP}, BINS = ${MASK_FRAME / 2 + 1}, FLOOR = ${MASK_FLOOR}, SMOOTH = ${MASK_SMOOTH};
 function hann() {
     var w = new Float32Array(W);
     for (var n = 0; n < W; n++) w[n] = 0.5 * (1 - Math.cos(2 * Math.PI * n / W));
@@ -345,6 +352,7 @@ class ClipperMask extends AudioWorkletProcessor {
         this.ibuf = new Float32Array(W + 256);
         this.ilen = 0;
         this.obuf = new Float32Array(W + 256);
+        this.wsum = new Float32Array(W + 256);
         this.olen = 0;
         this.gains = new Float32Array(BINS).fill(1);
         this.tgt = new Float32Array(BINS);
@@ -389,8 +397,12 @@ class ClipperMask extends AudioWorkletProcessor {
     process(inputs, outputs) {
         var input = inputs[0], output = outputs[0];
         if (!input || !input.length || !output || !output.length) return true;
-        var inch = input[0], nCh = input.length, c, i, k;
-        if (this.ilen + inch.length > this.ibuf.length) this.ilen = 0;
+        var inch = input[0], nCh = input.length, need = output[0].length, c, i, k;
+        if (this.ilen + inch.length > this.ibuf.length) {
+            var keep = Math.min(this.ilen, W);
+            this.ibuf.copyWithin(0, this.ilen - keep, this.ilen);
+            this.ilen = keep;
+        }
         this.ibuf.set(inch, this.ilen);
         this.ilen += inch.length;
         while (this.ilen >= W) {
@@ -408,7 +420,10 @@ class ClipperMask extends AudioWorkletProcessor {
                 this.im[k] = -this.im[m];
             }
             fft(this.re, this.im, true);
-            for (k = 0; k < W; k++) this.obuf[k] = (k < this.olen ? this.obuf[k] : 0) + this.re[k] * HANN[k];
+            for (k = 0; k < W; k++) {
+                this.obuf[k] = (k < this.olen ? this.obuf[k] : 0) + this.re[k] * HANN[k];
+                this.wsum[k] = (k < this.olen ? this.wsum[k] : 0) + HANN[k] * HANN[k];
+            }
             if (this.olen < W) this.olen = W;
             this.ibuf.copyWithin(0, H, this.ilen);
             this.ilen -= H;
@@ -416,11 +431,14 @@ class ClipperMask extends AudioWorkletProcessor {
         // One masked mix for every channel: voices arrive mono-mixed here.
         for (c = 0; c < nCh; c++) {
             var outch = output[c];
-            for (i = 0; i < outch.length; i++) outch[i] = i < this.olen ? this.obuf[i] : 0;
+            for (i = 0; i < need; i++) {
+                outch[i] = i < this.olen && this.wsum[i] > 1e-9 ? this.obuf[i] / this.wsum[i] : 0;
+            }
         }
-        if (this.olen >= 128) {
-            this.obuf.copyWithin(0, 128, this.olen);
-            this.olen -= 128;
+        if (this.olen >= need) {
+            this.obuf.copyWithin(0, need, this.olen);
+            this.wsum.copyWithin(0, need, this.olen);
+            this.olen -= need;
         } else {
             this.olen = 0;
         }
