@@ -310,40 +310,74 @@ internal static class Program
                     }
                 }
 
-                if (!useCache)
+                // At most twice: a cached zip predating the release fails the
+                // check below, in which case it is thrown away and fetched
+                // fresh once. A fresh failure is genuine and stops here.
+                bool cacheRetried = false;
+                string? root = null;
+
+                while (true)
                 {
-                    // Download to a temporary zip file, reporting bytes against
-                    // the announced length so the bar moves with the download.
-                    temporaryZip = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + ".zip");
-                    Report(5, $"Downloading Clipper {version}...");
-                    await DownloadAsync(client, downloadUrl, temporaryZip, version);
-                    // Copy to cache for future use
-                    File.Copy(temporaryZip, cachePath, true);
-                    zipPath = temporaryZip;
+                    if (!useCache)
+                    {
+                        // Download to a temporary zip file, reporting bytes against
+                        // the announced length so the bar moves with the download.
+                        temporaryZip = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + ".zip");
+                        Report(5, $"Downloading Clipper {version}...");
+                        await DownloadAsync(client, downloadUrl, temporaryZip, version);
+                        // Copy to cache for future use
+                        File.Copy(temporaryZip, cachePath, true);
+                        zipPath = temporaryZip;
+                    }
+                    else
+                    {
+                        Report(50, "Using cached installer data...");
+                    }
+
+                    // Extract the zip to a temporary directory
+                    if (zipPath is null) throw new InvalidOperationException("No release archive was downloaded.");
+                    temporaryExtractDir = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + "-extract");
+                    Directory.CreateDirectory(temporaryExtractDir);
+                    status.Text = "Preparing the installer...";
+                    ExtractChecked(zipPath, temporaryExtractDir, fraction => Report(50 + (int)(fraction * 15)));
+
+                    // The bundle-only asset wraps itself in one folder, the way
+                    // GitHub's source archive does, so either layout lands here.
+                    root = FindRoot(temporaryExtractDir);
+                    if (root is null) throw new InvalidOperationException("The release archive is missing install.bat.");
+
+                    // The bundle's own file list, published with the release, is what
+                    // carries the hashes. Nothing is run until every shipped file has
+                    // matched it: that is the one check that tells a genuine release
+                    // from something slipped in on the way down.
+                    Report(65, "Verifying the bundle against the release...");
+                    try
+                    {
+                        await VerifyBundleAsync(client, tag, root, fraction => Report(65 + (int)(fraction * 15)));
+                        break;
+                    }
+                    catch (InvalidOperationException) when (useCache && !cacheRetried)
+                    {
+                        // The cache is keyed by version, not content: a release
+                        // republished under the same tag (draft to final, amended
+                        // cut) leaves a stale zip that can never verify.
+                        cacheRetried = true;
+                        useCache = false;
+
+                        try { File.Delete(cachePath); } catch { /* already gone */ }
+                        try
+                        {
+                            if (temporaryExtractDir is not null && Directory.Exists(temporaryExtractDir))
+                                Directory.Delete(temporaryExtractDir, recursive: true);
+                            if (temporaryZip is not null && File.Exists(temporaryZip))
+                                File.Delete(temporaryZip);
+                        }
+                        catch { /* best effort; the finally sweeps the rest */ }
+
+                        temporaryExtractDir = null;
+                        Report(5, "Cached data is stale, downloading fresh...");
+                    }
                 }
-                else
-                {
-                    Report(50, "Using cached installer data...");
-                }
-
-                // Extract the zip to a temporary directory
-                if (zipPath is null) throw new InvalidOperationException("No release archive was downloaded.");
-                temporaryExtractDir = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + "-extract");
-                Directory.CreateDirectory(temporaryExtractDir);
-                status.Text = "Preparing the installer...";
-                ExtractChecked(zipPath, temporaryExtractDir);
-
-                // The bundle-only asset wraps itself in one folder, the way
-                // GitHub's source archive does, so either layout lands here.
-                var root = FindRoot(temporaryExtractDir);
-                if (root is null) throw new InvalidOperationException("The release archive is missing install.bat.");
-
-                // The bundle's own file list, published with the release, is what
-                // carries the hashes. Nothing is run until every shipped file has
-                // matched it: that is the one check that tells a genuine release
-                // from something slipped in on the way down.
-                Report(65, "Verifying the bundle against the release...");
-                await VerifyBundleAsync(client, tag, root, fraction => Report(65 + (int)(fraction * 15)));
 
                 Report(82, "Installing Clipper...");
                 await RunBatchAsync(Path.Combine(root, "install.bat"), root);
@@ -500,7 +534,7 @@ internal static class Program
         /// does not do: no absolute paths, no parent escapes, and a cap on
         /// the unpacked total so a zip bomb dies before it lands.
         /// </summary>
-        private static void ExtractChecked(string zipPath, string extractDir)
+        private static void ExtractChecked(string zipPath, string extractDir, Action<double>? progress = null)
         {
             const long MaxUnpackedBytes = 2L * 1024 * 1024 * 1024;
 
@@ -518,7 +552,17 @@ internal static class Program
                     throw new InvalidOperationException("The release archive unpacks to more than it ever should.");
             }
 
-            ZipFile.ExtractToDirectory(zipPath, extractDir);
+            // Directories have no bytes and nothing to write.
+            var files = archive.Entries.Where(entry => entry.Name.Length > 0).ToList();
+            int done = 0;
+            int count = Math.Max(1, files.Count);
+            foreach (var entry in files)
+            {
+                string destination = Path.Combine(extractDir, entry.FullName);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                entry.ExtractToFile(destination, overwrite: true);
+                progress?.Invoke((double)++done / count);
+            }
         }
 
         /// <summary>
