@@ -235,7 +235,7 @@ export const settings = definePluginSettings({
     },
     nativeEngine: {
         type: OptionType.BOOLEAN,
-        description: "Use Discord's engine when possible (per-person audio), otherwise the built-in buffer",
+        description: "Use Discord's engine when possible (per-person audio), otherwise the built-in buffer. Turn off if Discord reloads itself - off means zero contact with the engine",
         default: true
     },
     panelButton: {
