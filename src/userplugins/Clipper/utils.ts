@@ -341,6 +341,37 @@ export const CAPTURE_PRESETS: CapturePreset[] = [
 ];
 
 /**
+ * Marker offsets as video chapters, one `timestamp title` line each.
+ *
+ * Labels come from the automatic markers ("a kill in Counter-Strike 2"); a
+ * manual mark with none reads "Highlight N". Sorted, starting at 00:00 as
+ * chapters must, empty when there is nothing to chapter.
+ */
+export function chaptersOf(markers: number[], labels?: Array<string | null | undefined>): string {
+    const rows = markers
+        .map((at, i) => ({ at: Math.max(0, Math.floor(Number(at) || 0)), index: i }))
+        .filter(r => Number.isFinite(r.at))
+        .sort((a, b) => a.at - b.at)
+        .map((r, position) => ({
+            at: r.at,
+            label: labels?.[r.index]?.trim() || `Highlight ${position + 1}`
+        }));
+
+    if (!rows.length) return "";
+    if (rows[0].at > 0) rows.unshift({ at: 0, label: "Start" });
+
+    const stamp = (total: number) => {
+        const hours = Math.floor(total / 3600);
+        const minutes = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+        const seconds = String(total % 60).padStart(2, "0");
+
+        return `${hours ? `${hours}:` : ""}${minutes}:${seconds}`;
+    };
+
+    return rows.map(r => `${stamp(r.at)} ${r.label}`).join("\n");
+}
+
+/**
  * Something readable out of anything that was thrown.
  *
  * `String(e)` alone is what put `[object Object]` in front of a user instead of

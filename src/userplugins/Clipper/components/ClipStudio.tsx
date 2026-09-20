@@ -121,7 +121,7 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
+import { chaptersOf, formatBytes, formatTime } from "../utils";
 import { fromMeta, mutedFraction, VOICE_HZ, voiceDuckAt, voiceGainOf, voiceLevelsTouched, type VoiceTrack } from "../voice";
 import { createVoiceBand, type VoiceBand } from "../voiceBand";
 import { forgetVoiceMixes, type VoiceMix, voiceMixFor } from "../voiceMix";
@@ -2845,6 +2845,24 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         } catch (e) {
             logger.warn("Delete failed", e);
             toast("Could not delete that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Copies the markers as video chapters, named by what dropped them. */
+    const onChapters = async () => {
+        const entry = picked ? meta[picked] : undefined;
+        const text = chaptersOf(entry?.markers ?? [], entry?.markerLabels);
+
+        if (!text) {
+            toast("No markers on this clip", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        try {
+            await navigator.clipboard.writeText(text);
+            toast("Chapters copied", Toasts.Type.SUCCESS);
+        } catch {
+            toast("Could not reach the clipboard", Toasts.Type.FAILURE);
         }
     };
 
@@ -5861,6 +5879,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         </button>
                                     )}
                                     <button disabled={busy} title="Rename the file" onClick={() => setRenaming(picked)}>Rename</button>
+                                    <button disabled={busy} title="Copy video chapters for the markers" onClick={() => void onChapters()}>Chapters</button>
                                     <button
                                         className={confirmDelete ? "vc-clipper-danger" : ""}
                                         disabled={busy}
