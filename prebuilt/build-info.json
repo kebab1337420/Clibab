@@ -2,17 +2,17 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "6.2.0",
-  "clipperCommit": "b42ed78",
-  "builtAt": "2026-09-20T19:02:36",
+  "clipperVersion": "6.3.0",
+  "clipperCommit": "ef7a34d",
+  "builtAt": "2026-09-21T00:29:37",
   "files": {
     "discord-voice-capture.exe": {
       "size": 2014720,
       "sha256": "ae513ca2b9343ae85cce867c2311d7c436d52fe9325dbbf42eedc4d8908d06b5"
     },
     "patcher.js": {
-      "size": 145255,
-      "sha256": "a0f40be42900612a19646cde3b2f65adc10f1a2c694b1138d649be17a8bb41d7"
+      "size": 146053,
+      "sha256": "8ccd77784cc774bf44f100b8a0a7da800809562067857db00fa0be4d3ddeefd1"
     },
     "patcher.js.LEGAL.txt": {
       "size": 964,
@@ -27,16 +27,16 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "renderer.js": {
-      "size": 1137285,
-      "sha256": "880a7f9cf8cc86312046f9c850b627b8b8c150a5c79c72fb734d6e02b7883fbf"
+      "size": 1148662,
+      "sha256": "61c101f3cc71b5107498c5742964210b13f1a53445a24d969c0b3a3bfcd10957"
     },
     "renderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
     },
     "vencordDesktopMain.js": {
-      "size": 141524,
-      "sha256": "129dbd6ba6919b9b4d8dffbe609f9fe45119bc6558cd2528bf28549d1caa030d"
+      "size": 142322,
+      "sha256": "f5421e5f4e52ed452dd0b4c066d111649bba3d9a0a63ead236032a39a702b99c"
     },
     "vencordDesktopMain.js.LEGAL.txt": {
       "size": 964,
@@ -51,12 +51,22 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "vencordDesktopRenderer.js": {
-      "size": 1145185,
-      "sha256": "f179b1cd5dc7c30b4f0f419c902bdca6d3fc8e58e1c1f74e431419e50bb0a43b"
+      "size": 1156562,
+      "sha256": "34d227fb05cc7a820543e2b286c9e688b33d5c01780a51df92a97272a7c63d2c"
     },
     "vencordDesktopRenderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
+    }
+  },
+  "root": {
+    "install.bat": {
+      "size": 6058,
+      "sha256": "103223256045b8f47c9936f376cf9d1acecf734ade831f8a11afcbcb81307dd4"
+    },
+    "VRinstaller.bat": {
+      "size": 18677,
+      "sha256": "08b342fce42187cff5811ea5a266a12df15249bd9e479f96903ae7cb1e2e34d1"
     }
   }
 }
