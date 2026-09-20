@@ -61,8 +61,8 @@
   },
   "root": {
     "install.bat": {
-      "size": 6058,
-      "sha256": "103223256045b8f47c9936f376cf9d1acecf734ade831f8a11afcbcb81307dd4"
+      "size": 6078,
+      "sha256": "e3e9d0d8c0a22a63d0613af3dabd2fe6487aad57d6ceccae089aeaf197910e70"
     },
     "VRinstaller.bat": {
       "size": 18677,
