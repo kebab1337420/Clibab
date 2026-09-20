@@ -2222,7 +2222,7 @@ class ClipRecorder {
              * worth surfacing: an engine the machine can reach but can't arm
              * right now is a limitation the user might act on.
              */
-            if (availability.reason !== "This client's voice module was built without the clip engine - the Clips experiment is not on this account.") {
+            if (!availability.permanent) {
                 toast(`Recording mixed sound: ${availability.reason}`, Toasts.Type.MESSAGE);
             }
             return;
