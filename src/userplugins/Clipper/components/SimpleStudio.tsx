@@ -33,6 +33,9 @@ import {
 import { probeAudioTracks } from "../mp4";
 import { trimBytes } from "../repair";
 import { logger } from "../recorder";
+import { readMeta } from "../library";
+import { sendClipFitted } from "../send";
+import { shareClipLink } from "../share";
 import {
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -44,7 +47,7 @@ import {
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
 import { settings } from "../settings";
-import { formatBytes, formatTime } from "../utils";
+import { formatBytes, chaptersOf, formatTime } from "../utils";
 
 /** Clamp a trim point to the file's own range. */
 function clampPoint(point: number, min: number, max: number): number {
@@ -238,6 +241,24 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
     const busy = progress >= 0;
     const trimmed = Math.max(0, trim.to - trim.from);
     const pct = trim.length > 0 ? Math.round((trimmed / trim.length) * 100) : 0;
+
+    /** Copies the picked clip's markers as video chapters. */
+    const onChapters = async (name: string) => {
+        const entry = (await readMeta())[name];
+        const text = chaptersOf(entry?.markers ?? [], entry?.markerLabels);
+
+        if (!text) {
+            toast("No markers on this clip", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        try {
+            await navigator.clipboard.writeText(text);
+            toast("Chapters copied", Toasts.Type.SUCCESS);
+        } catch {
+            toast("Could not reach the clipboard", Toasts.Type.FAILURE);
+        }
+    };
 
     /**
      * The trim, cut out of the file instead of re-encoded.
@@ -525,6 +546,14 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
                             <button className="vc-clipper-primary" disabled={busy || !source || trimmed <= 0} onClick={() => void onRender()}>
                                 {progress >= 0 ? `Rendering ${Math.round(progress * 100)}%` : `Render ${formatTime(trimmed)}`}
                             </button>
+
+                            {!!picked && (
+                                <>
+                                    <button disabled={busy} title="Attach it to the channel" onClick={() => void sendClipFitted(picked)}>Send</button>
+                                    <button disabled={busy} title="Upload it and copy a share link" onClick={() => void shareClipLink(picked)}>Link</button>
+                                    <button disabled={busy} title="Copy video chapters for the markers" onClick={() => void onChapters(picked)}>Chapters</button>
+                                </>
+                            )}
 
                             {progress >= 0 && (
                                 <>

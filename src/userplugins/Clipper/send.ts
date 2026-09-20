@@ -61,21 +61,30 @@ type Progress = (step: string) => void;
 /**
  * Says out loud that per-person levels do not travel with the file.
  *
- * Mixer moves live in the studio render and preview only; every path here
- * attaches bytes straight off disk. Without the warning a muted voice
- * arrives intact and the mixer reads as broken.
+ * Shared with the link path, which uploads the same untouched bytes.
  */
-function warnUnrenderedLevels(name: string): void {
-    void (async () => {
-        try {
-            const meta = (await readMeta())[name];
-            if (voiceLevelsTouched(meta?.levels)) {
-                toast("Per-person levels only apply in a studio render - this file is untouched", Toasts.Type.MESSAGE, 8000);
-            }
-        } catch {
-            // Metadata unreadable: the attach goes ahead as before.
+export async function warnUnrenderedLevels(name: string): Promise<void> {
+    try {
+        const meta = (await readMeta())[name];
+        if (voiceLevelsTouched(meta?.levels)) {
+            toast("Per-person levels only apply in a studio render - this file is untouched", Toasts.Type.MESSAGE, 8000);
         }
-    })();
+    } catch {
+        // Metadata unreadable: the attach goes ahead as before.
+    }
+}
+
+/**
+ * Attaches a file, then says out loud when per-person levels stayed behind.
+ *
+ * Mixer moves live in the studio render only, so an attached file carrying
+ * moved levels would arrive with the muted voice intact and read as broken.
+ */
+async function attachAndWarn(file: File, name: string): Promise<boolean> {
+    const attached = attach(file);
+    if (attached) await warnUnrenderedLevels(name);
+
+    return attached;
 }
 
 /**
@@ -92,20 +101,19 @@ export async function sendClipRange(name: string, from: number, to: number): Pro
         return false;
     }
 
-    warnUnrenderedLevels(name);
-        try {
+    try {
         const type = typeOfClip(name);
         const data = await readClipBytes(name);
         const cut = trimBytes(data, type, from, to);
 
         // Nothing back: the range covers the clip, or this container is not one
         // the parser knows. Either way the whole file is the right answer.
-        if (!cut) return attach(new File([data as BlobPart], name, { type }));
+        if (!cut) return attachAndWarn(new File([data as BlobPart], name, { type }), name);
 
         const stem = name.replace(/\.[^.]+$/, "");
         const extension = name.split(".").pop() || "webm";
 
-        return attach(new File([cut as BlobPart], `${stem}-cut.${extension}`, { type }));
+        return attachAndWarn(new File([cut as BlobPart], `${stem}-cut.${extension}`, { type }), name);
     } catch (e) {
         logger.error("Could not attach the selection", e);
         toast("Could not read that clip", Toasts.Type.FAILURE);
@@ -126,10 +134,9 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
         return false;
     }
 
-    warnUnrenderedLevels(name);
     try {
         const file = await loadClipFile(name);
-        if (file.size <= FREE_LIMIT) return attach(file);
+        if (file.size <= FREE_LIMIT) return attachAndWarn(file, name);
 
         onProgress?.("Too big to send - re-encoding");
 
@@ -143,7 +150,7 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
                 toast(`Smallest this clip goes is ${formatBytes(result.blob.size)}`, Toasts.Type.MESSAGE);
             }
 
-            return attach(new File([result.blob], `${stem}-small.${ext}`, { type: result.mimeType }));
+            return attachAndWarn(new File([result.blob], `${stem}-small.${ext}`, { type: result.mimeType }), name);
         } finally {
             URL.revokeObjectURL(url);
         }
@@ -166,7 +173,6 @@ export async function sendClipGif(name: string, request: GifRequest = {}): Promi
         return false;
     }
 
-    warnUnrenderedLevels(name);
     try {
         const result = await clipToGif(name, { limit: FREE_LIMIT, ...request });
         const saved = await saveGif(name, result.blob);
@@ -176,7 +182,7 @@ export async function sendClipGif(name: string, request: GifRequest = {}): Promi
             result.fits ? Toasts.Type.SUCCESS : Toasts.Type.MESSAGE
         );
 
-        return attach(new File([result.blob], saved, { type: typeOfClip(saved) }));
+        return attachAndWarn(new File([result.blob], saved, { type: typeOfClip(saved) }), name);
     } catch (e) {
         logger.error("Could not make a GIF", e);
         toast("Could not make a GIF of that clip", Toasts.Type.FAILURE);

@@ -17,11 +17,10 @@ import type { PluginNative } from "@utils/types";
 import { Toasts } from "@webpack/common";
 
 import { CLIPS_AVAILABLE } from "./clips";
-import { readMeta } from "./library";
 import { logger } from "./recorder";
+import { warnUnrenderedLevels } from "./send";
 import { settings } from "./settings";
 import { toast } from "./toasts";
-import { voiceLevelsTouched } from "./voice";
 
 const Native = VencordNative.pluginHelpers.Clipper as PluginNative<typeof import("./native")>;
 
@@ -69,17 +68,6 @@ export async function shareClipLink(name: string): Promise<boolean> {
 
     toast("Uploading the clip for a link…", Toasts.Type.MESSAGE);
 
-    void (async () => {
-        try {
-            const meta = (await readMeta())[name];
-            if (voiceLevelsTouched(meta?.levels)) {
-                toast("Per-person levels only apply in a studio render - this link is the untouched file", Toasts.Type.MESSAGE, 8000);
-            }
-        } catch {
-            // Metadata unreadable: the upload goes ahead as before.
-        }
-    })();
-
     try {
         const url = await Native.shareClip(settings.store.saveDirectory, name);
 
@@ -90,6 +78,8 @@ export async function shareClipLink(name: string): Promise<boolean> {
             // screen long enough to copy by hand.
             toast(url, Toasts.Type.MESSAGE, 12000);
         }
+
+        await warnUnrenderedLevels(name);
         return true;
     } catch (e) {
         logger.error("Could not share the clip", e);

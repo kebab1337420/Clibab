@@ -2383,6 +2383,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const refreshGen = useRef(0);
     const projectRef = useRef(project);
     const cancelRef = useRef(false);
+    /** Guards the multi-download auto-cut against double clicks. */
+    const autoRunningRef = useRef(false);
 
     sourcesRef.current = sources;
     projectRef.current = project;
@@ -3475,6 +3477,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      */
     const autoAngles = async () => {
         if (!segment || !source) return;
+        if (autoRunningRef.current) return;
+        autoRunningRef.current = true;
 
         const posted = postedAngles();
         if (!posted.length) {
@@ -3571,6 +3575,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             logger.warn("Could not auto-cut the angles", e);
             setError(e instanceof Error ? e.message : String(e));
         } finally {
+            autoRunningRef.current = false;
             setNote("");
         }
     };
@@ -4715,9 +4720,11 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
     // Ranges are measured against the timeline they were found on: any edit
     // after that closes the preview rather than cutting stale coordinates.
+    // The whole project, not just the segments: captions and sounds move
+    // with a cut too.
     useEffect(() => {
         setSilencePreview(null);
-    }, [project.segments]);
+    }, [project]);
 
     const trimSilence = () => {
         const before = projectRef.current;
@@ -6307,7 +6314,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 {!!silencePreview && (
                                     <div className="vc-clipper-silence">
                                         <div className="vc-clipper-silence-head">
-                                            <span>Cut the checked stretches ({silenceChecked.filter(Boolean).length}/{silencePreview.length})</span>
+                                            <span>
+                                                Cut the checked stretches ({silenceChecked.filter(Boolean).length}/{silencePreview.length}
+                                                {(() => {
+                                                    const checked = silencePreview.reduce((sum, range, i) => sum + (silenceChecked[i] ? range.to - range.from : 0), 0);
+
+                                                    return checked > 0 ? `, ${formatTime(checked)}` : "";
+                                                })()})
+                                            </span>
                                             <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => true))}>All</button>
                                             <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => false))}>None</button>
                                         </div>
@@ -6630,7 +6644,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                             </button>
                                             <button
                                                 className="vc-clipper-primary"
-                                                disabled={busy}
+                                                disabled={busy || !source}
                                                 title="Download every posted angle and cut between them in one step"
                                                 onClick={() => void autoAngles()}
                                             >

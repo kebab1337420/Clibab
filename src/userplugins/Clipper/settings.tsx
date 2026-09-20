@@ -184,7 +184,7 @@ export const settings = definePluginSettings({
     },
     autoCleanup: {
         type: OptionType.BOOLEAN,
-        description: "Move clips older than a while to the trash automatically. Pinned clips are spared",
+        description: "Move clips older than N days to the trash automatically. Pinned clips are spared",
         default: false
     },
     autoCleanupDays: {

@@ -19,14 +19,15 @@
  * on it.
  */
 
-import { useEffect, useState } from "@webpack/common";
+import { Toasts, useEffect, useState } from "@webpack/common";
 
 import { CLIPS_AVAILABLE, loadClipUrl } from "../clips";
 import { recorder, type SavedClip } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { settings } from "../settings";
 import { shareClipLink } from "../share";
-import { formatBytes, TRIM_CUTS } from "../utils";
+import { toast } from "../toasts";
+import { chaptersOf, formatBytes, TRIM_CUTS } from "../utils";
 
 /** How long the card sits there before it takes itself off screen. */
 const DISMISS_MS = 20_000;
@@ -42,6 +43,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
     const [held, setHeld] = useState(false);
     const [busy, setBusy] = useState(false);
     const [step, setStep] = useState("");
+    const [confirmDelete, setConfirmDelete] = useState(false);
 
     useEffect(() => {
         // Loaded off disk for the card alone: the save lets go of the
@@ -142,15 +144,46 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                         Keep {trim}s
                     </button>
                 )}
+                <button
+                    disabled={busy}
+                    title="Copy video chapters for the markers"
+                    onClick={() => {
+                        if (busy) return;
+
+                        const text = chaptersOf(clip.markers ?? [], clip.markerLabels);
+                        if (!text) {
+                            toast("No markers on this clip", Toasts.Type.MESSAGE);
+                            return;
+                        }
+
+                        void navigator.clipboard.writeText(text).then(
+                            () => toast("Chapters copied", Toasts.Type.SUCCESS),
+                            () => toast("Could not reach the clipboard", Toasts.Type.FAILURE)
+                        );
+                    }}
+                >
+                    Chapters
+                </button>
                 {CLIPS_AVAILABLE && (
                     <button disabled={busy} onClick={() => { onStudio(clip.name); onClose(); }}>Studio</button>
                 )}
                 <button
                     className="vc-clipper-danger"
                     disabled={busy}
-                    onClick={act(() => recorder.discardLastSaved())}
+                    onClick={() => {
+                        if (busy) return;
+
+                        if (!confirmDelete) {
+                            setConfirmDelete(true);
+                            setTimeout(() => setConfirmDelete(false), 4000);
+                            return;
+                        }
+
+                        setConfirmDelete(false);
+                        void act(() => recorder.discardLastSaved())();
+                    }}
                 >
-                    Delete
+                    {confirmDelete ? "Sure?" : "Delete"}
                 </button>
             </div>
             <div className="vc-clipper-replay-hint">Later: right-click the Clipper button for this clip again.</div>

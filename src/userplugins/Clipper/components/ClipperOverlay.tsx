@@ -707,12 +707,20 @@ function CaptureOptions() {
         settings.store.resolution = preset.resolution;
         settings.store.videoBitrate = preset.bitrate;
         settings.store.clipLength = preset.length;
+        settings.store.container = preset.container as Container;
         restartIfLive();
         toast(`Preset ${preset.label}: ${preset.resolution}p${preset.fps} at ${preset.bitrate}Mbps for ${preset.length}s`, Toasts.Type.SUCCESS);
+
+        // A game profile still wins on every game change: say so now rather
+        // than letting the next alt-tab silently revert the preset.
+        const game = runningGame();
+        if (hasProfile(game)) {
+            toast(`${game}'s profile still applies on game change - save as profile to keep this preset`, Toasts.Type.MESSAGE, 8000);
+        }
     };
 
     const presetMatch = CAPTURE_PRESETS.find(p =>
-        p.fps === fps && p.resolution === resolution && p.bitrate === videoBitrate && p.length === clipLength
+        p.fps === fps && p.resolution === resolution && p.bitrate === videoBitrate && p.length === clipLength && p.container === container
     )?.label ?? "Custom";
 
     // Video bytes held, roughly: bitrate over the whole length plus ~10%
@@ -929,36 +937,33 @@ function Picker({ onClose }: { onClose(): void; }) {
 
                 {!!runningGame() && (
                     <div className="vc-clipper-note" key={profileTick}>
-                        {matchesProfile(runningGame())
-                            ? `Using ${runningGame()}'s saved profile.`
-                            : (
-                                <>
-                                    <button
-                                        className="vc-clipper-tab"
-                                        title="Remember the settings above for this game"
-                                        onClick={() => {
-                                            if (saveProfile(runningGame())) {
-                                                toast(`Profile saved for ${runningGame()}`, Toasts.Type.SUCCESS);
-                                                setProfileTick(t => t + 1);
-                                            }
-                                        }}
-                                    >
-                                        Save as {runningGame()}'s profile
-                                    </button>
-                                    {hasProfile(runningGame()) && (
-                                        <button
-                                            className="vc-clipper-tab"
-                                            title="Forget this game's saved profile"
-                                            onClick={() => {
-                                                deleteProfile(runningGame());
-                                                setProfileTick(t => t + 1);
-                                            }}
-                                        >
-                                            Forget
-                                        </button>
-                                    )}
-                                </>
-                            )}
+                        {matchesProfile(runningGame()) && (
+                            <span>Using {runningGame()}'s saved profile. </span>
+                        )}
+                        <button
+                            className="vc-clipper-tab"
+                            title="Remember the settings above for this game"
+                            onClick={() => {
+                                if (saveProfile(runningGame())) {
+                                    toast(`Profile saved for ${runningGame()}`, Toasts.Type.SUCCESS);
+                                    setProfileTick(t => t + 1);
+                                }
+                            }}
+                        >
+                            {hasProfile(runningGame()) ? `Update ${runningGame()}'s profile` : `Save as ${runningGame()}'s profile`}
+                        </button>
+                        {hasProfile(runningGame()) && (
+                            <button
+                                className="vc-clipper-tab"
+                                title="Forget this game's saved profile"
+                                onClick={() => {
+                                    deleteProfile(runningGame());
+                                    setProfileTick(t => t + 1);
+                                }}
+                            >
+                                Forget
+                            </button>
+                        )}
                     </div>
                 )}
 

@@ -18,6 +18,7 @@ test("capture presets stay within sane bounds", () => {
         assert.equal(utils.captureHeight(preset.resolution), preset.resolution);
         assert.ok(utils.captureVideoBitrate(preset.bitrate) === preset.bitrate * 1_000_000);
         assert.ok(retention(preset.length) >= preset.length);
+        assert.ok(["mp4-h264", "webm-vp9", "webm-vp8"].includes(preset.container), `${preset.label} container`);
     }
 });
 
