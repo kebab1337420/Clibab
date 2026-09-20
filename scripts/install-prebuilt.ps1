@@ -85,8 +85,20 @@ if (-not (Test-Path (Join-Path $DistSource "patcher.js"))) {
 $dist = Join-Path $InstallDir "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
 <# Every file of prebuilt\dist, the Rust voice-capture binary included, so the
-   exact bundle that was verified is the one that gets installed. #>
-Get-ChildItem $DistSource -File | Copy-Item -Destination $dist -Force
+   exact bundle that was verified is the one that gets installed. Files the
+   new bundle no longer carries are removed: overwriting alone would let a
+   renamed binary or a dropped file haunt the install across updates. #>
+$wanted = @{}
+Get-ChildItem $DistSource -File | ForEach-Object {
+    $wanted[$_.Name] = $true
+    Copy-Item $_.FullName -Destination $dist -Force
+}
+Get-ChildItem $dist -File |
+    Where-Object { -not $wanted.ContainsKey($_.Name) } |
+    ForEach-Object {
+        Write-Host "      Removing stale $($_.Name) left by the previous install."
+        Remove-Item $_.FullName -Force
+    }
 
 # find-vencord.ps1 and Vesktop both expect a repo-shaped folder next to dist
 $marker = Join-Path $InstallDir "package.json"
