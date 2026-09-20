@@ -782,6 +782,35 @@ export function voiceLevelsTouched(levels: VoiceLevels | undefined): boolean {
     return !!levels && Object.values(levels).some(v => Number.isFinite(v) && v !== 1);
 }
 
+/**
+ * Who the spectral mask listens for at an instant.
+ *
+ * `muted` holds the muted voices the lanes can hear right now; `others`
+ * holds everyone else audible. Same windows the notch reads, so the two
+ * agree about who is talking: a mask node fed different ears would fight
+ * the curve it runs beside.
+ */
+export function maskActors(
+    tracks: VoiceTrack[],
+    levels: VoiceLevels | undefined,
+    seconds: number
+): { muted: string[]; others: string[]; } {
+    const muted: string[] = [];
+    const others: string[] = [];
+
+    if (!tracks.length || !levels) return { muted, others };
+
+    for (const track of tracks) {
+        if (voiceGainOf(levels, track.id) === 0) {
+            if (silencedAt(track, seconds)) muted.push(track.id);
+        } else if (levelAt(track, seconds, MUTE_BACK, MUTE_AHEAD) > 0) {
+            others.push(track.id);
+        }
+    }
+
+    return { muted, others };
+}
+
 /** Who is audible at an instant, loudest first, silenced people left out. */
 export function speakingAt(tracks: VoiceTrack[], levels: VoiceLevels | undefined, seconds: number, floor = 0.12): VoiceTrack[] {
     return tracks
