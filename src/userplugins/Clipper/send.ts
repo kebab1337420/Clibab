@@ -23,11 +23,13 @@ import { DraftType, Toasts, UploadHandler } from "@webpack/common";
 
 import { CLIPS_AVAILABLE, loadClipFile, readClipBytes, typeOfClip } from "./clips";
 import { clipToGif, type GifRequest, saveGif } from "./gifExport";
+import { readMeta } from "./library";
 import { logger } from "./recorder";
 import { trimBytes } from "./repair";
 import { shrinkVideo } from "./shrink";
 import { toast } from "./toasts";
 import { formatBytes } from "./utils";
+import { voiceLevelsTouched } from "./voice";
 
 /**
  * Largest attachment a plain account may send.
@@ -57,6 +59,26 @@ function attach(file: File): boolean {
 type Progress = (step: string) => void;
 
 /**
+ * Says out loud that per-person levels do not travel with the file.
+ *
+ * Mixer moves live in the studio render and preview only; every path here
+ * attaches bytes straight off disk. Without the warning a muted voice
+ * arrives intact and the mixer reads as broken.
+ */
+function warnUnrenderedLevels(name: string): void {
+    void (async () => {
+        try {
+            const meta = (await readMeta())[name];
+            if (voiceLevelsTouched(meta?.levels)) {
+                toast("Per-person levels only apply in a studio render - this file is untouched", Toasts.Type.MESSAGE, 8000);
+            }
+        } catch {
+            // Metadata unreadable: the attach goes ahead as before.
+        }
+    })();
+}
+
+/**
  * Attaches part of a clip, leaving the file on disk alone.
  *
  * The handles in the overlay over the game are a selection rather than an edit:
@@ -70,7 +92,8 @@ export async function sendClipRange(name: string, from: number, to: number): Pro
         return false;
     }
 
-    try {
+    warnUnrenderedLevels(name);
+        try {
         const type = typeOfClip(name);
         const data = await readClipBytes(name);
         const cut = trimBytes(data, type, from, to);
@@ -103,6 +126,7 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
         return false;
     }
 
+    warnUnrenderedLevels(name);
     try {
         const file = await loadClipFile(name);
         if (file.size <= FREE_LIMIT) return attach(file);
@@ -142,6 +166,7 @@ export async function sendClipGif(name: string, request: GifRequest = {}): Promi
         return false;
     }
 
+    warnUnrenderedLevels(name);
     try {
         const result = await clipToGif(name, { limit: FREE_LIMIT, ...request });
         const saved = await saveGif(name, result.blob);
