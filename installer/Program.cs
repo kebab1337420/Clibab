@@ -559,6 +559,42 @@ internal static class Program
                         VerifyFile(Path.Combine(repoRoot, name), listed);
                 }
             }
+
+            // Only what the install actually runs, by exact name: anything else
+            // at the root is data, not code, and is not executed either way.
+            if (hasRoot)
+            {
+                foreach (var name in new[] { "install.bat", "VRinstaller.bat" })
+                {
+                    if (root.TryGetProperty(name, out var published))
+                        VerifyFile(Path.Combine(repoRoot, name), published);
+                }
+            }
+        }
+
+        private static void VerifyFile(string file, JsonElement listed)
+        {
+            string name = Path.GetFileName(file);
+            if (name != Path.GetFileName(name) || name.StartsWith('.'))
+                throw new InvalidOperationException($"The release lists a file named {name}, which is refused.");
+
+            long size = listed.TryGetProperty("size", out var sizeElement) ? sizeElement.GetInt64() : -1;
+            string sha256 = listed.TryGetProperty("sha256", out var hashElement) ? hashElement.GetString() ?? "" : "";
+            if (size < 0 || sha256.Length == 0)
+                throw new InvalidOperationException($"The release lists no size and hash for {name}.");
+
+            if (!File.Exists(file))
+                throw new InvalidOperationException($"The release names {name} and the archive does not carry it.");
+
+            var info = new FileInfo(file);
+            if (info.Length != size)
+                throw new InvalidOperationException($"{name} is {info.Length} bytes, the release says {size}.");
+
+            using var fileStream = File.OpenRead(file);
+            using var hasher = System.Security.Cryptography.SHA256.Create();
+            string got = Convert.ToHexString(hasher.ComputeHash(fileStream)).ToLowerInvariant();
+            if (got != sha256.ToLowerInvariant())
+                throw new InvalidOperationException($"{name} does not match its published hash.");
         }
 
         private static void VerifyFile(string file, JsonElement listed)

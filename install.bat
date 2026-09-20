@@ -118,6 +118,10 @@ REM ---- 2. Copy the plugin -------------------------------------
 echo [2/5] Copying the plugin into src\userplugins\%PLUGIN_NAME% ...
 set "DEST=%VENCORD_DIR%\src\userplugins\%PLUGIN_NAME%"
 if not exist "%VENCORD_DIR%\src\userplugins" mkdir "%VENCORD_DIR%\src\userplugins"
+REM A stale file from a previous copy (a module since deleted) would still be
+REM compiled into the build, so the mirror is wiped before it is refilled.
+if exist "%DEST%" rmdir /s /q "%DEST%"
+mkdir "%DEST%"
 xcopy "%PLUGIN_SRC%" "%DEST%\" /E /I /Y /Q >nul
 if errorlevel 1 (
     echo [ERROR] Copy failed.
