@@ -271,6 +271,8 @@ export interface SavedClip {
     mimeType: string;
     /** Marker offsets in seconds, already relative to this clip's start. */
     markers: number[];
+    /** What the automatic ones were, per marker. Manual marks are blank. */
+    markerLabels?: string[];
     /** Who was talking during it, on the same clock as the markers. */
     voices: VoiceTrack[];
     /** What the chat said during it, on that clock too. */
@@ -453,6 +455,15 @@ class ClipRecorder {
     private marks: number[] = [];
 
     /**
+     * What the automatic markers were, by the same epoch ms.
+     *
+     * A manual mark has no label; an automatic one carries the reason that
+     * dropped it ("a kill in Counter-Strike 2"), which is what names the
+     * chapter it becomes. Pruned and cleared alongside `marks`.
+     */
+    private markLabels = new Map<number, string>();
+
+    /**
      * The clip written by the last save, kept whole.
      *
      * It is what "keep the last N seconds" cuts down, and reading it back off
@@ -592,7 +603,9 @@ class ClipRecorder {
     private markAuto(reason: string): void {
         if (!this.isRecording) return;
 
-        this.marks.push(Date.now());
+        const at = Date.now();
+        this.marks.push(at);
+        this.markLabels.set(at, reason);
         this.prune();
 
         logger.info(`Marked by itself - ${reason} (${this.marks.length} in the buffer)`);
@@ -1142,6 +1155,9 @@ class ClipRecorder {
         const floor = oldest ? oldest.at - TIMESLICE : cutoff;
 
         if (this.marks.length) this.marks = this.marks.filter(m => m >= floor);
+        for (const at of this.markLabels.keys()) {
+            if (at < floor) this.markLabels.delete(at);
+        }
     }
 
     /**
@@ -1326,6 +1342,7 @@ class ClipRecorder {
             if (this.tryEncoder(mime)) {
                 // The footage they pointed at was written by the dead encoder.
                 this.marks = [];
+                this.markLabels.clear();
 
                 rememberRelayOnly(mime);
                 logger.info(`The ${mime} encoder took the capture through a canvas`);
@@ -1461,6 +1478,7 @@ class ClipRecorder {
 
         // The footage they pointed at was written by the encoder that just died.
         this.marks = [];
+        this.markLabels.clear();
 
         logger.info(`The buffer carried on as ${this.mimeType}`);
 
@@ -1681,6 +1699,7 @@ class ClipRecorder {
         this.header = null;
         this.chunks = [];
         this.marks = [];
+        this.markLabels.clear();
 
         // A stop ends the call window the end-of-call clip reads from: forget
         // it so the next buffer starts the question over.
@@ -1911,9 +1930,9 @@ class ClipRecorder {
              * Clamping the older ones to zero, as this used to, put a tick on
              * the first frame of every trimmed clip - one per marker dropped.
              */
-            const markers = this.marks
-                .filter(m => m >= start && m <= end)
-                .map(m => (m - start) / 1000);
+            const keptMarks = this.marks.filter(m => m >= start && m <= end);
+            const markers = keptMarks.map(m => (m - start) / 1000);
+            const markerLabels = keptMarks.map(m => this.markLabels.get(m) ?? "");
             const voices = voiceActivity.slice(start, end);
             const said = chatLog.slice(start, end);
 
@@ -1946,7 +1965,7 @@ class ClipRecorder {
                 logger.warn("Could not rebase the clip timeline, saving it as recorded", e);
             }
 
-            const offsets = shift(markers, cutOff);
+            const { markers: offsets, labels: offsetLabels } = shiftLabeled(markers, markerLabels, cutOff);
             const lanes = shiftTracks(voices, cutOff);
             const chat = shiftChat(said, cutOff);
 
@@ -1966,7 +1985,7 @@ class ClipRecorder {
             const path = await writeClip(bytes, name, blob);
             const saved = path.split(/[\\/]/).pop() || name;
 
-            this.lastSaved = { name: saved, path, size: blob.size, mimeType: this.mimeType, markers: offsets, voices: lanes, chat };
+            this.lastSaved = { name: saved, path, size: blob.size, mimeType: this.mimeType, markers: offsets, markerLabels: offsetLabels, voices: lanes, chat };
 
             // The call, kept apart. `cutOff` is what the repair took off the
             // front, so this is the instant the saved footage really begins.
@@ -1974,7 +1993,7 @@ class ClipRecorder {
 
             // File the clip under whatever is running now: after the save, the
             // player may already have alt-tabbed away.
-            await tagSavedClip(path, offsets, lanes.map(toMeta), tracks, voiceLevelsFrom(readMixer()), chat);
+            await tagSavedClip(path, offsets, lanes.map(toMeta), tracks, voiceLevelsFrom(readMixer()), chat, offsetLabels);
 
             // Best effort and off the critical path: the library falls back to a
             // placeholder for a clip that has no picture.
@@ -2426,13 +2445,15 @@ class ClipRecorder {
 
         const end = Date.now();
         const start = end - Math.round(seconds * 1000);
-        const markers = this.marks.map(m => (m - start) / 1000).filter(m => m >= 0);
+        const keptMarks = this.marks.map(m => ({ at: m, offset: (m - start) / 1000 })).filter(p => p.offset >= 0);
+        const markers = keptMarks.map(p => p.offset);
+        const markerLabels = keptMarks.map(p => this.markLabels.get(p.at) ?? "");
         const voices = voiceActivity.slice(start, end);
         const chat = chatLog.slice(start, end);
 
-        this.lastSaved = { name: saved, path, size: blob.size, mimeType: "video/mp4", markers, voices, chat };
+        this.lastSaved = { name: saved, path, size: blob.size, mimeType: "video/mp4", markers, markerLabels, voices, chat };
 
-        await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
+        await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
         void writeThumbnail(blob, saved);
 
         /*
@@ -2559,11 +2580,11 @@ class ClipRecorder {
             // The cut lands on a keyframe at or before the point asked for, so
             // measure what was really taken off rather than assuming.
             const gone = total - lengthBytes(trimmed, last.mimeType);
-            const markers = shift(last.markers, gone);
+            const { markers, labels: markerLabels } = shiftLabeled(last.markers, last.markerLabels ?? [], gone);
             const voices = shiftTracks(last.voices, gone);
             const chat = shiftChat(last.chat ?? [], gone);
 
-            await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
+            await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
             void writeThumbnail(cut, saved);
 
             // Only once the replacement is safely on disk.
@@ -2574,7 +2595,7 @@ class ClipRecorder {
                 logger.warn("Could not remove the untrimmed clip", e);
             }
 
-            this.lastSaved = { name: saved, path, size: cut.size, mimeType: last.mimeType, markers, voices, chat };
+            this.lastSaved = { name: saved, path, size: cut.size, mimeType: last.mimeType, markers, markerLabels, voices, chat };
             toast(`Kept the last ${Math.round(seconds)}s (${formatBytes(cut.size)})`, Toasts.Type.SUCCESS);
         } catch (e) {
             logger.error("Failed to trim the last clip", e);
@@ -2971,6 +2992,17 @@ function shift(markers: number[], by: number): number[] {
     if (!by) return markers;
 
     return markers.map(m => m - by).filter(m => m >= 0);
+}
+
+/** Same, carrying each marker's label along so the two never desync. */
+function shiftLabeled(markers: number[], labels: string[], by: number): { markers: number[]; labels: string[]; } {
+    if (!by) return { markers, labels };
+
+    const kept = markers
+        .map((m, i) => ({ m: m - by, label: labels[i] ?? "" }))
+        .filter(p => p.m >= 0);
+
+    return { markers: kept.map(p => p.m), labels: kept.map(p => p.label) };
 }
 
 function copy(text: string) {
