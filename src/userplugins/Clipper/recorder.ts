@@ -59,7 +59,12 @@ export interface ClipWindow {
 }
 
 interface TimedChunk {
-    blob: Blob;
+    /** In-RAM bytes, or null once the chunk has been spilled to disk. */
+    blob: Blob | null;
+    /** Spill file id, or null while the chunk is still in RAM. */
+    file: string | null;
+    /** Byte size, kept separately so spilled chunks still count. */
+    size: number;
     /** Timestamp (ms) at which the chunk was handed to us. */
     at: number;
 }
@@ -109,6 +114,17 @@ const GAME_RESTART_COOLDOWN_MS = 10_000;
  * over. Past this the oldest chunks go even when their time has not come.
  */
 const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Past this many buffered bytes the oldest chunks spill to disk instead of
+ * staying in RAM.
+ *
+ * Half the byte cap on purpose: the buffer keeps rolling in memory underneath
+ * while a save assembles several copies of it at once, so spilling early
+ * leaves headroom for the save itself instead of arriving exactly when the
+ * client is already at its limit.
+ */
+const SPILL_AT_BYTES = 256 * 1024 * 1024;
 
 /**
  * How far past the asked length a native clip may run before it is cut back.
@@ -459,6 +475,8 @@ class ClipRecorder {
     /** First chunk emitted by the recorder: holds the container header. */
     private header: Blob | null = null;
     private chunks: TimedChunk[] = [];
+    private spillRunning = false;
+    private spillFailed = false;
 
     /**
      * Moments marked by the user, as epoch ms.
@@ -564,7 +582,7 @@ class ClipRecorder {
     }
 
     get bufferedBytes() {
-        return this.chunks.reduce((sum, c) => sum + c.blob.size, 0) + (this.header?.size ?? 0);
+        return this.chunks.reduce((sum, c) => sum + c.size, 0) + (this.header?.size ?? 0);
     }
 
     /** Markers currently inside the buffer, for the overlay's counter. */
@@ -1069,8 +1087,9 @@ class ClipRecorder {
             if (!this.header) {
                 this.header = blob;
             } else {
-                this.chunks.push({ blob, at: Date.now() });
+                this.chunks.push({ blob, file: null, size: blob.size, at: Date.now() });
                 this.prune();
+                void this.spillIfNeeded();
             }
         }
 
@@ -1144,17 +1163,28 @@ class ClipRecorder {
     }
 
     private prune() {
+        // Spill files dropped along with their chunks, in one round trip:
+        // prune is sync, so this stays fire-and-forget and never blocks a chunk.
+        const dropped: string[] = [];
+
         // Keep one extra timeslice so the clip is never shorter than asked for.
         const cutoff = Date.now() - (clipRetentionSeconds(settings.store.clipLength) * 1000 + TIMESLICE);
-        while (this.chunks.length && this.chunks[0].at < cutoff) this.chunks.shift();
+        while (this.chunks.length && this.chunks[0].at < cutoff) {
+            const gone = this.chunks.shift();
+            if (gone?.file) dropped.push(gone.file);
+        }
 
         // And never more bytes than this, whatever the bitrate and the length
         // say. The last chunk stays whatever happens: a save has to write
         // something.
         let held = this.bufferedBytes;
         while (held > MAX_BUFFER_BYTES && this.chunks.length > 1) {
-            held -= this.chunks.shift()?.blob.size ?? 0;
+            const gone = this.chunks.shift();
+            held -= gone?.size ?? 0;
+            if (gone?.file) dropped.push(gone.file);
         }
+
+        if (dropped.length) Native.spillDrop(dropped).catch(e => logger.warn("Could not drop spilled buffer chunks", e));
 
         /*
          * A mark whose footage has been dropped points at nothing.
@@ -1173,6 +1203,38 @@ class ClipRecorder {
         if (this.marks.length) this.marks = this.marks.filter(m => m >= floor);
         for (const at of this.markLabels.keys()) {
             if (at < floor) this.markLabels.delete(at);
+        }
+    }
+
+    /**
+     * Parks the oldest chunks on disk once the buffer passes the spill
+     * threshold, oldest first, keeping the last two in RAM whatever happens
+     * so a save always has something immediate to read.
+     *
+     * A spill still in flight when cleanup() runs writes a file nobody points
+     * at anymore; that orphan goes out with the next stop (spillClear) or,
+     * failing that, with the 24h sweep of crashed sessions.
+     */
+    private async spillIfNeeded(): Promise<void> {
+        if (this.spillRunning || this.spillFailed) return;
+        this.spillRunning = true;
+
+        try {
+            while (this.bufferedBytes > SPILL_AT_BYTES && this.chunks.length > 2) {
+                const oldest = this.chunks[0];
+                if (!oldest.blob || oldest.file) break;
+
+                const id = `spill-${oldest.at}-${Math.random().toString(16).slice(2)}`;
+                const data = new Uint8Array(await oldest.blob.arrayBuffer());
+                await Native.spillWrite(id, data);
+                oldest.blob = null;
+                oldest.file = id;
+            }
+        } catch (e) {
+            logger.warn("Could not spill the oldest buffer chunks to disk, staying in memory", e);
+            this.spillFailed = true;
+        } finally {
+            this.spillRunning = false;
         }
     }
 
@@ -1735,6 +1797,9 @@ class ClipRecorder {
         this.header = null;
         this.chunks = [];
         this.marks = [];
+        this.spillRunning = false;
+        this.spillFailed = false;
+        void Native.spillClear().catch(() => {});
         this.markLabels.clear();
 
         // A stop ends the call window the end-of-call clip reads from: forget
@@ -1953,7 +2018,13 @@ class ClipRecorder {
                 ? this.chunksIn(picked.from, picked.to)
                 : seconds ? this.chunksSince(Date.now() - seconds * 1000) : this.chunks;
 
-            const raw = new Blob([this.header, ...kept.map(c => c.blob)], { type: this.mimeType });
+            const parts: BlobPart[] = [this.header as Blob];
+            for (const c of kept) {
+                if (c.blob) parts.push(c.blob);
+                else if (c.file) parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                else throw new Error("Clip chunk is neither in memory nor spilled to disk");
+            }
+            const raw = new Blob(parts, { type: this.mimeType });
             const name = `${timestampName()}.${extensionFor(this.mimeType)}`;
 
             // Read before the write, because the buffer keeps moving underneath.
