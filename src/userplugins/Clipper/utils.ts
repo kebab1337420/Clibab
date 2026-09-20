@@ -340,6 +340,52 @@ export const CAPTURE_PRESETS: CapturePreset[] = [
     { label: "Quality", fps: 60, resolution: 1440, bitrate: 20, length: 90 }
 ];
 
+/** One clip for the duplicate hunt: size, filesystem time, filed category. */
+export interface ClipEntry {
+    name: string;
+    size: number;
+    modified: number;
+    game: string;
+}
+
+/**
+ * Clips that are probably the same moment saved twice.
+ *
+ * A manual save, a multi-angle request and an end-of-call clip of one play
+ * land within seconds of each other under one game; an hour-long session of
+ * distinct plays does not. Groups are per game, opened by the first clip and
+ * closed 90 seconds later, so back-to-back evenings never chain into one.
+ */
+export function findDuplicates(entries: ClipEntry[]): ClipEntry[][] {
+    const WINDOW_MS = 90_000;
+
+    const byGame = new Map<string, ClipEntry[]>();
+    for (const entry of entries) {
+        const list = byGame.get(entry.game) ?? [];
+        list.push(entry);
+        byGame.set(entry.game, list);
+    }
+
+    const groups: ClipEntry[][] = [];
+
+    for (const list of byGame.values()) {
+        const sorted = [...list].sort((a, b) => a.modified - b.modified);
+
+        let run: ClipEntry[] = [];
+        for (const entry of sorted) {
+            if (run.length && entry.modified - run[0].modified > WINDOW_MS) {
+                if (run.length > 1) groups.push(run);
+                run = [];
+            }
+            run.push(entry);
+        }
+
+        if (run.length > 1) groups.push(run);
+    }
+
+    return groups.sort((a, b) => b[0].modified - a[0].modified);
+}
+
 /**
  * Something readable out of anything that was thrown.
  *

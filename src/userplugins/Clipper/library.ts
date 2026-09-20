@@ -83,6 +83,12 @@ export interface ClipMeta {
      * the moment that caused it. Only what arrived while the buffer ran.
      */
     chat?: ChatLine[];
+    /**
+     * Pinned to the top of the library, and spared by the automatic cleanup.
+     *
+     * Absent means unpinned, like every clip saved before this existed.
+     */
+    pinned?: boolean;
 }
 
 interface LibraryDocument {

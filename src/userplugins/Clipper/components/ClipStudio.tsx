@@ -121,7 +121,7 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
+import { findDuplicates, formatBytes, formatTime, type ClipEntry } from "../utils";
 import { fromMeta, mutedFraction, VOICE_HZ, voiceDuckAt, voiceGainOf, voiceLevelsTouched, type VoiceTrack } from "../voice";
 import { createVoiceBand, type VoiceBand } from "../voiceBand";
 import { forgetVoiceMixes, type VoiceMix, voiceMixFor } from "../voiceMix";
@@ -2268,6 +2268,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [picked, setPicked] = useState("");
     const [renaming, setRenaming] = useState("");
     const [thumbs, setThumbs] = useState<Record<string, string>>({});
+    const [dupes, setDupes] = useState<ClipEntry[][] | null>(null);
+    const [dupeKeep, setDupeKeep] = useState<Record<string, boolean>>({});
 
     /*
      * Where the playhead is, and how long the file under it runs.
@@ -2710,10 +2712,71 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const categoryOf = (name: string) => meta[name]?.game?.trim() || UNCATEGORISED;
 
     const needle = search.trim().toLowerCase();
-    const shown = (clips ?? []).filter(c =>
-        (!category || categoryOf(c.name) === category)
-        && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
-    );
+    const shown = (clips ?? [])
+        .filter(c =>
+            (!category || categoryOf(c.name) === category)
+            && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
+        )
+        // Pinned clips first, newest first inside each half.
+        .sort((a, b) => Number(meta[b.name]?.pinned ?? false) - Number(meta[a.name]?.pinned ?? false));
+
+    /** Pins or unpins the picked clip. Pinned clips top the list and skip cleanup. */
+    const onTogglePin = async () => {
+        if (!picked) return;
+
+        try {
+            await setMeta(picked, { pinned: !meta[picked]?.pinned });
+            setMetaState({ ...await readMeta() });
+        } catch (e) {
+            logger.warn("Pin failed", e);
+            toast("Could not pin that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Groups the listed clips into same-moment duplicates, largest kept by default. */
+    const findDupes = () => {
+        const found = findDuplicates((clips ?? []).map(c => ({
+            name: c.name,
+            size: c.size,
+            modified: c.modified,
+            game: categoryOf(c.name)
+        })));
+
+        const keep: Record<string, boolean> = {};
+        for (let gi = 0; gi < found.length; gi++) {
+            const biggest = found[gi].reduce((a, b) => (b.size > a.size ? b : a)).name;
+            for (const entry of found[gi]) keep[`${gi}:${entry.name}`] = entry.name === biggest;
+        }
+
+        setDupeKeep(keep);
+        setDupes(found);
+
+        if (!found.length) toast("No duplicates found", Toasts.Type.MESSAGE);
+    };
+
+    /** Trashes every duplicate left unchecked. */
+    const deleteUncheckedDupes = async () => {
+        if (!dupes?.length) return;
+
+        let removed = 0;
+        for (let gi = 0; gi < dupes.length; gi++) {
+            for (const entry of dupes[gi]) {
+                if (dupeKeep[`${gi}:${entry.name}`]) continue;
+
+                try {
+                    await trashClip(entry.name);
+                    removed++;
+                } catch (e) {
+                    logger.warn("Could not delete a duplicate", entry.name, e);
+                }
+            }
+        }
+
+        setDupes(null);
+        await refreshClips("");
+        void refreshTrash();
+        toast(removed ? `Deleted ${removed} duplicate${removed === 1 ? "" : "s"} (in the trash)` : "Nothing deleted", Toasts.Type.MESSAGE);
+    };
 
     /** Rereads the trash: what is waiting, and what expired since. */
     const refreshTrash = async () => {
@@ -5713,6 +5776,49 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                             Best of the evening…
                         </button>
 
+                        <button
+                            className="vc-clipper-side-clip vc-clipper-add"
+                            disabled={busy || !(clips ?? []).length}
+                            title="Group clips that look like the same moment saved twice"
+                            onClick={() => findDupes()}
+                        >
+                            Find duplicates…
+                        </button>
+
+                        {!!dupes && (
+                            <div className="vc-clipper-silence">
+                                <div className="vc-clipper-silence-head">
+                                    <span>{dupes.length ? "Uncheck what goes - largest kept by default" : "Same moment, saved twice"}</span>
+                                    <button disabled={busy} onClick={() => setDupes(null)}>Close</button>
+                                </div>
+                                {!dupes.length && <div className="vc-clipper-note">No duplicates.</div>}
+                                {dupes.map((group, gi) => (
+                                    <div key={gi}>
+                                        {group.map(entry => {
+                                            const k = `${gi}:${entry.name}`;
+
+                                            return (
+                                                <label key={entry.name} className="vc-clipper-silence-row">
+                                                    <input
+                                                        type="checkbox"
+                                                        disabled={busy}
+                                                        checked={dupeKeep[k] ?? false}
+                                                        onChange={() => setDupeKeep(prev => ({ ...prev, [k]: !prev[k] }))}
+                                                    />
+                                                    <span>{entry.name} ({formatBytes(entry.size)})</span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                ))}
+                                {!!dupes.length && (
+                                    <div className="vc-clipper-silence-actions">
+                                        <button className="vc-clipper-studio-ok" disabled={busy} onClick={() => void deleteUncheckedDupes()}>Delete unchecked</button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         <div className="vc-clipper-field">
                             <label>
                                 <span>Montage length</span>
@@ -5818,7 +5924,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         <div className="vc-clipper-clip-text">
                                             <div className="vc-clipper-name">{clip.name}</div>
                                             <div className="vc-clipper-meta">
-                                                {formatBytes(clip.size)} - {categoryOf(clip.name)}
+                                                {meta[clip.name]?.pinned ? "Pinned - " : ""}{formatBytes(clip.size)} - {categoryOf(clip.name)}
                                                 {marks ? ` - ${marks} marker${marks === 1 ? "" : "s"}` : ""}
                                             </div>
                                         </div>
@@ -5861,6 +5967,13 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         </button>
                                     )}
                                     <button disabled={busy} title="Rename the file" onClick={() => setRenaming(picked)}>Rename</button>
+                                    <button
+                                        disabled={busy}
+                                        title={meta[picked]?.pinned ? "Unpin it: back in date order, cleanup applies again" : "Pin it to the top and spare it from cleanup"}
+                                        onClick={() => void onTogglePin()}
+                                    >
+                                        {meta[picked]?.pinned ? "Unpin" : "Pin"}
+                                    </button>
                                     <button
                                         className={confirmDelete ? "vc-clipper-danger" : ""}
                                         disabled={busy}

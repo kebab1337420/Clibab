@@ -182,6 +182,19 @@ export const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         component: SaveDirectoryInput
     },
+    autoCleanup: {
+        type: OptionType.BOOLEAN,
+        description: "Move clips older than a while to the trash automatically. Pinned clips are spared",
+        default: false
+    },
+    autoCleanupDays: {
+        hidden: () => !settings.store.autoCleanup,
+        type: OptionType.SLIDER,
+        description: "Days a clip may sit before it is trashed",
+        markers: [7, 14, 30, 60, 90],
+        default: 30,
+        stickToMarkers: true
+    },
     notifications: {
         type: OptionType.BOOLEAN,
         description: "Show a desktop notification when a clip is saved",
