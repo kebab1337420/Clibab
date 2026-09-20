@@ -80,6 +80,8 @@ async function cut(action: StudioAction): Promise<Outcome> {
         game: meta?.game ?? "",
         tags: meta?.tags,
         markers,
+        // Labels point at offsets that no longer exist after a cut.
+        markerLabels: [],
         taggedAt: Date.now()
     });
 
