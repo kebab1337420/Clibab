@@ -73,15 +73,6 @@ interface TimedChunk {
 const MEMORY_WATCH_MS = 60_000;
 
 /**
- * How much the client has to have grown, in megabytes, to earn another line.
- *
- * A high water mark rather than a reading a minute: the point of the log is a
- * shape over hours, and a client that breathes twenty megabytes either way says
- * nothing worth a line.
- */
-const MEMORY_STEP_MB = 128;
-
-/**
  * A single process this big is the one about to take the client down with it.
  *
  * Well under what a 64-bit process can address, and well over anything a client
@@ -1645,11 +1636,12 @@ class ClipRecorder {
      * appended to a line that fired on a new heap peak, so on a flat heap they
      * were never sampled at all.
      *
-     * So: every process, every minute, from the main process, and a line only
-     * when the client as a whole has taken another `MEMORY_STEP_MB`. Each line
-     * names the process that has grown most since the buffer was armed and how
-     * fast, which is what tells a renderer leak apart from a GPU one or a media
-     * helper one - and those three are fixed in three different places.
+     * So: every process, every minute, from the main process, growth or not.
+     * Each line names the process that has grown most since the buffer was
+     * armed and how fast, which is what tells a renderer leak apart from a
+     * GPU one or a media helper one - and those three are fixed in three
+     * different places. The every-minute cadence doubles as a heartbeat:
+     * a log that stops dead brackets a renderer death to the minute.
      */
     private watchMemory(): void {
         this.stopMemoryWatch();
@@ -1661,9 +1653,6 @@ class ClipRecorder {
         const first = new Map<string, number>();
 
         let startedAt = 0;
-
-        /** The client total behind the last line written, so only growth talks. */
-        let reported = 0;
 
         this.memoryTicker = setInterval(() => {
             void (async () => {
@@ -1695,9 +1684,10 @@ class ClipRecorder {
 
                 const swollen = processes.find(p => p.mb >= MEMORY_WARN_MB);
 
-                // Growth, or a process already big enough to end the session.
-                if (!swollen && total < reported + MEMORY_STEP_MB) return;
-                reported = total;
+                // Every minute, growth or not: a heartbeat is what brackets
+                // the next self-reload. A log that stops dead says the
+                // renderer died; a log that carries on through a gray screen
+                // says the compositor blinked and the page survived it.
 
                 const hours = Math.max(MEMORY_WATCH_MS / 3_600_000, (at - startedAt) / 3_600_000);
                 const biggest = processes.slice(0, 5).map(p => `${p.type} ${p.mb}MB`).join(", ");
