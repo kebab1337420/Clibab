@@ -154,10 +154,29 @@ try {
 finally { Pop-Location }
 
 $files = [ordered] @{}
+
+# Hashes are taken over LF-normalized bytes for text files: git hands out LF
+# while a Windows checkout holds CRLF, and the manifest has to match what the
+# raw hosts serve no matter which side hashed it. Binaries hash as-is: a 0D0A
+# byte pair inside them is data, not a line ending.
+function Get-StableHash([string] $path) {
+    $bytes = [IO.File]::ReadAllBytes($path)
+
+    if ([IO.Path]::GetExtension($path) -in ".bat", ".ps1", ".js", ".css", ".txt", ".json", ".md") {
+        $text = [Text.Encoding]::UTF8.GetString($bytes) -replace "`r`n", "`n"
+        $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+    }
+
+    $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+
+    return @{ size = $bytes.Length; sha256 = ([BitConverter]::ToString($hash) -replace '-', '').ToLower() }
+}
+
 Get-ChildItem $prebuilt -File | Sort-Object Name | ForEach-Object {
+    $entry = Get-StableHash $_.FullName
     $files[$_.Name] = [ordered] @{
-        size   = $_.Length
-        sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+        size   = $entry.size
+        sha256 = $entry.sha256
     }
 }
 
@@ -168,10 +187,10 @@ $root = [ordered] @{}
 foreach ($name in @("install.bat", "VRinstaller.bat")) {
     $file = Join-Path $repo $name
     if (Test-Path $file) {
-        $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+        $entry = Get-StableHash $file
         $root[$name] = [ordered] @{
-            size   = (Get-Item $file).Length
-            sha256 = $hash
+            size   = $entry.size
+            sha256 = $entry.sha256
         }
     }
 }

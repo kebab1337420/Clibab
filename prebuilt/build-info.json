@@ -4,7 +4,7 @@
   "plugin": "Clipper",
   "clipperVersion": "6.3.0",
   "clipperCommit": "ef7a34d",
-  "builtAt": "2026-09-21T00:29:37",
+  "builtAt": "2026-09-21T00:55:54",
   "files": {
     "discord-voice-capture.exe": {
       "size": 2014720,
@@ -61,12 +61,12 @@
   },
   "root": {
     "install.bat": {
-      "size": 6078,
-      "sha256": "e3e9d0d8c0a22a63d0613af3dabd2fe6487aad57d6ceccae089aeaf197910e70"
+      "size": 5900,
+      "sha256": "0596b052bf12dc947285aefdf06c584e23e4bf6ae09180e26b0f26b238c46efb"
     },
     "VRinstaller.bat": {
-      "size": 18677,
-      "sha256": "08b342fce42187cff5811ea5a266a12df15249bd9e479f96903ae7cb1e2e34d1"
+      "size": 18190,
+      "sha256": "e01159b781f32b5f5256220fb11756fd993d964f4660fb96e5e1472ecbe8591e"
     }
   }
 }
