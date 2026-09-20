@@ -42,7 +42,7 @@ const READY_MS = 2500;
  * Failure is not worth reporting: the library falls back to a placeholder, and
  * a clip without a picture is not a clip that was lost.
  */
-export async function writeThumbnail(blob: Blob, name: string): Promise<void> {
+export async function writeThumbnail(blob: Blob, name: string, at = 1): Promise<void> {
     if (!(IS_DISCORD_DESKTOP || IS_VESKTOP)) return;
 
     const url = URL.createObjectURL(blob);
@@ -53,7 +53,7 @@ export async function writeThumbnail(blob: Blob, name: string): Promise<void> {
         video.preload = "auto";
         video.src = url;
 
-        await frameReady(video);
+        await frameReady(video, Math.max(0, at));
 
         const width = Math.min(THUMB_WIDTH, video.videoWidth || THUMB_WIDTH);
         const height = Math.round(width * (video.videoHeight || 9) / (video.videoWidth || 16));
@@ -90,10 +90,12 @@ export async function writeThumbnail(blob: Blob, name: string): Promise<void> {
 /**
  * Waits for a frame worth showing.
  *
- * A second in, so a clip that opens on a fade is not represented by black, but
- * whatever has been decoded is taken if the seek does not land in time.
+ * Seeks to `at` so a chosen moment can stand for the clip, falling back to
+ * whatever has been decoded: a live-recorded clip carries no duration, so
+ * its seeks can be refused outright and the wait would run to the end of
+ * the timeout every single time.
  */
-function frameReady(video: HTMLVideoElement): Promise<void> {
+function frameReady(video: HTMLVideoElement, at: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
         let settled = false;
         const settle = (error?: unknown) => {
@@ -110,10 +112,13 @@ function frameReady(video: HTMLVideoElement): Promise<void> {
         video.onseeked = () => settle();
         video.onloadeddata = () => {
             try {
-                video.currentTime = 1;
+                video.currentTime = at;
             } catch {
                 settle();
             }
+        };
+    });
+}
         };
     });
 }
