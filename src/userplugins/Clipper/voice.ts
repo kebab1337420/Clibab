@@ -572,6 +572,17 @@ const DUCK_AHEAD = 1;
 const MUTE_FLOOR = 0.18;
 
 /**
+ * How far down a mute may take the speech band when the muted person is the
+ * only one in it.
+ *
+ * The floor above exists to protect the other voices sharing the band; with
+ * nobody else audible there is nothing to hollow out, so the notch can go
+ * all the way. The game still plays through - this is the speech band, not
+ * the mix - which is what makes zero honest here and wrong everywhere else.
+ */
+const MUTE_SOLO = 0;
+
+/**
  * The same, for somebody who has been muted outright.
  *
  * 600ms behind and 400ms ahead. Wider than the duck because the flag is not a
@@ -727,17 +738,21 @@ export function voiceDuckAt(
         if (!silencedAt(track, seconds)) continue;
 
         /*
-         * No exception for "but somebody else was talking too".
+         * Alone in the band, on the same window the mute itself reads: no
+         * other track audible means nothing audible but them (and the game,
+         * which lives outside the band), so the notch goes all the way
+         * instead of stopping at the floor.
          *
-         * There was one, behind a setting, and it made the mute useless: on one
-         * mixed signal the only way to keep the other voice is to keep the
-         * muted one under it, so the setting turned every overlapping moment -
-         * which is most of a conversation - into the muted person still being
-         * heard. The floor pays for that differently: whoever talks across them
-         * loses 15dB of the band they share for those instants and keeps the
-         * rest, instead of losing all of it.
+         * No exception for overlaps stays as it was: two voices are the same
+         * samples, and keeping the other one still means keeping the muted
+         * one under it. The comment that used to live here said exactly that,
+         * and it is still true - this branch is only the instants it is not.
          */
-        return MUTE_FLOOR;
+        const alone = !tracks.some(other =>
+            other.id !== track.id && levelAt(other, seconds, MUTE_BACK, MUTE_AHEAD) > 0
+        );
+
+        return alone ? MUTE_SOLO : MUTE_FLOOR;
     }
 
     const heard: { id: string; level: number; }[] = [];
