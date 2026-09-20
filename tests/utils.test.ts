@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
 import { CAPTURE_PRESETS, chaptersOf, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
 
 test("capture presets stay within sane bounds", () => {
@@ -92,6 +93,29 @@ test("valid shortcuts still parse and match their modifiers", () => {
     assert.equal(parseKeybind(""), null);
 });
 
+test("duplicates are same-game saves seconds apart", () => {
+    const at = (s: number) => ({ size: 10, modified: s * 1000, game: "CS2", name: `c${s}` });
+
+    assert.deepEqual(findDuplicates([]), []);
+    assert.deepEqual(findDuplicates([at(0)]), []);
+
+    // Save, POV request and auto-clip of one play.
+    const burst = findDuplicates([at(0), at(20), at(70)]);
+    assert.equal(burst.length, 1);
+    assert.deepEqual(burst[0].map(e => e.name), ["c0", "c20", "c70"]);
+
+    // Different games never group, however close.
+    const other = { size: 10, modified: 10_000, game: "LoL", name: "x" };
+    assert.deepEqual(findDuplicates([at(0), other]), []);
+
+    // An hour-long session does not chain into one group.
+    const evening = [0, 100, 200, 300, 400].map(at);
+    assert.deepEqual(findDuplicates(evening), []);
+
+    // Two bursts stay two groups, newest first.
+    const two = findDuplicates([at(0), at(30), at(1000), at(1030)]);
+    assert.equal(two.length, 2);
+    assert.deepEqual(two[0].map(e => e.name), ["c1000", "c1030"]);
 test("chapters read like chapters", () => {
     assert.equal(chaptersOf([]), "");
     assert.equal(chaptersOf([75], ["a kill in Counter-Strike 2"]), "00:00 Start\n01:15 a kill in Counter-Strike 2");

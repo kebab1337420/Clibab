@@ -16,6 +16,7 @@ import definePlugin from "@utils/types";
 import { createRoot, Toasts } from "@webpack/common";
 
 import { attachMenuPatch } from "./attachMenu";
+import { cleanupOldClips } from "./clips";
 import { ClipperChatButton, ClipperIcon } from "./components/ClipperChatButton";
 import { ClipperOverlay } from "./components/ClipperOverlay";
 import { encoderSummary, probeEncoders } from "./encoders";
@@ -286,6 +287,19 @@ export default definePlugin({
         mountOverlay();
 
         if (settings.store.autoStart) recorder.start();
+
+        // Folder hygiene, once per launch and off the critical path: old
+        // clips go to the folder's own trash, so this is undoable for 7 days.
+        if (settings.store.autoCleanup) {
+            void cleanupOldClips(settings.store.autoCleanupDays * 86400 * 1000)
+                .then(removed => {
+                    if (removed.length) {
+                        logger.info(`Cleaned ${removed.length} clips older than ${settings.store.autoCleanupDays} days`, removed);
+                        toast(`Cleaned ${removed.length} old clip${removed.length === 1 ? "" : "s"} (in the trash)`, Toasts.Type.MESSAGE, 8000);
+                    }
+                })
+                .catch(e => logger.warn("Automatic cleanup failed", e));
+        }
 
         // Not awaited: an unreachable GitHub must cost the launch nothing.
         void checkAtLaunch();

@@ -155,6 +155,43 @@ export function emptyTrash(): Promise<void> {
     return Native.emptyTrash(settings.store.saveDirectory);
 }
 
+/**
+ * Moves clips older than `maxAgeMs` to the trash, pinned ones spared.
+ *
+ * Returns what went. Old meta entries for clips that vanished outside the
+ * plugin (file explorer) are left to pruneMeta, which already owns that.
+ */
+export async function cleanupOldClips(maxAgeMs: number): Promise<string[]> {
+    if (!CLIPS_AVAILABLE || !(maxAgeMs > 0)) return [];
+
+    const cutoff = Date.now() - maxAgeMs;
+
+    let found: StoredClip[];
+    try {
+        found = await listClips();
+    } catch (e) {
+        logger.warn("Could not list clips for cleanup", e);
+        return [];
+    }
+
+    const meta = await readMeta();
+    const removed: string[] = [];
+
+    for (const clip of found) {
+        if (clip.modified >= cutoff) continue;
+        if (meta[clip.name]?.pinned) continue;
+
+        try {
+            await trashClip(clip.name);
+            removed.push(clip.name);
+        } catch (e) {
+            logger.warn("Could not clean up an old clip", clip.name, e);
+        }
+    }
+
+    return removed;
+}
+
 export function renameClip(name: string, next: string): Promise<string> {
     return Native.renameClip(settings.store.saveDirectory, name, next);
 }
