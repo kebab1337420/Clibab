@@ -786,7 +786,7 @@ function CaptureOptions() {
                     value={clipLength}
                     onChange={e => (settings.store.clipLength = Number(e.currentTarget.value))}
                 />
-                <div className="vc-clipper-value" title="Estimated memory the buffer holds at these settings">{clipLength} s (≈ {estimate})</div>
+                <div className="vc-clipper-value" title="Estimated footage held (older chunks spill to disk past 256MB)">{clipLength} s (≈ {estimate})</div>
             </Field>
         </div>
     );

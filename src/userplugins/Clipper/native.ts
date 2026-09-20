@@ -15,6 +15,7 @@ import { createHash } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet, request as httpsRequest } from "https";
+import { tmpdir } from "os";
 import { basename, extname, isAbsolute, join } from "path";
 
 import { closeFeeds, type FeedStatus, type GameEvent, startFeeds, status as feedStatus, waitForFeedEvent } from "./gameFeeds";
@@ -754,6 +755,95 @@ export function emptyTrash(_: IpcMainInvokeEvent, dir: string): void {
     }
 
     writeTrashIndex(trash, {});
+}
+
+/**
+ * Oldest buffer chunks, parked on disk instead of RAM.
+ *
+ * Past a quarter gigabyte the rolling buffer stops being memory: the oldest
+ * whole-second chunks are written here as they age out, read back when a save
+ * assembles them, and dropped with the prune. A rename-free layout - one file
+ * per chunk, ids minted by the renderer against a strict pattern, so no path
+ * passed over IPC can ever escape this folder.
+ */
+const SPILL_CHUNK_CAP = 32 * 1024 * 1024;
+
+function spillDir(): string {
+    const dir = join(tmpdir(), `clipper-spill-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+
+    return dir;
+}
+
+function spillPath(id: string): string {
+    if (!/^spill-\d+-[a-z0-9]+$/i.test(id)) throw new Error("That is not a spill file");
+
+    return join(spillDir(), `${id}.frag`);
+}
+
+export function spillWrite(_: IpcMainInvokeEvent, id: string, data: Uint8Array): void {
+    if (data.length > SPILL_CHUNK_CAP) throw new Error("That spill chunk is too large");
+
+    writeFileSync(spillPath(id), Buffer.from(data));
+}
+
+export function spillRead(_: IpcMainInvokeEvent, id: string): Uint8Array {
+    const path = spillPath(id);
+    const fd = openSync(path, "r");
+
+    try {
+        const { size } = fstatSync(fd);
+        if (size > SPILL_CHUNK_CAP) throw new Error("That spill chunk is too large");
+
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
+}
+
+export function spillDrop(_: IpcMainInvokeEvent, ids: string[]): void {
+    for (const id of ids) {
+        try {
+            unlinkSync(spillPath(id));
+        } catch {
+            // Bad id, or already gone with a prune.
+        }
+    }
+}
+
+/** Drops this session's spill folder, plus crashed sessions older than a day. */
+export function spillClear(): void {
+    const mine = `clipper-spill-${process.pid}`;
+
+    let entries: string[];
+    try {
+        entries = readdirSync(tmpdir());
+    } catch {
+        return;
+    }
+
+    for (const entry of entries) {
+        if (!entry.startsWith("clipper-spill-")) continue;
+
+        const full = join(tmpdir(), entry);
+
+        if (entry !== mine) {
+            let age = 0;
+            try {
+                age = Date.now() - statSync(full).mtimeMs;
+            } catch {
+                continue;
+            }
+
+            if (age < 24 * 3600 * 1000) continue;
+        }
+
+        try {
+            rmSync(full, { recursive: true, force: true });
+        } catch {
+            // Held open by a save still reading it back.
+        }
+    }
 }
 
 /** Moves a clip to the trash, so a mis-click stays undoable. */
