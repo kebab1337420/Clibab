@@ -92,6 +92,16 @@ const AUTO_SAVE_MS = 120_000;
 const AUTO_SAVE_SECONDS = 30;
 
 /**
+ * Minimum delay between two game-triggered restarts.
+ *
+ * Game detection flaps when alt-tabbing (same game under another name,
+ * launcher versus game), and every restart tears the capture, the encoder
+ * and the native engine down and back up. That churn, repeated, is how a
+ * buffer evening ends in a renderer reload.
+ */
+const GAME_RESTART_COOLDOWN_MS = 10_000;
+
+/**
  * Largest rolling buffer held in memory, in bytes.
  *
  * Time alone lets a high bitrate hold gigabytes (50Mbps x 300s is ~1.9GB
@@ -383,6 +393,8 @@ class ClipRecorder {
     private autoClipPending = false;
     /** Poll that writes down what the client is holding. See `watchMemory`. */
     private memoryTicker: ReturnType<typeof setInterval> | null = null;
+    /** Whether this buffer already warned about a swollen client. Once per buffer. */
+    private memoryWarned = false;
     private nativeResetTicker: ReturnType<typeof setInterval> | null = null;
     private nativeResetTimeout: ReturnType<typeof setTimeout> | null = null;
     /** Invalidates an async native arm when the buffer is stopped or restarted. */
@@ -432,6 +444,9 @@ class ClipRecorder {
 
     /** Whether the buffer has ever started this session. The first pick starts it. */
     private startedOnce = false;
+
+    /** Last game-triggered restart, for the flap cooldown below. */
+    private lastGameRestart = 0;
 
     /** Game-change watch, so per-game profiles apply mid-buffer. */
     private unwatchGame: (() => void) | null = null;
@@ -782,6 +797,7 @@ class ClipRecorder {
 
             // A game launched after the buffer moves the capture onto its screen.
             this.followGame();
+            this.memoryWarned = false;
             this.watchMemory();
 
             // And the room is listened to, so the moments nobody had a free hand
@@ -1515,8 +1531,20 @@ class ClipRecorder {
             this.pickedByHand = false;
 
             // Out of the store's own dispatch: the restart drops this listener.
-            queueMicrotask(() => void this.restart());
+            queueMicrotask(() => this.restartForGame(game));
         });
+    }
+
+    /** Restart for a game change, at most once per cooldown. */
+    private restartForGame(game: string): void {
+        const now = Date.now();
+        if (now - this.lastGameRestart < GAME_RESTART_COOLDOWN_MS) {
+            logger.info(`Game changed again within seconds (${game}) - keeping the running buffer`);
+            return;
+        }
+
+        this.lastGameRestart = now;
+        void this.restart();
     }
 
     /**
@@ -1603,6 +1631,14 @@ class ClipRecorder {
 
                 if (swollen) logger.warn(`${line} - ${swollen.type} is the one about to go, a reload is what comes next`);
                 else logger.info(line);
+
+                // Said out loud once per buffer: past this point Chromium kills
+                // the renderer for an allocation failure, which is the
+                // self-reload with no error and no console left behind.
+                if (swollen && !this.memoryWarned) {
+                    this.memoryWarned = true;
+                    toast(`Discord is running out of memory (${swollen.type} at ${swollen.mb}MB) - restart Discord soon or it will reload itself`, Toasts.Type.FAILURE, 12000);
+                }
             })();
         }, MEMORY_WATCH_MS);
     }
@@ -1619,7 +1655,7 @@ class ClipRecorder {
 
         if (applyProfile(game)) {
             toast(`Profile for ${game.trim().slice(0, 60)} applied`, Toasts.Type.MESSAGE);
-            void this.restart();
+            if (this.isRecording) this.restartForGame(game);
         }
     }
 
