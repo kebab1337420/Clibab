@@ -2694,9 +2694,12 @@ class ClipRecorder {
             await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
             void writeThumbnail(cut, saved);
 
-            // Only once the replacement is safely on disk.
+            // Only once the replacement is safely on disk. The untrimmed
+            // original goes to the folder trash like any other delete, so a
+            // cut that took too much is restorable for 7 days.
             try {
-                await Native.deleteClip(settings.store.saveDirectory, last.name);
+                const meta = (await readMeta())[last.name] ?? null;
+                await Native.trashClip(settings.store.saveDirectory, last.name, meta ? JSON.stringify(meta) : null);
                 await dropMeta(last.name);
             } catch (e) {
                 logger.warn("Could not remove the untrimmed clip", e);

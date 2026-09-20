@@ -327,6 +327,8 @@ export interface CapturePreset {
     resolution: number;
     bitrate: number;
     length: number;
+    /** Container value, as stored: presets are whole setups, not four knobs. */
+    container: string;
 }
 
 /**
@@ -335,9 +337,9 @@ export interface CapturePreset {
  * the 512MB the buffer refuses to cross.
  */
 export const CAPTURE_PRESETS: CapturePreset[] = [
-    { label: "Eco", fps: 30, resolution: 720, bitrate: 4, length: 30 },
-    { label: "Balanced", fps: 60, resolution: 1080, bitrate: 12, length: 60 },
-    { label: "Quality", fps: 60, resolution: 1440, bitrate: 20, length: 90 }
+    { label: "Eco", fps: 30, resolution: 720, bitrate: 4, length: 30, container: "mp4-h264" },
+    { label: "Balanced", fps: 60, resolution: 1080, bitrate: 12, length: 60, container: "mp4-h264" },
+    { label: "Quality", fps: 60, resolution: 1440, bitrate: 20, length: 90, container: "mp4-h264" }
 ];
 
 /** One clip for the duplicate hunt: size, filesystem time, filed category. */
