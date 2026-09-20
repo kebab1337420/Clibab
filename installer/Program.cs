@@ -330,7 +330,8 @@ internal static class Program
                 if (zipPath is null) throw new InvalidOperationException("No release archive was downloaded.");
                 temporaryExtractDir = Path.Combine(Path.GetTempPath(), "clipper-installer-" + Guid.NewGuid().ToString("N") + "-extract");
                 Directory.CreateDirectory(temporaryExtractDir);
-                ExtractChecked(zipPath, temporaryExtractDir, fraction => Report(50 + (int)(fraction * 15)));
+                status.Text = "Preparing the installer...";
+                ExtractChecked(zipPath, temporaryExtractDir);
 
                 // The bundle-only asset wraps itself in one folder, the way
                 // GitHub's source archive does, so either layout lands here.
@@ -463,43 +464,11 @@ internal static class Program
         }
 
         /// <summary>
-        /// Downloads with the bar moving on the announced length, in megabytes
-        /// when the server names none.
-        /// </summary>
-        private async Task DownloadAsync(HttpClient client, string downloadUrl, string temporaryZip, string version)
-        {
-            using var download = await client.SendAsync(
-                new HttpRequestMessage(HttpMethod.Get, downloadUrl),
-                HttpCompletionOption.ResponseHeadersRead);
-            download.EnsureSuccessStatusCode();
-
-            long? total = download.Content.Headers.ContentLength;
-
-            await using var input = await download.Content.ReadAsStreamAsync();
-            await using var output = File.Create(temporaryZip);
-
-            var buffer = new byte[81920];
-            long received = 0;
-            int read;
-
-            while ((read = await input.ReadAsync(buffer)) > 0)
-            {
-                await output.WriteAsync(buffer.AsMemory(0, read));
-                received += read;
-
-                if (total > 0)
-                    Report(5 + (int)(received * 45 / total.Value), $"Downloading Clipper {version}... {received * 100 / total.Value}%");
-                else
-                    Report(5, $"Downloading Clipper {version}... {received / 1048576}MB");
-            }
-        }
-
-        /// <summary>
         /// Extracts with the traversal and size checks ExtractToDirectory
         /// does not do: no absolute paths, no parent escapes, and a cap on
         /// the unpacked total so a zip bomb dies before it lands.
         /// </summary>
-        private static void ExtractChecked(string zipPath, string extractDir, Action<double>? progress = null)
+        private static void ExtractChecked(string zipPath, string extractDir)
         {
             const long MaxUnpackedBytes = 2L * 1024 * 1024 * 1024;
 
@@ -517,17 +486,7 @@ internal static class Program
                     throw new InvalidOperationException("The release archive unpacks to more than it ever should.");
             }
 
-            // Directories have no bytes and nothing to write: entries only.
-            var files = archive.Entries.Where(entry => entry.Name.Length > 0).ToList();
-            int done = 0;
-            int count = Math.Max(1, files.Count);
-            foreach (var entry in files)
-            {
-                string destination = Path.Combine(extractDir, entry.FullName);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                entry.ExtractToFile(destination, overwrite: true);
-                progress?.Invoke((double)++done / count);
-            }
+            ZipFile.ExtractToDirectory(zipPath, extractDir);
         }
 
         /// <summary>
@@ -588,7 +547,6 @@ internal static class Program
             foreach (var entry in listed)
             {
                 VerifyFile(Path.Combine(Path.Combine(Path.Combine(repoRoot, "prebuilt"), "dist"), entry.Name), entry.Value);
-                progress?.Invoke((double)++done / Math.Max(1, listed.Count));
             }
 
             // Only what the install actually runs, by exact name: anything else
@@ -597,8 +555,8 @@ internal static class Program
             {
                 foreach (var name in new[] { "install.bat", "VRinstaller.bat" })
                 {
-                    if (root.TryGetProperty(name, out var published))
-                        VerifyFile(Path.Combine(repoRoot, name), published);
+                    if (root.TryGetProperty(name, out var listed))
+                        VerifyFile(Path.Combine(repoRoot, name), listed);
                 }
             }
         }
