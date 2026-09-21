@@ -52,6 +52,10 @@ const DEDUPE_MS = 250;
  * sees the key. That is not guaranteed on every setup, hence the guard.
  */
 export function runShortcut(action: ShortcutAction): boolean {
+    // The main process only ever answers the five known actions, but the pump
+    // also reads this straight off IPC: anything else is junk, not a shortcut.
+    if (!(action in ACTIONS)) return false;
+
     const now = Date.now();
     if (now - (lastFired.get(action) ?? 0) < DEDUPE_MS) return false;
 

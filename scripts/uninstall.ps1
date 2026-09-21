@@ -72,7 +72,12 @@ if ($dataDirs -and (Get-Process -Name "Vesktop", "Equibop" -ErrorAction Silently
         if ($state.vencordDir -ne $dist) { continue }
 
         $state.PSObject.Properties.Remove("vencordDir")
-        $state | ConvertTo-Json -Depth 20 | Set-Content $stateFile -Encoding UTF8
+
+        # Through a temp file: a crash between truncate and write would leave
+        # Vesktop with no state file at all.
+        $temp = "$stateFile.tmp-$PID"
+        $state | ConvertTo-Json -Depth 20 | Set-Content $temp -Encoding UTF8
+        Move-Item $temp $stateFile -Force
         Write-Host "      Vencord Location cleared ($dir) - Vesktop falls back to its own Vencord."
         $restored++
     }
@@ -82,6 +87,17 @@ if ($dataDirs -and (Get-Process -Name "Vesktop", "Equibop" -ErrorAction Silently
 if (-not $KeepBundle -and (Test-Path $InstallDir)) {
     Remove-Item $InstallDir -Recurse -Force
     Write-Host "      Removed $InstallDir"
+}
+
+# ---- SteamVR side ----------------------------------------------------------
+# Lives outside everything above (its own folders, its own settings keys), so
+# the VR installer is the one that knows how to take it back out. Never fatal:
+# most installs never had it.
+$vrInstaller = Join-Path (Split-Path $PSScriptRoot -Parent) "VRinstaller.bat"
+if (Test-Path $vrInstaller) {
+    & cmd /d /c "`"$vrInstaller`" --uninstall" 2>&1 | ForEach-Object { Write-Host "      $_" }
+} else {
+    Write-Host "      No VR installer found; if the VR side was ever installed, run VRinstaller.bat --uninstall."
 }
 
 if ($restored -eq 0) {

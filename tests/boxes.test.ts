@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boxes, descend, find } from "../src/userplugins/Clipper/boxes.ts";
+import { boxes, descend, find, handlerName } from "../src/userplugins/Clipper/boxes.ts";
 import { ascii, box, concat, sized, u32, u64, zeros } from "./mp4box.ts";
 
 /** The walk takes a view of the same bytes it takes. */
@@ -99,4 +99,13 @@ test("descend follows a chain of single children", () => {
     assert.equal(descend(data, view, trak, ["mdia", "nope", "stbl"]), undefined);
     // An empty path is the box itself, which is what makes the walk composable.
     assert.deepEqual(descend(data, view, trak, []), trak);
+});
+
+test("reads the handler name without the padding after it", () => {
+    const payload = concat(zeros(24), ascii("vide"), zeros(4));
+    const data = box("hdlr", payload);
+    const [found] = walk(data);
+
+    assert.equal(found.type, "hdlr");
+    assert.equal(handlerName(data, found), "vide");
 });

@@ -76,6 +76,10 @@ function startWorker(): Worker | null {
         const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
         const created = new Worker(url);
 
+        // Revoked at once: the worker holds its own copy, and the URL would
+        // otherwise sit in the blob store for the rest of the session.
+        URL.revokeObjectURL(url);
+
         created.onmessage = (event: MessageEvent) => {
             const reply = event.data as WorkerReply;
             const entry = pending.get(reply.id);

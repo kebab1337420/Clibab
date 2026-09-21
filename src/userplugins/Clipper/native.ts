@@ -85,10 +85,27 @@ function forbiddenClipRoots(): string[] {
         if (value) roots.push(value);
     }
 
+    // Off Windows the variables above are empty, so the usual homes for
+    // keys, configs and the system get named outright. A clip folder has no
+    // business in any of them on any OS.
+    if (process.platform !== "win32") {
+        const home = process.env.HOME?.trim();
+        if (home) roots.push(home, join(home, ".ssh"), join(home, ".config"));
+        roots.push("/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin");
+    }
+
     try {
         roots.push(bundleDirectory());
     } catch {
         // A checkout without an installed bundle: nothing extra to protect.
+    }
+
+    try {
+        // Discord's own data dir, not all of %APPDATA%: users keep their own
+        // folders there, but nothing that belongs to the client itself.
+        roots.push(app.getPath("userData"));
+    } catch {
+        // Paths unavailable this early: the bundle root above still holds.
     }
 
     return roots;
@@ -253,6 +270,12 @@ export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string
  * a `-1` suffix for a name that is actually free.
  */
 export function releaseClipPath(_: IpcMainInvokeEvent, path: string): void {
+    // Only reservations this plugin hands out: absolute paths to clip-like
+    // files. Deleting anything else from the set is either a no-op or frees
+    // a name somebody else's save is still holding.
+    if (typeof path !== "string" || !isAbsolute(path)) return;
+    if (!clipName(basename(path) ?? "")) return;
+
     reservedClipPaths.delete(path);
 }
 
@@ -307,6 +330,10 @@ export function saveVoiceTrack(_: IpcMainInvokeEvent, dir: string, clip: string,
     const name = voiceName(clip, userId);
     if (!name) return null;
 
+    // One lane is seconds of Opus: anything past this is not a lane but a
+    // buffer handed across IPC whole, and writing it would fill the disk.
+    if (data.length > MAX_VOICE_BYTES) throw new Error("That voice track is too large to write");
+
     const target = join(resolveDirectory(dir), VOICE_DIR);
     mkdirSync(target, { recursive: true });
 
@@ -316,12 +343,28 @@ export function saveVoiceTrack(_: IpcMainInvokeEvent, dir: string, clip: string,
     return path;
 }
 
+/** Largest single voice lane read or written, in bytes. */
+const MAX_VOICE_BYTES = 64 * 1024 * 1024;
+
 /** Reads one of them back. */
 export function readVoiceTrack(_: IpcMainInvokeEvent, dir: string, file: string): Uint8Array {
     const flat = basename(String(file ?? "").replace(/[\\/]/g, "_"));
     if (!flat.toLowerCase().endsWith(".webm") || flat.includes("..")) throw new Error("not a voice track");
 
-    return new Uint8Array(readFileSync(join(resolveDirectory(dir), VOICE_DIR, flat)));
+    const path = join(resolveDirectory(dir), VOICE_DIR, flat);
+    const fd = openSync(path, "r");
+
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_VOICE_BYTES) throw new Error("That voice track is too large to open");
+
+        const data = new Uint8Array(readFileSync(fd));
+        if (data.length > MAX_VOICE_BYTES) throw new Error("That voice track is too large to open");
+
+        return data;
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /** Drops everything recorded for a clip, for when the clip itself goes. */
@@ -935,13 +978,27 @@ export function renameClip(_: IpcMainInvokeEvent, dir: string, name: string, nex
  */
 const LIBRARY_FILE = "clipper-library.json";
 
+/** Largest metadata document read or written: categories, not footage. */
+const MAX_LIBRARY_BYTES = 5 * 1024 * 1024;
+
 /** Raw metadata document, kept opaque here: the renderer owns its shape. */
 export function readLibrary(_: IpcMainInvokeEvent, dir: string): string {
     const path = join(resolveDirectory(dir), LIBRARY_FILE);
     if (!existsSync(path)) return "";
 
     try {
-        return readFileSync(path, "utf8");
+        const fd = openSync(path, "r");
+        try {
+            const { size } = fstatSync(fd);
+            if (size > MAX_LIBRARY_BYTES) return "";
+
+            const data = new Uint8Array(readFileSync(fd));
+            if (data.length > MAX_LIBRARY_BYTES) return "";
+
+            return Buffer.from(data).toString("utf8");
+        } finally {
+            closeSync(fd);
+        }
     } catch {
         // Unreadable or mid-write: the renderer treats this as an empty library
         // rather than losing the clips it is listing.
@@ -952,6 +1009,10 @@ export function readLibrary(_: IpcMainInvokeEvent, dir: string): string {
 export function writeLibrary(_: IpcMainInvokeEvent, dir: string, json: string): void {
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
+
+    if (String(json ?? "").length > MAX_LIBRARY_BYTES) {
+        throw new Error("That library document is too large to write");
+    }
 
     // A metadata file is small, but it is rewritten on every tag change while
     // clips may be recording: write beside it and rename, so a crash mid-write
@@ -1408,6 +1469,12 @@ export function registerShortcuts(_: IpcMainInvokeEvent, binds: Partial<Record<S
     const failed: string[] = [];
 
     for (const [action, accelerator] of Object.entries(binds) as Array<[ShortcutAction, string]>) {
+        // Keys come off IPC: only the five actions exist, and anything else
+        // would register a system-wide bind that fires junk into the pump.
+        if (action !== "save" && action !== "toggle" && action !== "mark" && action !== "pov" && action !== "replay") {
+            continue;
+        }
+
         if (!accelerator) continue;
 
         let ok = false;
@@ -1448,6 +1515,12 @@ export function waitForShortcut(_: IpcMainInvokeEvent, timeoutMs = 30_000): Prom
     const queued = pending.shift();
     if (queued) return Promise.resolve(queued);
 
+    // Clamped: a negative timeout fires at once (busy poll), a huge one parks
+    // a timer for weeks. Overflowed beyond that into a crowded room: polls
+    // past this many mean the other end stopped collecting.
+    const wait = Math.min(120_000, Math.max(1_000, Number(timeoutMs) || 30_000));
+    if (waiters.length > 32) waiters.shift()?.(null);
+
     return new Promise(resolve => {
         let done = false;
 
@@ -1461,7 +1534,8 @@ export function waitForShortcut(_: IpcMainInvokeEvent, timeoutMs = 30_000): Prom
         const timer = setTimeout(() => {
             waiters = waiters.filter(w => w !== settle);
             settle(null);
-        }, timeoutMs);
+        }, wait);
+
 
         waiters.push(settle);
     });

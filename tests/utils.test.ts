@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
-import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind, toAccelerator } from "../src/userplugins/Clipper/utils.ts";
 
 test("capture presets stay within sane bounds", () => {
     assert.ok(CAPTURE_PRESETS.length >= 2);
@@ -91,6 +91,12 @@ test("valid shortcuts still parse and match their modifiers", () => {
     assert.equal(keybindMatches("ctrl+KeyS", event), true);
     assert.equal(keybindMatches("alt+KeyS", event), false);
     assert.equal(parseKeybind(""), null);
+
+    assert.equal(toAccelerator("ctrl+KeyS"), "Control+S");
+    assert.equal(toAccelerator("alt+F10"), "Alt+F10");
+    assert.equal(toAccelerator("ctrl+shift+Digit1"), "Control+Shift+1");
+    assert.equal(toAccelerator(""), "");
+    assert.equal(toAccelerator("ctrl+Foo"), "");
 });
 
 test("duplicates are same-game saves seconds apart", () => {

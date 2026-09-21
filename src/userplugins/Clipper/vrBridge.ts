@@ -540,6 +540,10 @@ export function showPanel(pixels: Uint8Array, width: number, height: number, dwe
     if (!child?.stdin?.writable) return false;
     if (width <= 0 || height <= 0 || pixels.length !== width * height * 4) return false;
 
+    // Bounded before a single byte is written or sent: the C# side caps at
+    // 2048 itself, but only after the pixels have crossed IPC and disk.
+    if (width > 2048 || height > 2048 || pixels.length > 16 * 1024 * 1024) return false;
+
     // Enforced here rather than in C#: a huge dwell would nail the card
     // across the game until the bridge is restarted.
     const dwell = Math.min(10_000, Math.max(1_000, Math.round(dwellMs)));

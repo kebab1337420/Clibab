@@ -397,7 +397,10 @@ internal static class Program
                 }
 
                 Report(82, "Installing Clipper...");
-                await RunBatchAsync(Path.Combine(root, "install.bat"), root);
+                await RunPowerShellAsync(
+                    Path.Combine(root, "scripts", "install-prebuilt.ps1"),
+                    "-PatchClients",
+                    root);
                 Report(92, "Clipper installed.");
 
                 if (steamVr.Checked)
@@ -645,12 +648,19 @@ internal static class Program
 
             // Only what the install actually runs, by exact name: anything else
             // at the root is data, not code, and is not executed either way.
+            // Same for the PowerShell the bats hand off to.
             if (hasRoot)
             {
                 foreach (var name in new[] { "install.bat", "VRinstaller.bat" })
                 {
                     if (root.TryGetProperty(name, out var published))
                         VerifyFile(Path.Combine(repoRoot, name), published);
+                }
+
+                foreach (var name in new[] { "install-prebuilt.ps1", "uninstall.ps1", "install-vesktop.ps1" })
+                {
+                    if (root.TryGetProperty($"scripts/{name}", out var published))
+                        VerifyFile(Path.Combine(Path.Combine(repoRoot, "scripts"), name), published);
                 }
             }
         }
@@ -678,6 +688,30 @@ internal static class Program
             string got = Convert.ToHexString(hasher.ComputeHash(fileStream)).ToLowerInvariant();
             if (got != sha256.ToLowerInvariant())
                 throw new InvalidOperationException($"{name} does not match its published hash.");
+        }
+
+        private static async Task RunPowerShellAsync(string file, string arguments, string workingDirectory)
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{file}\" {arguments}",
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }) ?? throw new InvalidOperationException("Could not start the installer.");
+
+            // Same concurrent drain as the batch runner below: a one-sided read
+            // against a chatty script blocks on a full pipe buffer instead.
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            var output = await outputTask;
+            var error = await errorTask;
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? output : error);
         }
 
         private static async Task RunBatchAsync(string file, string workingDirectory)

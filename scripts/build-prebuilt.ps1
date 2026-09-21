@@ -182,13 +182,25 @@ Get-ChildItem $prebuilt -File | Sort-Object Name | ForEach-Object {
 
 # The scripts the installer runs (install.bat, VRinstaller.bat) are checked
 # against these by the installer itself: verifying the bundle but running
-# unchecked scripts would check the wrong half.
+# unchecked scripts would check the wrong half. Same for the PowerShell the
+# bats hand off to: an install script swapped under a good bundle runs all
+# the same.
 $root = [ordered] @{}
 foreach ($name in @("install.bat", "VRinstaller.bat")) {
     $file = Join-Path $repo $name
     if (Test-Path $file) {
         $entry = Get-StableHash $file
         $root[$name] = [ordered] @{
+            size   = $entry.size
+            sha256 = $entry.sha256
+        }
+    }
+}
+foreach ($name in @("install-prebuilt.ps1", "uninstall.ps1", "install-vesktop.ps1")) {
+    $file = Join-Path $repo "scripts\$name"
+    if (Test-Path $file) {
+        $entry = Get-StableHash $file
+        $root["scripts/$name"] = [ordered] @{
             size   = $entry.size
             sha256 = $entry.sha256
         }

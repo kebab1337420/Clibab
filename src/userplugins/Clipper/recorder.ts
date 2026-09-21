@@ -518,6 +518,9 @@ class ClipRecorder {
      */
     private onTrackEnded: (() => void) | null = null;
 
+    /** A track end that arrived mid-save, honored once the save hands back. */
+    private pendingStop = false;
+
     /**
      * The 500 ms flush timers still armed when a save/stop gives up.
      *
@@ -737,7 +740,10 @@ class ClipRecorder {
                 // A track ending while a save has the state on "saving" would pull
                 // the rug from under the file being written: hold the stop until
                 // the save has handed back, then stop from there.
-                if (this.state === "saving") return;
+                if (this.state === "saving") {
+                    this.pendingStop = true;
+                    return;
+                }
                 void this.stop();
             };
             videoTrack.addEventListener("ended", this.onTrackEnded);
@@ -1787,6 +1793,11 @@ class ClipRecorder {
         this.header = null;
         this.chunks = [];
         this.marks = [];
+        this.pendingStop = false;
+        // The engine's file belongs to a save, not to the buffer: without
+        // this a stop after a pictureless save pins tens of megabytes on the
+        // singleton until the next save asks for them.
+        this.nativeAudio = null;
         this.spillRunning = false;
         this.spillFailed = false;
         void Native.spillClear().catch(() => {});
@@ -2125,6 +2136,13 @@ class ClipRecorder {
                 if (failed) logger.warn("The last clip failed to save; the buffer's state goes back underneath it unchanged");
                 this.setState(this.recorder ? "recording" : "idle");
             }
+
+            // A track end held back for the save: the capture is gone, so a
+            // buffer left "recording" on it would run on nothing.
+            if (this.pendingStop) {
+                this.pendingStop = false;
+                void this.stop();
+            }
         }
 
         return !failed;
@@ -2326,6 +2344,7 @@ class ClipRecorder {
             // leaves the engine half-set-up. Back out of the whole thing rather than
             // let a half-armed engine hold the helper process open with a stuck flag.
             logger.warn("Failed to arm the native clip engine", e);
+            watch.stop();
             disarm();
 
             if (this.consentBound) {
