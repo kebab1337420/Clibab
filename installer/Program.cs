@@ -39,6 +39,14 @@ internal static class Program
             Location = new Point(24, 122)
         };
 
+        private readonly CheckBox cleanReinstall = new()
+        {
+            AutoSize = true,
+            Text = "Clean reinstall (ignore the cache, download fresh)",
+            Checked = false,
+            Location = new Point(24, 213)
+        };
+
         // Install page label, written as each step starts.
         private readonly Label status = new()
         {
@@ -144,9 +152,12 @@ internal static class Program
             panel.Controls.Add(steamVr);
             steamVr.ForeColor = TextBright;
             steamVr.BackColor = Background;
-            panel.Controls.Add(DarkLabel(40, 144, 414, 70,
+            panel.Controls.Add(DarkLabel(40, 144, 414, 66,
                 "The VR bridge, the default controller bindings and the in-headset notifications.\r\n\r\n" +
                 "Needs SteamVR installed and Discord closed while the installer writes the settings."));
+            panel.Controls.Add(cleanReinstall);
+            cleanReinstall.ForeColor = TextBright;
+            cleanReinstall.BackColor = Background;
         }
 
         private void BuildInstallPage()
@@ -300,7 +311,13 @@ internal static class Program
                 using var client = NewClient();
 
                 bool useCache = false;
-                if (File.Exists(cachePath))
+                if (cleanReinstall.Checked)
+                {
+                    // A clean reinstall starts with no history: whatever the
+                    // cache holds for this version goes before anything runs.
+                    try { if (File.Exists(cachePath)) File.Delete(cachePath); } catch { /* already gone */ }
+                }
+                else if (File.Exists(cachePath))
                 {
                     var fileInfo = new FileInfo(cachePath);
                     if ((DateTime.Now - fileInfo.LastWriteTime).TotalHours < 24)
