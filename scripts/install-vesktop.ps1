@@ -72,7 +72,11 @@ foreach ($dir in $dataDirs) {
 
     try {
         $json = [PSCustomObject] $state | ConvertTo-Json -Depth 20
-        Set-Content -Path $stateFile -Value $json -Encoding UTF8
+        # Through a temp file: truncating the live file first would leave
+        # Vesktop with no state at all on a crash mid-write.
+        $temp = "$stateFile.tmp-$PID"
+        Set-Content -Path $temp -Value $json -Encoding UTF8
+        Move-Item $temp $stateFile -Force
         Write-Host "      Vencord Location set to $dist ($dir)"
         $pointed++
     } catch {

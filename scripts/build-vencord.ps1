@@ -36,12 +36,23 @@ function Get-OffendingPlugins([string] $buildOutput) {
 
 Push-Location $VencordDir
 try {
+    $moved = @()
+
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         Write-Host "      build attempt $attempt..."
         $output = & cmd /c "pnpm build 2>&1" | Out-String
         Write-Host $output
 
-        if ($LASTEXITCODE -eq 0) { exit 0 }
+        if ($LASTEXITCODE -eq 0) {
+            # Quarantined plugins stay out of the build, but nothing is
+            # deleted: this is where they went, and moving one back is a
+            # plain folder move.
+            if ($moved.Count -gt 0) {
+                Write-Host "      [!] Left out of this build (move back from userplugins-disabled to restore): $($moved -join ', ')"
+            }
+
+            exit 0
+        }
 
         $offenders = Get-OffendingPlugins $output
         if ($offenders.Count -eq 0) {
@@ -57,6 +68,7 @@ try {
             $dest = Join-Path $quarantine $name
             if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
             Move-Item $src $dest -Force
+            $moved += $name
 
             Write-Host "      [!] '$name' breaks the build - moved to userplugins-disabled\$name"
         }

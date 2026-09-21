@@ -4370,7 +4370,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const cutSound = (clip: AudioClip, edge: "start" | "end") => {
         const at = projectTime();
         const inside = at - clip.at;
-        if (inside <= 0 || inside >= clipLengthOf(clip)) return;
+        if (inside <= 0 || inside >= clipLengthOf(clip)) {
+            toast("Park the playhead over the sound first", Toasts.Type.MESSAGE);
+            return;
+        }
 
         if (edge === "start") patchSound(clip.id, { at, from: clip.from + inside });
         else patchSound(clip.id, { to: clip.from + inside });
@@ -4388,7 +4391,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const splitSound = (clip: AudioClip) => {
         const at = projectTime();
         const inside = at - clip.at;
-        if (inside <= 0 || inside >= clipLengthOf(clip)) return;
+        if (inside <= 0 || inside >= clipLengthOf(clip)) {
+            toast("Park the playhead over the sound first", Toasts.Type.MESSAGE);
+            return;
+        }
 
         const cut = clip.from + inside;
         const head: AudioClip = { ...clip, to: cut, fadeOut: 0 };
@@ -4477,7 +4483,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const segment = project.segments.find(s => s.id === id);
         if (!segment) return false;
 
-        setClipboard({ kind: "segment", segment });
+        setClipboard({ kind: "segment", segment: forkSegment(segment, segment.id) });
         pasteRun.current = null;
         return true;
     };
@@ -4544,6 +4550,21 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     /**
+     * A segment copy that shares nothing mutable with its source.
+     *
+     * The spread alone keeps `moves` and `angles` by reference: editing the
+     * framing or the angles of a duplicate then moves the original too.
+     * Effects, keys and angle attachments are all flat, so one level each.
+     */
+    const forkSegment = (segment: Segment, id: string): Segment => ({
+        ...segment,
+        id,
+        effects: { ...segment.effects },
+        moves: segment.moves?.map(m => ({ ...m })),
+        angles: segment.angles?.map(a => ({ ...a }))
+    });
+
+    /**
      * Puts a copy of a shot after the one that is selected.
      *
      * A segment has no placement of its own - the montage is the order of the
@@ -4554,7 +4575,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const pasteSegment = (): boolean => {
         if (clipboard?.kind !== "segment") return false;
 
-        const copy: Segment = { ...clipboard.segment, id: newId(), effects: { ...clipboard.segment.effects } };
+        const copy: Segment = forkSegment(clipboard.segment, newId());
 
         commit(p => {
             const index = p.segments.findIndex(s => s.id === selected);
@@ -4607,16 +4628,20 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     const duplicate = (id: string) => {
+        const next = newId();
+
         commit(p => {
             const index = p.segments.findIndex(s => s.id === id);
             if (index < 0) return p;
 
-            const copy: Segment = { ...p.segments[index], id: newId(), effects: { ...p.segments[index].effects } };
+            const copy: Segment = forkSegment(p.segments[index], next);
             const segments = [...p.segments];
             segments.splice(index + 1, 0, copy);
 
             return { ...p, segments };
         });
+
+        setSelected(next);
     };
 
     /**
@@ -4639,8 +4664,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             const index = p.segments.findIndex(s => s.id === segment.id);
             if (index < 0) return p;
 
-            const left: Segment = { ...segment, to: at };
-            const right: Segment = { ...segment, id: newId(), from: at, effects: { ...segment.effects } };
+            const left: Segment = { ...forkSegment(segment, segment.id), to: at };
+            const right: Segment = { ...forkSegment(segment, newId()), from: at };
             const segments = [...p.segments];
             segments.splice(index, 1, left, right);
 

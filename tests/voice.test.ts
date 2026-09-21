@@ -73,3 +73,47 @@ test("mask actors split the audible by mute", () => {
     const quiet = [lane("x", 10, 0), lane("y", 10, 200)];
     assert.deepEqual(mod.maskActors(quiet, { x: 0 }, 5), { muted: [], others: ["y"] });
 });
+
+test("shifting drops whole lanes", () => {
+    const tracks = [lane("x", 2, 200), lane("y", 2, 0)];
+
+    assert.equal(mod.shiftTracks(tracks, 0), tracks);
+    const shifted = mod.shiftTracks(tracks, 0.4);
+    assert.equal(shifted.length, 2);
+    assert.equal(shifted[0].levels.length, 8);
+
+    // A lane shifted past its end disappears instead of going empty.
+    assert.deepEqual(mod.shiftTracks(tracks, 99).length, 0);
+});
+
+test("voice metadata roundtrips", () => {
+    const track = { id: "1", name: "x", avatar: "a", levels: Uint8Array.from([0, 200, 255]) };
+    const back = mod.fromMeta(mod.toMeta(track));
+
+    assert.equal(back.id, "1");
+    assert.equal(back.name, "x");
+    assert.equal(back.avatar, "a");
+    assert.deepEqual([...back.levels], [0, 200, 255]);
+
+    const bare = mod.fromMeta(mod.toMeta({ id: "2", name: "y", levels: Uint8Array.from([1]) }));
+    assert.ok(!("avatar" in bare));
+});
+
+test("levels helpers read plainly", () => {
+    assert.equal(mod.voiceGainOf(undefined, "x"), 1);
+    assert.equal(mod.voiceGainOf({ x: 0.5 }, "x"), 0.5);
+    assert.equal(mod.voiceGainOf({ x: 0 }, "x"), 0);
+    assert.equal(mod.voiceLevelsTouched(undefined), false);
+    assert.equal(mod.voiceLevelsTouched({}), false);
+    assert.equal(mod.voiceLevelsTouched({ x: 1 }), false);
+    assert.equal(mod.voiceLevelsTouched({ x: 0 }), true);
+
+    // Loudest first, silenced people left out.
+    const tracks = [lane("x", 10, 100), lane("y", 10, 200)];
+    assert.deepEqual(mod.speakingAt(tracks, undefined, 5).map(t => t.id), ["y", "x"]);
+    assert.deepEqual(mod.speakingAt(tracks, { y: 0 }, 5).map(t => t.id), ["x"]);
+
+    // The fraction of a lane the mute would dip.
+    assert.equal(mod.mutedFraction({ id: "e", name: "e", levels: new Uint8Array(0) }), 0);
+    assert.ok(mod.mutedFraction(lane("f", 10, 200)) > 0.9);
+});

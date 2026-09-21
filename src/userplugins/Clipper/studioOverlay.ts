@@ -180,11 +180,16 @@ ipcMain.on(ACTION_CHANNEL, (event, kind: unknown, payload: unknown) => {
     const from = Number(body.from);
     const to = Number(body.to);
 
+    // The page is ours, but the channel is IPC: a giant name burns through
+    // readClipBytes, and an absurd span burns through the trim parsers.
+    const clip = String(body.clip ?? "");
+    if (!clip || clip.length > 128) return;
+
     queue({
         kind: asked,
-        clip: String(body.clip ?? ""),
-        from: Number.isFinite(from) ? Math.max(0, from) : 0,
-        to: Number.isFinite(to) ? Math.max(0, to) : 0
+        clip,
+        from: Number.isFinite(from) ? Math.min(3600, Math.max(0, from)) : 0,
+        to: Number.isFinite(to) ? Math.min(3600, Math.max(0, to)) : 0
     });
 });
 

@@ -133,7 +133,29 @@ foreach ($root in $discordRoots) {
     $name = Split-Path $root -Leaf
 
     # only the newest app-x.y.z matters; older ones are leftovers Discord no longer starts
-    $resources = Get-ChildItem $root -Directory -Filter "app-*" |
+    $appDirs = @(Get-ChildItem $root -Directory -Filter "app-*" |
+        Sort-Object { try { [version]($_.Name -replace '^app-', '') } catch { [version]'0.0.0' } } -Descending)
+
+    # Stale patch files in folders Discord will never start again: a newer
+    # app dir means these are orphans of our own older installs, each holding
+    # a full asar copy. The original goes back, the stub goes away.
+    foreach ($old in ($appDirs | Select-Object -Skip 1)) {
+        $oldResources = Join-Path $old.FullName "resources"
+        $oldAsar = Join-Path $oldResources "app.asar"
+        $oldOriginal = Join-Path $oldResources "_app.asar"
+
+        if ((Test-Path $oldAsar) -and (Test-Path $oldOriginal) -and (Get-StubTarget $oldAsar)) {
+            try {
+                Remove-Item $oldAsar -Force
+                Move-Item $oldOriginal $oldAsar -Force
+                Write-Host "      Cleaned a leftover patch in $($old.Name)."
+            } catch {
+                Write-Host "      [!] Could not clean $($old.Name) - $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $resources = $appDirs |
         Sort-Object { try { [version]($_.Name -replace '^app-', '') } catch { [version]'0.0.0' } } -Descending |
         ForEach-Object { Join-Path $_.FullName "resources" } |
         Where-Object { Test-Path $_ } |
