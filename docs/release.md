@@ -1,5 +1,10 @@
 # Cutting a Clipper release
 
+Prerequisites: a Vencord checkout beside the repo (or `-VencordDir`), pnpm,
+cargo and the .NET 8 SDK for the native voice exe and the installer, node on
+`PATH` for `test.ps1`. The Vencord checkout must be clean, or set
+`CLIPPER_SKIP_DIRTY_CHECK=1` to build anyway.
+
 1. Merge everything the release should carry, then bump `CLIPPER_VERSION` in
    `src/userplugins/Clipper/updater.ts`.
 2. Rebuild the bundle: `.\scripts\build-prebuilt.ps1 -VencordDir <path>`.

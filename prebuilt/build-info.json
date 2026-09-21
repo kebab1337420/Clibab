@@ -2,17 +2,17 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "6.3.0",
-  "clipperCommit": "ef7a34d",
-  "builtAt": "2026-09-21T00:55:54",
+  "clipperVersion": "6.4.0",
+  "clipperCommit": "d300619",
+  "builtAt": "2026-09-21T10:42:39",
   "files": {
     "discord-voice-capture.exe": {
       "size": 2014720,
       "sha256": "ae513ca2b9343ae85cce867c2311d7c436d52fe9325dbbf42eedc4d8908d06b5"
     },
     "patcher.js": {
-      "size": 146053,
-      "sha256": "8ccd77784cc774bf44f100b8a0a7da800809562067857db00fa0be4d3ddeefd1"
+      "size": 147022,
+      "sha256": "37322ba647a3f8b716542e11bb737883820d14cd24e4aedc0cf0eb052e9a5dd9"
     },
     "patcher.js.LEGAL.txt": {
       "size": 964,
@@ -27,16 +27,16 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "renderer.js": {
-      "size": 1148662,
-      "sha256": "61c101f3cc71b5107498c5742964210b13f1a53445a24d969c0b3a3bfcd10957"
+      "size": 1149230,
+      "sha256": "0797bc8e7d6e2e8546c271d3f1d4596e2060cb443ec290dcc5438d09ac63dc33"
     },
     "renderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
     },
     "vencordDesktopMain.js": {
-      "size": 142322,
-      "sha256": "f5421e5f4e52ed452dd0b4c066d111649bba3d9a0a63ead236032a39a702b99c"
+      "size": 143291,
+      "sha256": "d312a61e0b7b77b5a598a15899ba1d7b7d3d7601b2dd7e3ea7d2d8316bf11e5e"
     },
     "vencordDesktopMain.js.LEGAL.txt": {
       "size": 964,
@@ -51,8 +51,8 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "vencordDesktopRenderer.js": {
-      "size": 1156562,
-      "sha256": "34d227fb05cc7a820543e2b286c9e688b33d5c01780a51df92a97272a7c63d2c"
+      "size": 1157130,
+      "sha256": "d18373545fdb5fd1dd0384f24ac03808c4dfc7e499183c59401f99057e030585"
     },
     "vencordDesktopRenderer.js.LEGAL.txt": {
       "size": 1880,
@@ -67,6 +67,18 @@
     "VRinstaller.bat": {
       "size": 18190,
       "sha256": "e01159b781f32b5f5256220fb11756fd993d964f4660fb96e5e1472ecbe8591e"
+    },
+    "scripts/install-prebuilt.ps1": {
+      "size": 10076,
+      "sha256": "d8c19fe3caae1efa64d420252dbd9997a1aeb900bed0d03bfd901cd3b2930cb7"
+    },
+    "scripts/uninstall.ps1": {
+      "size": 3760,
+      "sha256": "1b41348db1c21077cb23c0985a7fe0dfcfec35d9b99607539ce5f098cc0e86c1"
+    },
+    "scripts/install-vesktop.ps1": {
+      "size": 2832,
+      "sha256": "3c04ef303778dbc6e928f2d20f482c8b8965965388bfe01c0f7759146aba069e"
     }
   }
 }
