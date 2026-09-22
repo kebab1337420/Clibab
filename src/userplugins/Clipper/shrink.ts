@@ -90,9 +90,42 @@ export async function shrinkVideo(url: string, { limit, fps = 30, onProgress }: 
     video.preload = "auto";
 
     await new Promise<void>((resolve, reject) => {
-        video.onloadeddata = () => resolve();
-        video.onerror = () => reject(new Error("That clip could not be decoded"));
+        // A clip already in the cache hands its data over before the handlers
+        // below could be attached, so the ready state is checked, not waited
+        // on. Bounded like the GIF export: a file that neither loads nor
+        // errors would otherwise park this promise, and the progress UI,
+        // forever.
+        if (video.readyState >= 2) return resolve();
+
+        let done = false;
+
+        const settle = (error?: Error) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            video.onloadeddata = null;
+            video.onerror = null;
+            if (error) reject(error);
+            else resolve();
+        };
+
+        const timer = setTimeout(() => {
+            video.removeAttribute("src");
+            video.load();
+            settle(new Error("That clip took too long to load"));
+        }, 10_000);
+
+        video.onloadeddata = () => settle();
+        video.onerror = () => settle(new Error("That clip could not be decoded"));
     });
+
+    // A decoded-but-dimensionless clip reports 0, and the size math below
+    // divides by width times height: 0 gives Infinity, NaN gives NaN, and the
+    // pass then records black frames it can still call a success.
+    if (!Number.isFinite(video.videoWidth) || video.videoWidth <= 0 ||
+        !Number.isFinite(video.videoHeight) || video.videoHeight <= 0) {
+        throw new Error("That clip has no readable picture");
+    }
 
     const range = await probeRange(video);
     const seconds = Math.max(1, range.end - range.start);
@@ -214,17 +247,27 @@ async function transcode(video: HTMLVideoElement, { width, height, fps, bitrate,
         let frame = 0;
         let guard = 0;
 
-        const finish = (error?: Error) => {
-            cancelAnimationFrame(frame);
-            clearTimeout(guard);
+        // One settle per export. The recorder's stop and error events can both
+            // fire around the same moment, the done timer can race them, and a
+            // play() rejection can land after the export already ended - every
+            // path tears the stream down, so a second run would stop tracks that
+            // are already stopped and unsettle the promise a second time.
+            let done = false;
 
-            video.onended = null;
-            video.pause();
-            for (const track of stream.getVideoTracks()) track.stop();
+            const finish = (error?: Error) => {
+                if (done) return;
+                done = true;
 
-            if (error) reject(error);
-            else resolve(new Blob(parts, { type }));
-        };
+                cancelAnimationFrame(frame);
+                clearTimeout(guard);
+
+                video.onended = null;
+                video.pause();
+                for (const track of stream.getVideoTracks()) track.stop();
+
+                if (error) reject(error);
+                else resolve(new Blob(parts, { type }));
+            };
 
         recorder.onstop = () => finish();
         recorder.onerror = e => finish((e as unknown as { error?: Error; }).error ?? new Error("The encoder gave up"));

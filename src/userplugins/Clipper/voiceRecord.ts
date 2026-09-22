@@ -28,7 +28,7 @@
 
 import { Logger } from "@utils/Logger";
 
-import { lengthBytes, repairBytes } from "./repair";
+import { repairBytes } from "./repair";
 import { settings } from "./settings";
 // The main buffer's own, so both sides cut on the same boundaries.
 import { clipRetentionSeconds, TIMESLICE } from "./utils";
@@ -116,11 +116,6 @@ class VoiceBuffers {
         return this.running;
     }
 
-    /** How many people are being recorded on a track of their own. */
-    get count(): number {
-        return this.lanes.size;
-    }
-
     /**
      * Starts a buffer for every receiver that is open, and for every one that
      * opens later: people join a call after the buffer is armed, and a lane that
@@ -177,7 +172,17 @@ class VoiceBuffers {
         if (!this.running || !userId) return;
 
         const track = stream.getAudioTracks()[0];
-        if (!track || this.lanes.has(SELF_ID)) return;
+        if (!track) return;
+
+        // A mic device switch leaves the old lane holding a dead track, and a
+        // blind existence check would reject every new track after it: the
+        // recordist's own lane silently missing from every clip after.
+        const existing = this.lanes.get(SELF_ID);
+        if (existing) {
+            if (existing.tap.track === track) return;
+            logger.info("The microphone changed, reopening the voice buffer for it");
+            this.close(SELF_ID);
+        }
 
         this.open({ id: SELF_ID, userId, name, stream, track, confidence: 1 }, true);
     }
@@ -323,19 +328,20 @@ class VoiceBuffers {
              * meant to take out - the further the rebase had to walk, the
              * further off it is.
              *
-             * One read of the lane, and the rebase and both measurements work
-             * on those bytes: a lane is a call's worth of audio, and reading it
-             * back three times copied all of it three times.
+             * One read of the lane, and the rebase hands back the seconds it
+             * dropped with the fixed bytes, from that same pass: a lane is a
+             * call's worth of audio, and reading it back would have copied all
+             * of it again.
              */
             let cutOff = 0;
 
             try {
                 const bytes = new Uint8Array(await raw.arrayBuffer());
-                const fixed = repairBytes(bytes, lane.mimeType);
+                const repair = repairBytes(bytes, lane.mimeType);
 
-                if (fixed) {
-                    blob = new Blob([fixed as BlobPart], { type: lane.mimeType });
-                    cutOff = Math.max(0, lengthBytes(bytes, lane.mimeType) - lengthBytes(fixed, lane.mimeType));
+                if (repair.bytes) {
+                    blob = new Blob([repair.bytes as BlobPart], { type: lane.mimeType });
+                    cutOff = repair.dropped;
                 }
             } catch (e) {
                 logger.warn(`Could not rebase the voice track for ${name || userId}`, e);

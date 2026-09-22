@@ -273,7 +273,11 @@ export function saveVoiceTrack(_: IpcMainInvokeEvent, dir: string, clip: string,
     mkdirSync(target, { recursive: true });
 
     const path = join(target, name);
-    writeFileSync(path, Buffer.from(data));
+
+    // The temp-file dance from `writeClipBytes`, for the same reason: a kill
+    // between open and flush must not leave a truncated lane that a later
+    // harvest assembles into a clip.
+    writeClipBytes(path, data);
 
     return path;
 }
@@ -362,14 +366,18 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
     // A clip that has been edited to gigabytes never loads in the studio
     // anyway; refusing it before it is copied into the renderer keeps a bad
     // file from filling the renderer's memory on its way to the failure. The
-    // cap is taken from the opened handle, so a file that grew between stat
-    // and read still cannot get past it.
+    // size is checked twice: once before the read, and once on what the read
+    // actually returned - readFileSync reads to EOF, so a file that grew
+    // between fstat and the read would otherwise sail past the first check.
     const fd = openSync(path, "r");
     try {
         const { size } = fstatSync(fd);
         if (size > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
 
-        return new Uint8Array(readFileSync(fd));
+        const buf = new Uint8Array(readFileSync(fd));
+        if (buf.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
+
+        return buf;
     } finally {
         closeSync(fd);
     }

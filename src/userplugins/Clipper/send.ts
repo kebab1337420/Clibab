@@ -25,6 +25,7 @@ import { CLIPS_AVAILABLE, loadClipFile, readClipBytes, typeOfClip } from "./clip
 import { clipToGif, type GifRequest, saveGif } from "./gifExport";
 import { logger } from "./recorder";
 import { trimBytes } from "./repair";
+import { extensionFor } from "./settings";
 import { shrinkVideo } from "./shrink";
 import { toast } from "./toasts";
 import { formatBytes } from "./utils";
@@ -113,7 +114,7 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
         try {
             const result = await shrinkVideo(url, { limit: FREE_LIMIT, onProgress });
             const stem = name.replace(/\.(webm|mp4)$/i, "");
-            const ext = result.mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+            const ext = extensionFor(result.mimeType);
 
             if (!result.fits) {
                 toast(`Smallest this clip goes is ${formatBytes(result.blob.size)}`, Toasts.Type.MESSAGE);

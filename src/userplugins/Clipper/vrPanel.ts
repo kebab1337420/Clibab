@@ -101,10 +101,17 @@ function panelPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 function fit(ctx: CanvasRenderingContext2D, text: string, width: number): string {
     if (ctx.measureText(text).width <= width) return text;
 
-    let cut = text.length;
-    while (cut > 1 && ctx.measureText(text.slice(0, cut) + "…").width > width) cut--;
+    // Dichotomy, not one character at a time: the linear walk above used to
+    // cost one layout per character of titles a hundred characters long.
+    let low = 1;
+    let high = text.length;
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (ctx.measureText(text.slice(0, mid) + "…").width <= width) low = mid;
+        else high = mid - 1;
+    }
 
-    return text.slice(0, cut) + "…";
+    return text.slice(0, low) + "…";
 }
 
 /**

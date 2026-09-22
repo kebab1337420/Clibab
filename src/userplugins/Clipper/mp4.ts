@@ -400,26 +400,34 @@ function emit(data: Uint8Array, scanned: Scan, from: number, to: number): Uint8A
 }
 
 /**
- * Rebases a fragmented MP4 so it starts at zero.
+ * Rebases a fragmented MP4 so it starts at zero, in one pass.
  *
  * Leading fragments are dropped until one that opens on a keyframe, because a
  * clip starting on a delta frame is the "broken clip" case: the decoder has
  * nothing to build its first frames from.
  *
- * Returns null when the data is not a fragmented MP4, or when it already starts
- * at zero, in which case the caller keeps the original bytes.
+ * The scan of the buffer is done once and shared: the caller gets the rebased
+ * bytes (or null when there was nothing to repair, in which case it keeps the
+ * original), plus the seconds the repair took off the front and the resulting
+ * clip's real length. Measuring a clip used to mean rewalking the whole
+ * buffer, which on buffers of hundreds of megabytes is the difference between
+ * a save that takes one pass and one that takes three.
  */
-export function rebaseMp4(data: Uint8Array): Uint8Array | null {
+export function repairMp4(data: Uint8Array): { bytes: Uint8Array | null; dropped: number; length: number } {
     const scanned = scan(data);
-    if (!scanned) return null;
+    if (!scanned) return { bytes: null, dropped: 0, length: 0 };
 
-    const { fragments } = scanned;
+    const { fragments, tracks, videoTrack } = scanned;
     const start = firstKept(scanned);
+    const last = fragments.length - 1;
 
     const zeroed = start === 0 && fragments[0].tracks.every(t => t.decodeTime === 0n);
-    if (zeroed) return null;
 
-    return emit(data, scanned, start, fragments.length - 1);
+    return {
+        bytes: zeroed ? null : emit(data, scanned, start, last),
+        dropped: zeroed ? 0 : Math.max(0, (timeOf(fragments[start], tracks, videoTrack) - timeOf(fragments[0], tracks, videoTrack)) / 1000),
+        length: Math.max(0, (timeOf(fragments[last], tracks, videoTrack) - timeOf(fragments[start], tracks, videoTrack)) / 1000)
+    };
 }
 
 /**

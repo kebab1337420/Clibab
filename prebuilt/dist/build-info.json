@@ -2,9 +2,9 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "5.5.1",
-  "clipperCommit": "9863ee3",
-  "builtAt": "2026-09-21T20:19:18",
+  "clipperVersion": "6.4.0",
+  "clipperCommit": "d300619",
+  "builtAt": "2026-09-22T15:52:50.063Z",
   "files": {
     "discord-voice-capture.exe": {
       "size": 3395584,

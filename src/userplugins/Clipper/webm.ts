@@ -277,22 +277,35 @@ function scanClusters(data: Uint8Array): Cluster[] | null {
     const clusters: Cluster[] = [];
     const videoTrack = findVideoTrack(data);
 
-    for (let pos = 0; pos + 8 < data.length; pos++) {
-        if (!isClusterId(data, pos)) continue;
+    /*
+     * The candidate search runs in native code: the loop below used to spend
+     * one JS iteration per byte of buffers hundreds of megabytes long, and a
+     * save walks the buffer several times over. indexOf jumps straight to the
+     * next 0x1f and only those positions pay for the full ID check, which is
+     * the same set of candidates the old walk examined: after a cluster the
+     * search resumes five bytes on, exactly where the old `pos += 4` plus the
+     * loop's own `pos++` landed.
+     */
+    let pos = data.indexOf(CLUSTER_ID[0]);
+    while (pos >= 0 && pos + 8 < data.length) {
+        if (isClusterId(data, pos)) {
+            const cluster = readCluster(data, pos, videoTrack);
+            if (cluster) {
+                // Each cluster runs up to the next one: live clusters have no size, so
+                // this is the only thing that says where one ends.
+                const previous = clusters[clusters.length - 1];
+                if (previous) previous.end = pos;
 
-        const cluster = readCluster(data, pos, videoTrack);
-        if (!cluster) continue;
+                clusters.push(cluster);
 
-        // Each cluster runs up to the next one: live clusters have no size, so
-        // this is the only thing that says where one ends.
-        const previous = clusters[clusters.length - 1];
-        if (previous) previous.end = pos;
+                // Nothing else in this cluster can be a cluster header, but the scan
+                // still has to walk it byte by byte: live clusters have no size.
+                pos = data.indexOf(CLUSTER_ID[0], pos + CLUSTER_ID.length + 1);
+                continue;
+            }
+        }
 
-        clusters.push(cluster);
-
-        // Nothing else in this cluster can be a cluster header, but the scan
-        // still has to walk it byte by byte: live clusters have no size.
-        pos += CLUSTER_ID.length;
+        pos = data.indexOf(CLUSTER_ID[0], pos + 1);
     }
 
     return clusters.length ? clusters : null;
@@ -369,24 +382,32 @@ export function lengthWebm(data: Uint8Array): number {
 }
 
 /**
- * Rebases a live WebM so it starts at zero.
+ * Rebases a live WebM so it starts at zero, in one pass.
  *
  * Leading clusters are dropped until one that starts on a keyframe, because a
  * clip that opens on a delta frame is exactly the "broken clip" case: the
  * decoder has nothing to build the first frames from and players show garbage,
  * a black screen, or refuse the file.
  *
- * Returns null when the data does not look like a live WebM, in which case the
- * caller keeps the original bytes.
+ * The scan of the buffer is done once and shared: the caller gets the rebased
+ * bytes (or null when there was nothing to repair, in which case it keeps the
+ * original), plus the seconds the repair took off the front and the resulting
+ * clip's real length. Measuring a clip used to mean rewalking the whole
+ * buffer, which on buffers of hundreds of megabytes is the difference between
+ * a save that takes one pass and one that takes three.
  */
-export function rebaseWebm(data: Uint8Array): Uint8Array | null {
+export function repairWebm(data: Uint8Array): { bytes: Uint8Array | null; dropped: number; length: number } {
     const clusters = scanClusters(data);
-    if (!clusters) return null;
+    if (!clusters) return { bytes: null, dropped: 0, length: 0 };
 
     const start = firstKeptCluster(clusters);
 
     // Already one contiguous run starting at zero: nothing to repair.
-    if (clusters[start].timecode === 0 && start === 0) return null;
+    const changed = clusters[start].timecode !== 0 || start !== 0;
 
-    return emit(data, clusters, start, clusters.length - 1);
+    return {
+        bytes: changed ? emit(data, clusters, start, clusters.length - 1) : null,
+        dropped: changed ? Math.max(0, (clusters[start].timecode - clusters[0].timecode) / 1000) : 0,
+        length: Math.max(0, (clusters[clusters.length - 1].timecode - clusters[start].timecode) / 1000)
+    };
 }

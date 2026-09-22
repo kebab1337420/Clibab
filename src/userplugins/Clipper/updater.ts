@@ -36,7 +36,7 @@ const logger = new Logger("Clipper");
  * Bumped by hand, and read back by scripts\build-prebuilt.ps1, which stamps
  * it into prebuilt\build-info.json. The check compares it against the newest
  * release tag, so a build has to go out under the tag it names here: publish
- * this one as v5.3.0, or the clients already running it are offered it again.
+ * this one as v5.5.1, or the clients already running it are offered it again.
  */
 export const CLIPPER_VERSION = "5.5.1";
 
@@ -62,6 +62,16 @@ const state: UpdateState = {
 };
 
 const listeners = new Set<() => void>();
+
+/**
+ * The check currently running, if any.
+ *
+ * A launch check and a hand-pressed "check now" overlap on a slow network,
+ * and the second caller must wait on the first one's answer rather than read
+ * a stale `latest`: on a first launch that value is null while `error` is
+ * empty, which the manual path would toast as a failure that never happened.
+ */
+let flight: Promise<UpdateInfo | null> | null = null;
 
 export function updateState(): UpdateState {
     return state;
@@ -111,7 +121,7 @@ export const RESTART_FIRST = "Clipper was updated under a running client. Quit D
  * launch into an error the user has to dismiss.
  */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
-    if (state.checking) return state.latest;
+    if (flight) return flight;
 
     if (!nativeReady()) {
         logger.info("The main process is still on an older Clipper, so the check waits for a full restart");
@@ -122,21 +132,26 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
 
     change({ checking: true, error: "" });
 
-    try {
-        const info = await Native.checkUpdate(CLIPPER_VERSION);
-        change({ latest: info });
+    flight = (async () => {
+        try {
+            const info = await Native.checkUpdate(CLIPPER_VERSION);
+            change({ latest: info });
 
-        logger.info(`Update check: installed ${CLIPPER_VERSION}, published ${info.version || "unknown"}`);
+            logger.info(`Update check: installed ${CLIPPER_VERSION}, published ${info.version || "unknown"}`);
 
-        return info;
-    } catch (e) {
-        logger.warn("Could not check for updates", e);
-        change({ error: errorMessage(e) });
+            return info;
+        } catch (e) {
+            logger.warn("Could not check for updates", e);
+            change({ error: errorMessage(e) });
 
-        return null;
-    } finally {
-        change({ checking: false });
-    }
+            return null;
+        } finally {
+            flight = null;
+            change({ checking: false });
+        }
+    })();
+
+    return flight;
 }
 
 /**

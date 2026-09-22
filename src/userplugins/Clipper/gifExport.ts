@@ -47,6 +47,14 @@ const MAX_SECONDS = 15;
 const MAX_FPS = 30;
 const MAX_WIDTH = 480;
 
+/**
+ * The aspect ratio a clip without dimensions is drawn at.
+ *
+ * A clip whose header is still inbound reports zero for videoWidth, and
+ * dividing by it turns the height into Infinity before a canvas ever sees it.
+ */
+const DEFAULT_RATIO = 16 / 9;
+
 /** How long a clip is waited on to hand over its first frame of data. */
 const LOAD_TIMEOUT_MS = 10_000;
 
@@ -137,6 +145,11 @@ async function urlToGif(url: string, request: GifRequest = {}): Promise<GifResul
         logger.info(`GIF at ${last.width}px / ${rate}fps / ${rung.colors} colours came out at ${blob.size} bytes`);
     }
 
+    // The grabs are full-width images, hundreds of megabytes at the ceiling,
+    // and nothing past this point reads them: the blob is already encoded.
+    // Let them go before returning rather than when the caller drops them.
+    frames.length = 0;
+
     return last!;
 }
 
@@ -209,10 +222,15 @@ async function grabFrames(url: string, { from, to, fps = DEFAULT_FPS, width = DE
     const start = Math.max(range.start, from ?? stop - MAX_SECONDS);
     const end = Math.min(stop, start + MAX_SECONDS);
 
-    const height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * width));
+    // The width governs both. The dimensions are guarded before they reach the
+    // canvas: a clip with no dimensions yet reports a zero width, and dividing
+    // by it turns the height into Infinity, which a canvas silently reads as
+    // NaN and a GIF exporter turns into garbage or an outright failure.
+    const ratio = Number.isFinite(video.videoWidth) && video.videoWidth > 0 ? video.videoHeight / video.videoWidth : DEFAULT_RATIO;
+    const height = Math.max(1, Math.round(ratio * width));
 
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(width));
+    canvas.width = Number.isFinite(width) && width > 0 ? Math.max(1, Math.round(width)) : DEFAULT_WIDTH;
     canvas.height = height;
 
     const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });

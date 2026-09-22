@@ -156,6 +156,11 @@ const onSpeaking = (event: any) => {
  * pulling without adding a second copy of the call to the speakers.
  */
 function register(track: MediaStreamTrack) {
+    // A peer connection opened while the patch was up keeps its listener after
+    // an uninstall, and a track that lands on it afterwards must not open a tap
+    // the uninstall already looked away from: nothing would ever tear it down.
+    // Guarded on the module's own flag, not the wrapper's existence.
+    if (!installed) return;
     if (track.kind !== "audio" || track.readyState === "ended") return;
 
     const id = `tap-${++counter}`;

@@ -475,6 +475,16 @@ class ClipRecorder {
     private onTrackEnded: (() => void) | null = null;
 
     /**
+     * The video track died while a save held the state on "saving".
+     *
+     * The end event cannot stop the buffer mid-save without pulling the rug
+     * from under the file being written, but swallowing it outright leaves the
+     * buffer encoding a dead track forever - no further `ended` event will
+     * ever fire. Remembered here, acted on when the save hands back.
+     */
+    private trackDied = false;
+
+    /**
      * The 500 ms flush timers still armed when a save/stop gives up.
      *
      * `cleanup` resolves the `nextChunk` waiters, which leaves the timeout in
@@ -681,11 +691,15 @@ class ClipRecorder {
             if (!videoTrack) throw new Error("The picked source returned no video track");
 
             // User stopped the capture from Discord's / the OS' own UI.
+            this.trackDied = false;
             this.onTrackEnded = () => {
                 // A track ending while a save has the state on "saving" would pull
                 // the rug from under the file being written: hold the stop until
                 // the save has handed back, then stop from there.
-                if (this.state === "saving") return;
+                if (this.state === "saving") {
+                    this.trackDied = true;
+                    return;
+                }
                 void this.stop();
             };
             videoTrack.addEventListener("ended", this.onTrackEnded);
@@ -1333,9 +1347,20 @@ class ClipRecorder {
         video.playsInline = true;
 
         try {
-            await video.play();
+            /*
+             * play() answers once the element actually starts, and a capture
+             * that never feeds it a frame keeps that promise open: start()
+             * would sit in "starting" forever with no toast and no way out.
+             * Bounded like the game watcher in ./gameVideo.
+             */
+            await Promise.race([
+                video.play(),
+                new Promise<void>((_, reject) => setTimeout(() => reject(new Error("That capture did not start in time")), 4000))
+            ]);
         } catch (e) {
             logger.warn("This client would not play the capture into a canvas", e);
+            video.pause();
+            video.srcObject = null;
             return null;
         }
 
@@ -1716,16 +1741,16 @@ class ClipRecorder {
         let cutOff = 0;
 
         try {
-            // One read of the buffer: the repair and the two lengths that say
-            // what it took off all work on those same bytes.
+            // One read of the buffer, and the repair hands back the seconds it
+            // took off the front with the rebased bytes, from that same pass.
             const bytes = new Uint8Array(await raw.arrayBuffer());
-            const fixed = repairBytes(bytes, this.mimeType);
+            const repair = repairBytes(bytes, this.mimeType);
 
             // Whatever the repair took off the front moves the markers with it,
             // and moves the instant the footage begins at by exactly as much.
-            if (fixed) {
-                blob = new Blob([fixed as BlobPart], { type: this.mimeType });
-                cutOff = droppedBytes(bytes, fixed, this.mimeType);
+            if (repair.bytes) {
+                blob = new Blob([repair.bytes as BlobPart], { type: this.mimeType });
+                cutOff = repair.dropped;
             }
         } catch (e) {
             logger.warn("Could not rebase the preview's timeline, playing it as recorded", e);
@@ -1930,9 +1955,11 @@ class ClipRecorder {
 
             /*
              * One read of the buffer, and everything after it works on those
-             * same bytes: the repair, the measurement of what it dropped, the
-             * call muxed back in, the write. A clip is hundreds of megabytes,
-             * and each of those steps used to copy the whole of it again.
+             * same bytes: the repair gives back the rebased bytes, the seconds
+             * it dropped and the clip's real length in one pass, and then the
+             * cap, the call muxed back in and the write all operate on that.
+             * A clip is hundreds of megabytes, and each of those steps used to
+             * copy the whole of it again.
              *
              * The repair is what the read is for. Cluster timecodes are
              * absolute, so the chunks that were kept still carry the time
@@ -1941,20 +1968,56 @@ class ClipRecorder {
              */
             let bytes: Uint8Array<ArrayBufferLike> = new Uint8Array(await raw.arrayBuffer());
             let cutOff = 0;
+            let realLength = 0;
 
             try {
-                const fixed = repairBytes(bytes, this.mimeType);
+                const repair = repairBytes(bytes, this.mimeType);
 
                 // The repair drops everything before the first keyframe, which
                 // on a WebM is up to a few seconds. The markers were measured
                 // from the start of the buffer, so they move by exactly what it
                 // took off - otherwise every one of them points seconds early.
-                if (fixed) {
-                    cutOff = droppedBytes(bytes, fixed, this.mimeType);
-                    bytes = fixed;
+                if (repair.bytes) {
+                    cutOff = repair.dropped;
+                    bytes = repair.bytes;
                 }
+
+                // The container's own length, from the same pass that repaired
+                // it, so the cap below does not walk the buffer again.
+                if (repair.length > 0) realLength = repair.length;
             } catch (e) {
                 logger.warn("Could not rebase the clip timeline, saving it as recorded", e);
+            }
+
+            /*
+             * The clip is cut back to the duration that was asked for.
+             *
+             * A chunk's `at` is when MediaRecorder handed it over, not how much
+             * footage it holds: on a busy main thread the recorder delivers each
+             * timeslice late, so a blob stamped "now" can be carrying two or
+             * three seconds of media, and a save that trusts the timestamps
+             * comes out longer than it was told to. The container knows how long
+             * it really is, so when it runs over, the front is trimmed the same
+             * lossless way `trimLastSaved` does and the surplus folds into the
+             * same `cutOff` the markers, the voice lanes and the chat already
+             * shift by.
+             */
+            const cap = picked
+                ? (end - start - TIMESLICE) / 1000
+                : (seconds ?? settings.store.clipLength);
+            if (cap > 0) {
+                const real = realLength || lengthBytes(bytes, this.mimeType);
+                const overrun = real - cap;
+                if (overrun > 0.5) {
+                    const cut = trimBytes(bytes, this.mimeType, overrun, real);
+                    if (cut) {
+                        const gone = real - lengthBytes(cut, this.mimeType);
+                        if (gone > 0) {
+                            bytes = cut;
+                            cutOff += gone;
+                        }
+                    }
+                }
             }
 
             const offsets = shift(markers, cutOff);
@@ -1989,7 +2052,7 @@ class ClipRecorder {
 
             // Best effort and off the critical path: the library falls back to a
             // placeholder for a clip that has no picture.
-            void writeThumbnail(blob, saved);
+            void writeThumbnail(blob, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
             if (settings.store.notifications) {
                 showNotification({
@@ -2019,6 +2082,14 @@ class ClipRecorder {
                 // clip did not make it, not that everything is fine.
                 if (failed) logger.warn("The last clip failed to save; the buffer's state goes back underneath it unchanged");
                 this.setState(this.recorder ? "recording" : "idle");
+            }
+
+            // The capture died while the save held the state: the end event
+            // was held back so the file survived, and now that it has, the
+            // buffer stops instead of encoding a dead track in silence.
+            if (this.trackDied) {
+                this.trackDied = false;
+                this.stop();
             }
         }
     }
@@ -2338,125 +2409,126 @@ class ClipRecorder {
         const name = `${timestampName()}.mp4`;
         const path = await Native.reserveClipPath(settings.store.saveDirectory, name);
 
-        // The engine holds the same window we do, so asking for more than the
-        // buffer is worth is asking for footage nobody kept.
-        const wanted = Math.min(want || settings.store.clipLength, settings.store.clipLength);
-        const reported = await saveNativeClip(path, wanted, { application: "Clipper" });
+        try {
+            // The engine holds the same window we do, so asking for more than the
+            // buffer is worth is asking for footage nobody kept.
+            const wanted = Math.min(want || settings.store.clipLength, settings.store.clipLength);
+            const reported = await saveNativeClip(path, wanted, { application: "Clipper" });
 
-        // The engine answers in milliseconds, but older builds answered in
-        // seconds and the buffer is capped well under 600s either way, so the
-        // magnitude is a safe way to tell which one this is.
-        const seconds = reported > 600 ? reported / 1000 : reported;
+            // The engine answers in milliseconds, but older builds answered in
+            // seconds and the buffer is capped well under 600s either way, so the
+            // magnitude is a safe way to tell which one this is.
+            const seconds = reported > 600 ? reported / 1000 : reported;
 
-        /*
-         * Zero means the engine had nothing buffered, and it is not a detail.
-         *
-         * The clip still comes out, on our own buffer, with one mixed
-         * soundtrack - which is exactly the file a mute cannot do anything
-         * honest with. Returning false quietly here is how a clip arrives
-         * looking like every other clip, and the only sign that the track per
-         * person went missing is a mute that takes the whole call with it, an
-         * hour later, in the studio. So it says so.
-         */
-        if (!(seconds > 0)) {
-            this.nativeFailures++;
-            logger.warn(`The native clip engine had nothing buffered (it reported ${reported}); falling back to the plugin's own buffer.`);
-            toast("The native engine had no footage buffered - saved the plugin's mixed recording instead", Toasts.Type.MESSAGE);
-            // Nothing was written, so the name is free again: holding it
-            // would only push a later save onto a `-1` suffix for no reason.
-            void Native.releaseClipPath(path).catch(() => void 0);
-            return false;
-        }
-
-        const saved = path.split(/[\\/]/).pop() || name;
-        const data = await Native.readClip(settings.store.saveDirectory, saved);
-
-        // It answered with a file, so whatever else is wrong with it, the
-        // engine is not the thing to give up on.
-        this.nativeFailures = 0;
-
-        /*
-         * A clip with no picture is not a clip.
-         *
-         * The engine reads the capture id as a window handle, and a screen id
-         * does not convert to one - the native log answers `creating session
-         * with (RsVideoOptions { source: Window(HWND(0x0)), ... })` and turns
-         * its own capture back off a fifth of a second later. What it saves
-         * after that is the call audio, correctly split per person, over
-         * nothing at all. It reports a healthy length for it too, so the length
-         * check above waves it through.
-         *
-         * The plugin's own buffer has the picture, so the file is dropped and
-         * save() carries on down its own path: a mixed soundtrack the studio
-         * cannot unpick is still worth more than a black clip.
-         */
-        if (!hasVideoTrack(data)) {
-            logger.info(`The native clip engine wrote ${saved} with no picture; muxing its tracks into the plugin's clip instead.`);
-
-            // Handed to save(), which has the picture and does the muxing once
-            // its own buffer has been flushed and repaired.
-            this.nativeAudio = data;
-
-            try {
-                await Native.deleteClip(settings.store.saveDirectory, saved);
-            } catch (e) {
-                logger.warn(`Could not remove the pictureless clip ${saved}`, e);
+            /*
+             * Zero means the engine had nothing buffered, and it is not a detail.
+             *
+             * The clip still comes out, on our own buffer, with one mixed
+             * soundtrack - which is exactly the file a mute cannot do anything
+             * honest with. Returning false quietly here is how a clip arrives
+             * looking like every other clip, and the only sign that the track per
+             * person went missing is a mute that takes the whole call with it, an
+             * hour later, in the studio. So it says so.
+             */
+            if (!(seconds > 0)) {
+                this.nativeFailures++;
+                logger.warn(`The native clip engine had nothing buffered (it reported ${reported}); falling back to the plugin's own buffer.`);
+                toast("The native engine had no footage buffered - saved the plugin's mixed recording instead", Toasts.Type.MESSAGE);
+                return false;
             }
 
-            // The file is gone again (or never landed), so the reservation
-            // goes with it: save() carries on below and may reuse the name.
+            const saved = path.split(/[\\/]/).pop() || name;
+            const data = await Native.readClip(settings.store.saveDirectory, saved);
+
+            // It answered with a file, so whatever else is wrong with it, the
+            // engine is not the thing to give up on.
+            this.nativeFailures = 0;
+
+            /*
+             * A clip with no picture is not a clip.
+             *
+             * The engine reads the capture id as a window handle, and a screen id
+             * does not convert to one - the native log answers `creating session
+             * with (RsVideoOptions { source: Window(HWND(0x0)), ... })` and turns
+             * its own capture back off a fifth of a second later. What it saves
+             * after that is the call audio, correctly split per person, over
+             * nothing at all. It reports a healthy length for it too, so the length
+             * check above waves it through.
+             *
+             * The plugin's own buffer has the picture, so the file is dropped and
+             * save() carries on down its own path: a mixed soundtrack the studio
+             * cannot unpick is still worth more than a black clip.
+             */
+            if (!hasVideoTrack(data)) {
+                logger.info(`The native clip engine wrote ${saved} with no picture; muxing its tracks into the plugin's clip instead.`);
+
+                // Handed to save(), which has the picture and does the muxing once
+                // its own buffer has been flushed and repaired.
+                this.nativeAudio = data;
+
+                try {
+                    await Native.deleteClip(settings.store.saveDirectory, saved);
+                } catch (e) {
+                    logger.warn(`Could not remove the pictureless clip ${saved}`, e);
+                }
+
+                return false;
+            }
+
+            const blob = new Blob([data as BlobPart], { type: "video/mp4" });
+
+            const end = Date.now();
+            const start = end - Math.round(seconds * 1000);
+            const markers = this.marks.map(m => (m - start) / 1000).filter(m => m >= 0);
+            const voices = voiceActivity.slice(start, end);
+            const chat = chatLog.slice(start, end);
+
+            this.lastSaved = { name: saved, path, blob, mimeType: "video/mp4", markers, voices, chat };
+
+            await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
+            void writeThumbnail(blob, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
+
+            /*
+             * How many audio tracks came out, said out loud.
+             *
+             * This is the whole question the native path exists to answer: the
+             * recorder keeps one per person internally, and whether `saveClipEx`
+             * hands those over or mixes them down on the way out is not documented
+             * anywhere. One track means the clip is mixed like any other and a mute
+             * still has to duck; more than one means a mute can drop a voice and
+             * leave the rest of the call alone.
+             */
+            const tracks = probeAudioTracks(data);
+            const layout = tracks && tracks.length > 1
+                ? `${tracks.length} voice tracks`
+                : "one mixed track";
+
+            logger.info(`Native clip saved: ${saved} (${Math.round(seconds)}s, ${layout})`, tracks);
+
+            if (!tracks || tracks.length < 2) {
+                toast("The engine wrote one mixed track for this clip - a mute will have to duck", Toasts.Type.MESSAGE);
+            }
+
+            if (settings.store.notifications) {
+                showNotification({
+                    title: "Clip saved (native engine)",
+                    body: `${Math.round(seconds)}s - ${formatBytes(blob.size)} - ${layout}\n${path}`,
+                    onClick: () => copy(path)
+                });
+            } else {
+                toast(`Clip saved (${Math.round(seconds)}s, ${formatBytes(blob.size)}, ${layout})`, Toasts.Type.SUCCESS);
+            }
+
+            return true;
+        } finally {
+            // The reservation only guards a name nothing has written yet: once the
+            // engine has answered, the file is on disk (or nothing was written at
+            // all) and freePath sees the truth again. Releasing in a finally means
+            // a throw anywhere in the engine's work - the write, the read, the
+            // muxing, the tagging - cannot leak the path for the rest of the
+            // session and push a later save onto a `-1` suffix for nothing.
             void Native.releaseClipPath(path).catch(() => void 0);
-            return false;
         }
-
-        const blob = new Blob([data as BlobPart], { type: "video/mp4" });
-
-        const end = Date.now();
-        const start = end - Math.round(seconds * 1000);
-        const markers = this.marks.map(m => (m - start) / 1000).filter(m => m >= 0);
-        const voices = voiceActivity.slice(start, end);
-        const chat = chatLog.slice(start, end);
-
-        this.lastSaved = { name: saved, path, blob, mimeType: "video/mp4", markers, voices, chat };
-
-        await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
-        void writeThumbnail(blob, saved);
-
-        /*
-         * How many audio tracks came out, said out loud.
-         *
-         * This is the whole question the native path exists to answer: the
-         * recorder keeps one per person internally, and whether `saveClipEx`
-         * hands those over or mixes them down on the way out is not documented
-         * anywhere. One track means the clip is mixed like any other and a mute
-         * still has to duck; more than one means a mute can drop a voice and
-         * leave the rest of the call alone.
-         */
-        const tracks = probeAudioTracks(data);
-        const layout = tracks && tracks.length > 1
-            ? `${tracks.length} voice tracks`
-            : "one mixed track";
-
-        logger.info(`Native clip saved: ${saved} (${Math.round(seconds)}s, ${layout})`, tracks);
-
-        if (!tracks || tracks.length < 2) {
-            toast("The engine wrote one mixed track for this clip - a mute will have to duck", Toasts.Type.MESSAGE);
-        }
-
-        if (settings.store.notifications) {
-            showNotification({
-                title: "Clip saved (native engine)",
-                body: `${Math.round(seconds)}s - ${formatBytes(blob.size)} - ${layout}\n${path}`,
-                onClick: () => copy(path)
-            });
-        } else {
-            toast(`Clip saved (${Math.round(seconds)}s, ${formatBytes(blob.size)}, ${layout})`, Toasts.Type.SUCCESS);
-        }
-
-        // The clip is on disk under this name now, so `freePath` guards it
-        // from here on; the reservation has done its job.
-        void Native.releaseClipPath(path).catch(() => void 0);
-        return true;
     }
 
     /**
@@ -2545,7 +2617,7 @@ class ClipRecorder {
             const chat = shiftChat(last.chat ?? [], gone);
 
             await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat);
-            void writeThumbnail(cut, saved);
+            void writeThumbnail(cut, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
             // Only once the replacement is safely on disk.
             try {
@@ -2925,21 +2997,6 @@ async function writeClip(data: Uint8Array, name: string, blob: Blob): Promise<st
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     return name;
-}
-
-/**
- * Seconds the repair or the cut took off the front of a clip.
- *
- * Both lengths are read from the container, from its first timestamp to its
- * last, so what changed between them is exactly the footage that was dropped.
- */
-function droppedBytes(before: Uint8Array, after: Uint8Array, mimeType: string): number {
-    try {
-        return Math.max(0, lengthBytes(before, mimeType) - lengthBytes(after, mimeType));
-    } catch (e) {
-        logger.warn("Could not measure what the repair dropped, markers may be early", e);
-        return 0;
-    }
 }
 
 /** Moves markers back by what was cut off the front, dropping those cut away. */

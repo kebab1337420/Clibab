@@ -27,7 +27,7 @@
  */
 
 /** What the worker measures: the bed's loudness curve and each track's. */
-export interface LanePreparation {
+interface LanePreparation {
     bedEnvelope: Float32Array;
     lanes: { offset: number; gain: number; rms: Float32Array; gate: Float32Array; }[];
 }
@@ -76,6 +76,10 @@ function startWorker(): Worker | null {
         const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
         const created = new Worker(url);
 
+        // Construction keeps what it needs: holding the URL past this point
+        // leaks one blob URL per worker ever created.
+        URL.revokeObjectURL(url);
+
         created.onmessage = (event: MessageEvent) => {
             const reply = event.data as WorkerReply;
             const entry = pending.get(reply.id);
@@ -85,6 +89,9 @@ function startWorker(): Worker | null {
         };
 
         created.onerror = event => {
+            // A faulted worker never recovers: leave it alive and it sits
+            // there holding its thread, so terminate it with the jobs.
+            created.terminate();
             worker = null;
             const list = [...pending.values()];
             pending.clear();
