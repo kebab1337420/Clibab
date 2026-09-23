@@ -14,6 +14,9 @@ clean, or set `CLIPPER_SKIP_DIRTY_CHECK=1` to build anyway.
    `.\scripts\test.ps1` (must be fully green).
 4. Commit as `chore: cut 6.x.y`, tag `v6.x.y`, push both.
 5. Build the installer: `.\scripts\build-installer.ps1` (needs makensis).
+   It embeds `release/bundle/clipper-bundle-v<version>.zip` into the setup
+   (packaged first when missing), so the installer is offline and always
+   carries the release it names.
 6. Create the release **as a draft**, upload both assets:
    - `release/installer/ClipperSetup.exe`
    - the bundle asset below (without it, the exe installer falls back to the

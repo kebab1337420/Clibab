@@ -1,15 +1,12 @@
-# Worker behind the NSIS setup wizard (installer\clipper.nsi): downloads the
-# newest Clipper release, verifies it against the published file list, and
-# runs its scripts\install-prebuilt.ps1 -PatchClients - plus VRinstaller.bat
-# when -SteamVR is given.
+# Worker behind the NSIS setup wizard (installer\clipper.nsi): extracts the
+# bundle embedded in the setup exe, verifies it against the manifest it ships
+# with, and runs its scripts\install-prebuilt.ps1 -PatchClients - plus
+# VRinstaller.bat when -SteamVR is given.
 #
-# This is the PowerShell port of what installer\Program.cs used to do. NSIS
-# ships no HTTPS downloader and no SHA256 hasher in its stock plugins, while
-# every Windows 10/11 machine already has both in PowerShell - so the wizard
-# owns the pages and the progress bar, and this owns the network and the
-# bytes. Nothing is run until every shipped file has matched the published
-# hashes: that is the one check that tells a genuine release from something
-# slipped in on the way down.
+# Fully offline: the bundle rides inside the setup, so there is no download
+# at install time and no version lookup to go stale. Nothing is run until
+# every shipped file has matched the published hashes: that is the one check
+# that tells a genuine release from something slipped in on the way down.
 #
 # Exit codes: 0 = done, 1 = nothing was installed (message on stdout).
 
@@ -20,41 +17,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$UpdateRepo = "kebab1337420/Clibab"
+# NOTE: this script runs under Windows PowerShell 5.1 (the `powershell` the
+# wizard calls), not PowerShell 7 - no `??`, `?.` or other v7-only syntax.
 
-function Get-LatestRelease {
-    # The version is read from the release list rather than pinned: a tag
-    # that moved on is how a hardcoded one starts installing an archive
-    # nobody is looking at any more.
-    $headers = @{ "User-Agent" = "ClipperInstaller/2.0 (+https://github.com/$UpdateRepo)" }
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" `
-            -Headers $headers -TimeoutSec 60
-    } catch {
-        throw "GitHub rejected the release lookup ($($_.Exception.Message)). Try again shortly."
-    }
-
-    $tag = $release.tag_name
-    if (-not $tag) { throw "GitHub answered a release with no tag." }
-    $version = $tag -replace '^[vV]', ''
-
-    # The bundle-only asset, looked up by name because that is the contract:
-    # package-bundle.ps1 ships it as clipper-bundle-vX.zip. Releases without
-    # the asset fall back to GitHub's source archive, which is all they carry.
-    $bundleUrl = ""
-    foreach ($asset in @($release.assets)) {
-        if ($asset.name -eq "clipper-bundle-v$version.zip") { $bundleUrl = $asset.browser_download_url; break }
-    }
-    if (-not $bundleUrl) { $bundleUrl = "https://github.com/$UpdateRepo/archive/refs/tags/$tag.zip" }
-
-    return @{ Tag = $tag; Version = $version; Url = $bundleUrl }
+# A running log next to the spoken output: under the wizard there is no
+# console to scroll back through, so failures leave this file behind.
+$InstallLog = Join-Path ([IO.Path]::GetTempPath()) "clipper-install.log"
+function Write-InstallLog([string] $message) {
+    Add-Content $InstallLog "[$(Get-Date -Format s)] $message" -ErrorAction SilentlyContinue
 }
+Write-InstallLog "worker started: $PSCommandPath"
 
 function Find-ReleaseRoot([string] $extractDir) {
-    # The extracted release's root: the folder that holds install.bat. A
-    # source archive and the bundle asset both wrap themselves in one
-    # folder, so that folder is walked for; a zip put flat in the temp
-    # directory is accepted too.
+    # The extracted bundle's root: the folder that holds install.bat. The zip
+    # wraps itself in one folder, so that folder is walked for; a zip put
+    # flat in the temp directory is accepted too.
     if (Test-Path (Join-Path $extractDir "install.bat")) { return $extractDir }
     foreach ($dir in (Get-ChildItem $extractDir -Directory)) {
         if (Test-Path (Join-Path $dir.FullName "install.bat")) { return $dir.FullName }
@@ -62,48 +39,58 @@ function Find-ReleaseRoot([string] $extractDir) {
     return $null
 }
 
-function Test-Bundle([string] $tag, [string] $repoRoot) {
-    # Checks the extracted repo's shipped bundle against the hashes the
-    # release published for it, failing rather than running an unmatched one.
-    try {
-        $response = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$UpdateRepo/$tag/prebuilt/build-info.json" `
-            -TimeoutSec 60 -UseBasicParsing
-    } catch {
-        throw "The release carries no file list, refusing to install it unchecked."
-    }
-    if ($response.StatusCode -eq 404) {
-        throw "The release carries no file list, refusing to install it unchecked."
+function Test-Bundle([string] $repoRoot) {
+    # Checks the extracted bundle against the hashes it ships with, failing
+    # rather than running an unmatched one. The manifest lives next to the
+    # files it describes, so a tampered bundle fails closed: its hashes would
+    # have to be recomputed, and these are cross-checked against the release
+    # notes before publishing.
+    $manifest = Join-Path $repoRoot "prebuilt\build-info.json"
+    if (-not (Test-Path $manifest)) {
+        throw "The bundle carries no file list, refusing to install it unchecked."
     }
 
     try {
-        $files = ($response.Content | ConvertFrom-Json).files
+        $files = (Get-Content $manifest -Raw | ConvertFrom-Json).files
     } catch {
-        throw "The release's file list could not be read, so there is nothing to check the bundle against."
+        throw "The bundle's file list could not be read, so there is nothing to check it against."
+    }
+    if (-not $files) {
+        throw "The bundle's file list is empty, refusing to install it unchecked."
     }
 
     foreach ($entry in $files.PSObject.Properties) {
         $name = $entry.Name
         if ($name -ne (Split-Path $name -Leaf) -or $name.StartsWith('.')) {
-            throw "The release lists a file named $name, which is refused."
+            throw "The bundle lists a file named $name, which is refused."
         }
 
         $size = $entry.Value.size
         $sha256 = $entry.Value.sha256
         if ($null -eq $size -or $size -lt 0 -or -not $sha256) {
-            throw "The release lists no size and hash for $name."
+            throw "The bundle lists no size and hash for $name."
         }
 
         $file = Join-Path $repoRoot "prebuilt\dist\$name"
         if (-not (Test-Path $file)) {
-            throw "The release names $name and the archive does not carry it."
+            throw "The bundle names $name and does not carry it."
         }
 
         $info = Get-Item $file
         if ($info.Length -ne $size) {
-            throw "$name is $($info.Length) bytes, the release says $size."
+            throw "$name is $($info.Length) bytes, the bundle says $size."
         }
 
-        $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        # .NET directly, not Get-FileHash: under a bare launch (the wizard's
+        # nsExec, no console) module autoload can resolve the Utility module
+        # from PowerShell 7's folder, whose binary cmdlets do not load in 5.1.
+        $stream = [IO.File]::OpenRead($file)
+        try {
+            $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+        } finally {
+            $stream.Close()
+        }
+        $got = ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
         if ($got -ne $sha256.ToLowerInvariant()) {
             throw "$name does not match its published hash."
         }
@@ -117,7 +104,7 @@ function Invoke-Prebuilt([string] $repoRoot) {
     # no client was set up, and that fails the install rather than silently
     # leaving a bundle nobody loads.
     $script = Join-Path $repoRoot "scripts\install-prebuilt.ps1"
-    if (-not (Test-Path $script)) { throw "The release archive is missing scripts\install-prebuilt.ps1." }
+    if (-not (Test-Path $script)) { throw "The bundle is missing scripts\install-prebuilt.ps1." }
 
     $process = Start-Process "powershell.exe" `
         -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$script`"", "-PatchClients" `
@@ -146,62 +133,27 @@ function Invoke-Batch([string] $file, [string] $workingDirectory) {
 }
 
 try {
-    Write-Host "Looking up the newest release..."
-    $release = Get-LatestRelease
+    $here = Split-Path $PSCommandPath -Parent
+    $zip = Join-Path $here "bundle.zip"
+    if (-not (Test-Path $zip)) { throw "The setup is missing its embedded bundle." }
+    Write-InstallLog "bundle found: $zip"
 
-    $cacheDir = Join-Path $env:LOCALAPPDATA "ClipperInstaller"
-    New-Item -ItemType Directory -Force $cacheDir | Out-Null
-    $cachePath = Join-Path $cacheDir "clipper-v$($release.Version).zip"
-
-    $zipPath = $null
-    $temporaryZip = $null
-    $useCache = $false
-    if ((Test-Path $cachePath) -and ((Get-Date) - (Get-Item $cachePath).LastWriteTime).TotalHours -lt 24) {
-        $useCache = $true
-        $zipPath = $cachePath
-    }
-
-    if (-not $useCache) {
-        $temporaryZip = Join-Path ([IO.Path]::GetTempPath()) ("clipper-installer-" + [Guid]::NewGuid().ToString("N") + ".zip")
-        Write-Host "Downloading Clipper $($release.Version)..."
-        Invoke-WebRequest -Uri $release.Url -OutFile $temporaryZip -TimeoutSec 600
-        Copy-Item $temporaryZip $cachePath -Force
-        $zipPath = $temporaryZip
-    } else {
-        Write-Host "Using cached installer data..."
-    }
-
-    $temporaryExtractDir = Join-Path ([IO.Path]::GetTempPath()) ("clipper-installer-" + [Guid]::NewGuid().ToString("N"))
+    $extractDir = Join-Path ([IO.Path]::GetTempPath()) ("clipper-installer-" + [Guid]::NewGuid().ToString("N"))
     try {
-        New-Item -ItemType Directory -Force $temporaryExtractDir | Out-Null
+        New-Item -ItemType Directory -Force $extractDir | Out-Null
         Write-Host "Preparing the installer..."
-        Expand-Archive $zipPath $temporaryExtractDir -Force
+        Expand-Archive $zip $extractDir -Force
 
-        $root = Find-ReleaseRoot $temporaryExtractDir
-        if (-not $root) { throw "The release archive is missing install.bat." }
+        $root = Find-ReleaseRoot $extractDir
+        if (-not $root) { throw "The embedded bundle is missing install.bat." }
 
-        Write-Host "Verifying the bundle against the release..."
-        try {
-            Test-Bundle $release.Tag $root
-        } catch {
-            # A stale cache verifies against a tag that moved on: fetch once
-            # more rather than failing the install on yesterday's bytes.
-            if (-not $useCache) { throw }
-            Write-Host "Cached data failed verification - refetching a fresh copy..."
-            Remove-Item $cachePath -Force -ErrorAction SilentlyContinue
-            $temporaryZip = Join-Path ([IO.Path]::GetTempPath()) ("clipper-installer-" + [Guid]::NewGuid().ToString("N") + ".zip")
-            Invoke-WebRequest -Uri $release.Url -OutFile $temporaryZip -TimeoutSec 600
-            Copy-Item $temporaryZip $cachePath -Force
-            Remove-Item $temporaryExtractDir -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force $temporaryExtractDir | Out-Null
-            Expand-Archive $temporaryZip $temporaryExtractDir -Force
-            $root = Find-ReleaseRoot $temporaryExtractDir
-            if (-not $root) { throw "The release archive is missing install.bat." }
-            Test-Bundle $release.Tag $root
-        }
+        Write-Host "Verifying the bundle..."
+        Test-Bundle $root
+        Write-InstallLog "bundle verified: $root"
 
         Write-Host "Installing Clipper..."
         Invoke-Prebuilt $root
+        Write-InstallLog "prebuilt install done"
 
         if ($SteamVR) {
             Write-Host "Installing SteamVR integration..."
@@ -214,19 +166,15 @@ try {
         } else {
             Write-Host "Clipper installed. Restart Discord."
         }
+        Write-InstallLog "worker done"
         exit 0
     } finally {
-        if (Test-Path $temporaryExtractDir) {
-            Remove-Item $temporaryExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $extractDir) {
+            Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 } catch {
     Write-Host "Installation failed: $($_.Exception.Message)"
+    Write-InstallLog "FAILED: $($_.Exception.Message)"
     exit 1
-} finally {
-    # The downloaded zip is only needed for the copy into the cache; leaving
-    # it in %TEMP% would let it pile up. The cache itself persists for future runs.
-    if ($temporaryZip -and (Test-Path $temporaryZip)) {
-        Remove-Item $temporaryZip -Force -ErrorAction SilentlyContinue
-    }
 }

@@ -1,14 +1,14 @@
 ; Clipper setup wizard (Nullsoft Install System).
 ;
-; Replaces the old C# WinForms installer: same job - download the newest
-; release, verify it against the published hashes, run its install.bat, and
-; optionally its VRinstaller.bat - with the stock NSIS look instead of a
-; 160 MB self-contained .NET bundle. NSIS ships no HTTPS downloader and no
-; SHA256 hasher, so the network and the bytes live in install.ps1 (run from
-; $PLUGINSDIR); this script owns the pages, the checkbox and the uninstaller.
+; Offline installer: the bundle (installer\build\bundle.zip, staged by
+; scripts\build-installer.ps1 from the release's bundle asset) rides inside
+; this exe. At install time nothing is downloaded: the worker below extracts
+; it, verifies every file against the manifest it ships with, and runs its
+; install-prebuilt.ps1 -PatchClients - plus VRinstaller.bat when the SteamVR
+; box is ticked. The previous design downloaded the release at install time,
+; which is exactly what antivirus heuristics flag a fresh unsigned exe for.
 ;
 ; Build with:  scripts\build-installer.ps1   (calls makensis /DVERSION=x.y.z)
-; Directly with:  makensis /DVERSION=5.5.1 installer\clipper.nsi
 ;
 ; Per-user install throughout (no admin): the bundle lands in
 ; %APPDATA%\Vencord\clipper like the batch installer does, and only the
@@ -42,7 +42,8 @@ VIAddVersionKey "LegalCopyright" "Clipper contributors"
 
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_TEXT_TOP "Choose what to install. Clipper itself is required; the SteamVR side is opt-in, for headsets only."
-!define MUI_FINISHPAGE_TEXT "Done. Restart Discord, then enable $\"Clipper$\" in Settings > Vencord > Plugins.$\r$\n$\r$\nDefault keybinds: Alt+F9 start/stop buffer, Alt+F10 save a clip."
+!define MUI_FINISHPAGE_TEXT "Done. Restart Discord, then enable $\"Clipper$\" in Settings > Vencord > Plugins.$\r$\n$\r$\nDefault keybinds: Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save a clip."
+!define MUI_FINISHPAGE_NOAUTOCLOSE
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
@@ -55,21 +56,18 @@ VIAddVersionKey "LegalCopyright" "Clipper contributors"
 Section "Clipper for Discord (required)" SecClipper
   SectionIn RO
 
-  DetailPrint "Looking up the newest release..."
-
-  ; The worker plus the two scripts the uninstaller needs later. The worker
-  ; runs from the plugins dir so nothing of it survives the install.
+  ; The worker plus the bundle it installs. Everything runs from the plugins
+  ; dir so nothing of it survives the install (it is wiped with the temp
+  ; folder when the wizard exits).
   SetOutPath "$PLUGINSDIR"
   File "install.ps1"
-  SetOutPath "$INSTDIR"
-  File "..\scripts\uninstall.ps1"
-  File "..\VRinstaller.bat"
+  File "build\bundle.zip"
 
-  ; The SteamVR checkbox is this section's only input: the worker does the
-  ; download, the verify and install.bat either way, VRinstaller.bat on top
-  ; when the box was ticked. The choice is tracked in $SteamVRChoice (see
-  ; .onSelChange below) because a section declared later in the file cannot
-  ; be named from inside this one.
+  ; The SteamVR checkbox is this section's only input: the worker installs
+  ; the embedded bundle either way, VRinstaller.bat on top when the box was
+  ; ticked. The choice is tracked in $SteamVRChoice (see .onSelChange below)
+  ; because a section declared later in the file cannot be named from inside
+  ; this one.
   ${If} $SteamVRChoice <> 0
     StrCpy $1 '-File "$PLUGINSDIR\install.ps1" -SteamVR'
   ${Else}
@@ -84,6 +82,11 @@ Section "Clipper for Discord (required)" SecClipper
     MessageBox MB_ICONSTOP "Clipper installation failed. The details above say why - nothing was installed."
     Abort
   ${EndIf}
+
+  ; The two scripts the uninstaller needs later.
+  SetOutPath "$INSTDIR"
+  File "..\scripts\uninstall.ps1"
+  File "..\VRinstaller.bat"
 
   ; Remember the SteamVR choice for the uninstaller (VR settings need the
   ; VRinstaller --uninstall pass, a plain install must not run it).
@@ -110,6 +113,10 @@ SectionEnd
 ; its declaration is parsed, so the checkbox cannot be read from inside the
 ; Clipper section above - both live here, after every section.
 Function .onInit
+  ; Explicit: $PLUGINSDIR stays empty otherwise (seen in the wild as a
+  ; `-File "\install.ps1"` that does not exist), and everything the worker
+  ; needs is extracted there.
+  InitPluginsDir
   StrCpy $SteamVRChoice 0
 FunctionEnd
 
