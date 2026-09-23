@@ -1028,6 +1028,12 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
         return () => clearInterval(id);
     }, [recording]);
 
+    // Keyboard users land on the first action, not outside the menu.
+    const menuRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    }, []);
+
     const item = (label: string, action: () => void, disabled = false, className?: string, title?: string) => (
         <button
             className={className}
@@ -1047,8 +1053,8 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
     const cuts = [15, 30, 60].filter(n => n < settings.store.clipLength);
 
     return (
-        <div className="vc-clipper-menu">
-            {item(recording ? "Stop the clip buffer" : "Start the clip buffer", () => void recorder.toggle())}
+        <div className="vc-clipper-menu" ref={menuRef}>
+            {item(recording ? "Stop recording" : "Start recording", () => void recorder.toggle())}
 
             {/*
               * The whole buffer and the short cuts on one line.
@@ -1069,23 +1075,23 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
             </div>
 
             <div className="vc-clipper-menu-row">
-                {item("Watch buffer", onPreview, !recording || !buffered, undefined, "Watch the buffer before saving")}
+                {item("Preview buffer", onPreview, !recording || !buffered, undefined, "Preview the buffer before saving")}
                 {item(
                     recorder.markCount ? `Marker (${recorder.markCount})` : "Marker",
-                    () => recorder.mark(),
+                    () => { recorder.mark(); toast(`Marker ${recorder.markCount} saved`, Toasts.Type.SUCCESS); },
                     !recording,
                     undefined,
                     "Drop a marker on this moment"
                 )}
-                {item("Everyone", () => void requestPov(), !recording, undefined, "Ask everyone in the call to save their own angle")}
+                {item("Everyone's angle", () => void requestPov(), !recording, undefined, "Ask everyone in the call to save their own angle")}
             </div>
 
             {last && (
                 <>
                     <div className="vc-clipper-menu-label" title={last.name}>{last.name}</div>
                     <div className="vc-clipper-menu-row">
-                        {item("Send", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
-                        {item("GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
+                        {item("Send to channel", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
+                        {item("Ending as GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
                         {cuts.map(n => (
                             <React.Fragment key={n}>
                                 {item(`${n}s`, () => void recorder.trimLastSaved(n), false, "vc-clipper-menu-chip", `Keep only its last ${n} seconds`)}
@@ -1101,8 +1107,8 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
                 {CLIPS_AVAILABLE && item("Clip studio", onStudio)}
                 <span className="vc-clipper-menu-status">
                     {recording
-                        ? `${buffered}s / ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`
-                        : "Buffer stopped"}
+                        ? `Buffered ${buffered}s of ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`
+                        : "Recording stopped"}
                 </span>
             </div>
         </div>
@@ -1166,8 +1172,13 @@ export function ClipperOverlay() {
         if (!menu) return;
 
         const close = () => setMenu(false);
+        const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
         window.addEventListener("click", close);
-        return () => window.removeEventListener("click", close);
+        window.addEventListener("keydown", onKey);
+        return () => {
+            window.removeEventListener("click", close);
+            window.removeEventListener("keydown", onKey);
+        };
     }, [menu]);
 
     const { panelButton, sourceName, studioMode } = settings.use(["panelButton", "sourceName", "studioMode"]);

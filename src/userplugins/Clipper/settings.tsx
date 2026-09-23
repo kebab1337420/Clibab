@@ -30,6 +30,15 @@ export const settings = definePluginSettings({
      * picker, which is where they are actually needed. Kept here as stored
      * values only, so the panel does not show the same knobs twice.
      */
+    captureSection: {
+        type: OptionType.COMPONENT,
+        component: () => (
+            <SettingsSection
+                title="Capture & highlights"
+                note="The buffer, what marks moments by itself, and what gets saved without asking."
+            />
+        )
+    },
     autoStart: {
         type: OptionType.BOOLEAN,
         description: "Start the capture buffer as soon as Discord launches, on the remembered source (the primary screen when none was picked)",
@@ -42,7 +51,7 @@ export const settings = definePluginSettings({
     },
     autoHighlight: {
         type: OptionType.BOOLEAN,
-        description: "Drop a marker by itself when something happens: gunfire out of the game, the screen going red or dark, a kill the game reported, the call going off alongside any of it. The call's own noise no longer marks anything by itself - see the setting below - because the loudest second of an evening is usually somebody swearing at a bad play",
+        description: "Drop a marker by itself when something happens: a game event, a damage flash, the screen going dark, the call reacting. Voice alone never marks (see the setting below)",
         default: true
     },
     voiceHighlights: {
@@ -54,9 +63,9 @@ export const settings = definePluginSettings({
         type: OptionType.SELECT,
         description: "How much has to happen before a marker drops by itself",
         options: [
-            { label: "Strict - only the call properly going off", value: "strict" },
+            { label: "Strict - several detectors must agree", value: "strict" },
             { label: "Normal", value: "normal", default: true },
-            { label: "Loose - a hint of it is enough", value: "loose" }
+            { label: "Loose - a single hint is enough", value: "loose" }
         ]
     },
     gameAudioWatch: {
@@ -76,8 +85,13 @@ export const settings = definePluginSettings({
     },
     autoHighlightSave: {
         type: OptionType.BOOLEAN,
-        description: "And save a clip of those moments without being asked. At most one every two minutes",
+        description: "And save a clip of each highlight moment without being asked. At most one every two minutes",
         default: false
+    },
+    nativeEngine: {
+        type: OptionType.BOOLEAN,
+        description: "Record through Discord's own clip engine when it can (needs the Clips experiment and a window as the source). It keeps one audio track per person in the file instead of one mixed track, which is the only way a mute can remove somebody and leave the others talking. The plugin's own buffer keeps running underneath, so a clip is never lost if the engine refuses",
+        default: true
     },
     clipLength: {
         type: OptionType.CUSTOM,
@@ -216,11 +230,6 @@ export const settings = definePluginSettings({
             <SettingsSection title="Interface" />
         )
     },
-    nativeEngine: {
-        type: OptionType.BOOLEAN,
-        description: "Record through Discord's own clip engine when it can (needs the Clips experiment and a window as the source). It keeps one audio track per person in the file instead of one mixed track, which is the only way a mute can remove somebody and leave the others talking. The plugin's own buffer keeps running underneath, so a clip is never lost if the engine refuses",
-        default: true
-    },
     panelButton: {
         type: OptionType.BOOLEAN,
         description: "Show the floating Clipper button above the account panel (left click: pick a source, right click: start / stop / save)",
@@ -266,7 +275,7 @@ export const settings = definePluginSettings({
     },
     overlaySeconds: {
         type: OptionType.SLIDER,
-        description: "Seconds of the clip to play, counted back from its end - the moment you saved is the one at the end of the buffer. 0 plays the whole thing",
+        description: "Seconds of the clip to play, counted back from its end - the moment you saved is the one at the end of the buffer. 0 plays the whole clip",
         markers: [0, 5, 10, 15, 20, 30, 45, 60],
         default: 10,
         stickToMarkers: true
@@ -330,7 +339,7 @@ export const settings = definePluginSettings({
         default: "alt+F11",
         component: () => (
             <KeybindInput
-                title="Drop a marker keybind"
+                title="Marker keybind"
                 note="Notes the moment without saving anything. Every marker inside the clip you save afterwards shows up on the studio timeline, so you can find the play again without scrubbing for it."
                 value={settings.store.markKeybind}
                 onChange={v => (settings.store.markKeybind = v)}
@@ -354,7 +363,7 @@ export const settings = definePluginSettings({
         default: "alt+F8",
         component: () => (
             <KeybindInput
-                title="Clip editor keybind"
+                title="Clip studio keybind"
                 note="Opens the clip you saved last in an editor over the game, and hands it the mouse: watch it, pick a range out of it, cut it, send it, delete it or take it to the full studio. A second press gives the mouse back to the game and closes it, and so does Escape."
                 value={settings.store.replayKeybind}
                 onChange={v => (settings.store.replayKeybind = v)}

@@ -16,7 +16,8 @@ import { Heading } from "@components/Heading";
 import { Paragraph } from "@components/Paragraph";
 import { useEffect, useState } from "@webpack/common";
 
-import { checkForUpdate, CLIPPER_VERSION, installUpdate, RESTART_FIRST, restartClient, updateState, watchUpdates } from "../updater";
+import { settings } from "../settings";
+import { checkNow, CLIPPER_VERSION, installUpdate, RESTART_FIRST, restartClient, updateState, watchUpdates } from "../updater";
 
 export function UpdateStatus() {
     const [, redraw] = useState(0);
@@ -28,10 +29,16 @@ export function UpdateStatus() {
 
     const { latest } = state;
 
+    // After a window reload the in-memory `latest` is gone but the owed
+    // restart is still in settings, so the row names that version instead of
+    // showing "undefined".
+    const pendingRestart = (settings.store as typeof settings.store & { pendingRestartVersion?: string }).pendingRestartVersion;
+    const shownVersion = latest?.version ?? pendingRestart;
+
     const status = state.checking
         ? "Checking GitHub..."
         : state.restartNeeded
-            ? `Version ${latest?.version} is written. It loads once Discord restarts.`
+            ? `Version ${shownVersion} downloaded — restart Discord to use it (you are still on the old one until then).`
             : state.error
                 ? state.error === RESTART_FIRST ? state.error : `Last check failed: ${state.error}`
                 : latest?.available
@@ -54,7 +61,7 @@ export function UpdateStatus() {
                 <Button
                     variant="secondary"
                     disabled={state.checking || state.installing}
-                    onClick={() => void checkForUpdate()}
+                    onClick={() => void checkNow()}
                 >
                     {state.checking ? "Checking..." : "Check now"}
                 </Button>

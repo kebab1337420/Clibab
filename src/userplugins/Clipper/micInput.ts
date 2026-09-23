@@ -38,9 +38,10 @@
  */
 
 import { Logger } from "@utils/Logger";
-import { FluxDispatcher, MediaEngineStore, SelectedChannelStore, UserStore } from "@webpack/common";
+import { FluxDispatcher, MediaEngineStore, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 
 import { settings } from "./settings";
+import { toast } from "./toasts";
 
 const logger = new Logger("Clipper", "#f0b132");
 
@@ -345,6 +346,9 @@ async function openMic(plan: MicPlan): Promise<{ stream: MediaStream; plan: MicP
         // Unplugged between the enumeration and now, or held exclusively by
         // something else. A clip with the wrong microphone beats a silent one.
         logger.warn("Discord's input device would not open, keeping the default one", e);
+
+        const fallback = openedLabel(first, devices) || "the system default";
+        toast(`Microphone ${plan.discordDeviceName || "Discord's input device"} unavailable — using ${fallback} instead`, Toasts.Type.FAILURE);
 
         return {
             stream: first,

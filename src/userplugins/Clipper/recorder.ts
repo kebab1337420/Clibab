@@ -376,6 +376,8 @@ class ClipRecorder {
     private autoClipPending = false;
     /** Poll that writes down what the client is holding. See `watchMemory`. */
     private memoryTicker: ReturnType<typeof setInterval> | null = null;
+    /** Whether the memory-full toast has been shown for this recording session. */
+    private memoryWarned = false;
     private nativeResetTicker: ReturnType<typeof setInterval> | null = null;
     private nativeResetTimeout: ReturnType<typeof setTimeout> | null = null;
     /** Invalidates an async native arm when the buffer is stopped or restarted. */
@@ -485,6 +487,13 @@ class ClipRecorder {
     private trackDied = false;
 
     /**
+     * The video track ended on its own (source revoked), as opposed to a
+     * voluntary stop through toggle(). Read by stop() for its toast, then
+     * cleared.
+     */
+    private sourceLost = false;
+
+    /**
      * The 500 ms flush timers still armed when a save/stop gives up.
      *
      * `cleanup` resolves the `nextChunk` waiters, which leaves the timeout in
@@ -581,6 +590,12 @@ class ClipRecorder {
 
         const at = Math.max(0, Math.round((Date.now() - this.bufferStart) / 1000));
         toast(`Marker at ${at}s (${this.marks.length} in the buffer)`, Toasts.Type.MESSAGE);
+
+        try {
+            void playClipSound(ms => this.duckSystem(ms));
+        } catch {
+            // No sound, no problem: the toast above already said the marker landed.
+        }
     }
 
     /**
@@ -698,8 +713,10 @@ class ClipRecorder {
                 // the save has handed back, then stop from there.
                 if (this.state === "saving") {
                     this.trackDied = true;
+                    this.sourceLost = true;
                     return;
                 }
+                this.sourceLost = true;
                 void this.stop();
             };
             videoTrack.addEventListener("ended", this.onTrackEnded);
@@ -796,7 +813,18 @@ class ClipRecorder {
             this.setState("idle");
 
             logger.error("Failed to start capture", e);
-            toast(`Could not start the clip buffer: ${errorMessage(e)}`, Toasts.Type.FAILURE);
+
+            // The raw error names nothing the person can act on, so it stays in
+            // the console and the toast says what to do instead.
+            const name = (e as DOMException)?.name;
+            const friendly = name === "NotAllowedError"
+                ? "Permission denied — allow screen/microphone access in Windows Settings > Privacy, then pick the source again"
+                : name === "NotFoundError"
+                    ? "No capture device found — check the device is plugged in"
+                    : name === "AbortError"
+                        ? "Capture was cancelled — pick the source again to start"
+                        : `Could not start the clip buffer: ${errorMessage(e)}`;
+            toast(friendly, Toasts.Type.FAILURE);
             return false;
         }
     }
@@ -820,6 +848,7 @@ class ClipRecorder {
         if (!displayTracks.length && !mixer.system.muted) {
             this.systemStream = await captureSystemAudio();
             if (this.systemStream) displayTracks = this.systemStream.getAudioTracks();
+            else toast("No system audio captured — the clip will have microphone only (or silence)", Toasts.Type.MESSAGE);
         }
 
         if (!displayTracks.length && !includeMic && !mixer.extras.length) return undefined;
@@ -846,8 +875,13 @@ class ClipRecorder {
                 // Discord's input volume slider is not part of the track, so it
                 // is folded into the channel's own level rather than lost.
                 if (this.mic) this.connectChannel(MIC_CHANNEL, this.mic.node, gainOf(mixer.mic), this.mic.volume);
+                else {
+                    logger.warn("Microphone unavailable, recording without it");
+                    toast("Microphone unavailable — recording without your voice", Toasts.Type.FAILURE);
+                }
             } catch (e) {
                 logger.warn("Microphone unavailable, recording without it", e);
+                toast("Microphone unavailable — recording without your voice", Toasts.Type.FAILURE);
             }
         }
 
@@ -1318,6 +1352,7 @@ class ClipRecorder {
 
                 rememberRelayOnly(mime);
                 logger.info(`The ${mime} encoder took the capture through a canvas`);
+                toast(`Switched encoder (${extensionFor(mime).toUpperCase()} → ${extensionFor(mime).toUpperCase()} via canvas) — footage and markers before the switch were lost, recording continues`, Toasts.Type.MESSAGE);
                 return;
             }
         }
@@ -1462,17 +1497,14 @@ class ClipRecorder {
         // The footage they pointed at was written by the encoder that just died.
         this.marks = [];
 
-        logger.info(`The buffer carried on as ${this.mimeType}`);
+        logger.info(`The buffer carried on as ${this.mimeType}${detail ? ` (${detail})` : ""}`);
 
-        // Falling from one MP4 candidate to the next is not news: the clip is
-        // still an MP4 and nothing the user asked for has changed. Losing the
-        // container is, and it is said once, here, rather than at every launch.
-        if (extensionFor(failed) !== extensionFor(this.mimeType)) {
-            toast(
-                `This client's ${extensionFor(failed).toUpperCase()} encoder failed${detail ? ` (${detail})` : ""} - the buffer carried on as ${extensionFor(this.mimeType).toUpperCase()}`,
-                Toasts.Type.MESSAGE
-            );
-        }
+        // Said every time, even MP4 to MP4: the container looks the same but
+        // the footage and the markers from before the switch are gone.
+        toast(
+            `Switched encoder (${extensionFor(failed).toUpperCase()} → ${extensionFor(this.mimeType).toUpperCase()}) — footage and markers before the switch were lost, recording continues`,
+            Toasts.Type.MESSAGE
+        );
     }
 
     stop() {
@@ -1486,7 +1518,12 @@ class ClipRecorder {
         this.cleanup();
         this.setState("idle");
         this.pickedByHand = false;
-        if (hadStarted) toast("Clip buffer stopped", Toasts.Type.MESSAGE);
+        if (hadStarted) {
+            toast(this.sourceLost
+                ? "Capture source was lost (screen/window closed or unplugged) — pick the source again to restart"
+                : "Clip buffer stopped", this.sourceLost ? Toasts.Type.FAILURE : Toasts.Type.MESSAGE);
+        }
+        this.sourceLost = false;
     }
 
     /**
@@ -1512,6 +1549,7 @@ class ClipRecorder {
             if (this.activeSource?.id.startsWith("screen:")) return;
 
             logger.info(`${game} started, moving the capture onto its screen`);
+            toast(`Clip source: ${game} (auto-switched) — the buffer restarted`, Toasts.Type.MESSAGE);
             this.pickedByHand = false;
 
             // Out of the store's own dispatch: the restart drops this listener.
@@ -1601,8 +1639,14 @@ class ClipRecorder {
                     + `${jsHeap()}, clip buffer holding ${formatBytes(this.bufferedBytes)}`
                     + ` | ${biggest}${worst}`;
 
-                if (swollen) logger.warn(`${line} - ${swollen.type} is the one about to go, a reload is what comes next`);
-                else logger.info(line);
+                if (swollen) {
+                    logger.warn(`${line} - ${swollen.type} is the one about to go, a reload is what comes next`);
+
+                    if (!this.memoryWarned) {
+                        this.memoryWarned = true;
+                        toast("Memory is getting full — save your clip soon or part of the buffer may be lost", Toasts.Type.MESSAGE);
+                    }
+                } else logger.info(line);
             })();
         }, MEMORY_WATCH_MS);
     }
@@ -1617,6 +1661,7 @@ class ClipRecorder {
         this.generation++;
 
         this.stopMemoryWatch();
+        this.memoryWarned = false;
 
         // Detached before the stop, because stopping is what makes the encoder
         // hand over its last chunk. Dropping the reference is not enough: the
@@ -2046,6 +2091,13 @@ class ClipRecorder {
             // front, so this is the instant the saved footage really begins.
             const tracks = await this.saveVoices(saved, start + cutOff * 1000, end);
 
+            // Somebody spoke during the clip (the activity lanes say so) while a
+            // per-person buffer was running, but no per-person file made it to
+            // disk: say what was lost, not just that something was saved. When
+            // no per-person buffer runs at all (native desktop client), an empty
+            // result is normal and not a failure.
+            const voicesFailed = voiceBuffers.active && lanes.length > 0 && !tracks.length;
+
             // File the clip under whatever is running now: after the save, the
             // player may already have alt-tabbed away.
             await tagSavedClip(path, offsets, lanes.map(toMeta), tracks, voiceLevelsFrom(readMixer()), chat);
@@ -2057,9 +2109,11 @@ class ClipRecorder {
             if (settings.store.notifications) {
                 showNotification({
                     title: "Clip saved",
-                    body: `${length}s - ${formatBytes(blob.size)}\n${path}`,
+                    body: `${length}s - ${formatBytes(blob.size)}${voicesFailed ? " (mixed sound only — individual voices failed)" : ""}\n${path}`,
                     onClick: () => copy(path)
                 });
+            } else if (voicesFailed) {
+                toast("Clip saved (mixed sound only — individual voices failed)", Toasts.Type.MESSAGE);
             } else {
                 toast(`Clip saved (${length}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             }

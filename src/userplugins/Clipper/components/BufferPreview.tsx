@@ -37,6 +37,7 @@ export function BufferPreview({ onClose }: { onClose(): void; }) {
     const [buffered, setBuffered] = useState<Buffered | null>(null);
     const [error, setError] = useState("");
     const [url, setUrl] = useState("");
+    const [saving, setSaving] = useState(false);
 
     const [span, setSpan] = useState(0);
     const [at, setAt] = useState(0);
@@ -103,15 +104,22 @@ export function BufferPreview({ onClose }: { onClose(): void; }) {
     };
 
     const save = () => {
-        if (!buffered) return;
+        if (!buffered || saving) return;
 
-        // Back into wall-clock, which is what the buffer is indexed by.
-        void recorder.save(undefined, {
-            from: buffered.start + from * 1000,
-            to: buffered.start + to * 1000
-        });
-
-        onClose();
+        // Awaited rather than fired: recorder.save() toasts the outcome itself
+        // before its promise resolves, so closing in the finally closes after
+        // the toast, not before it.
+        setSaving(true);
+        void (async () => {
+            try {
+                await recorder.save(undefined, {
+                    from: buffered.start + from * 1000,
+                    to: buffered.start + to * 1000
+                });
+            } finally {
+                onClose();
+            }
+        })();
     };
 
     const percent = (seconds: number) => (span ? (seconds / span) * 100 : 0);
@@ -210,7 +218,7 @@ export function BufferPreview({ onClose }: { onClose(): void; }) {
                 <div className="vc-clipper-foot">
                     <span>The buffer keeps rolling while this is open - this is a copy of it.</span>
                     <button onClick={onClose}>Cancel</button>
-                    <button disabled={!url} onClick={save}>Save this bit</button>
+                    <button disabled={!url || saving} onClick={save}>{saving ? "Saving…" : "Save this bit"}</button>
                 </div>
             </div>
         </div>

@@ -201,7 +201,7 @@ export default definePlugin({
     toolboxActions: {
         "Start / stop clip buffer": () => recorder.toggle(),
         "Save clip": () => recorder.save(),
-        "Drop a marker": () => recorder.mark(),
+        "Marker": () => recorder.mark(),
         "Clip everyone's angle": () => void requestPov(),
         "Edit the last clip over the game": () => void toggleGameOverlay(),
         "Watch the last clip over the game": () => void watchLastClip(),
@@ -283,6 +283,17 @@ export default definePlugin({
         mountOverlay();
 
         if (settings.store.autoStart) recorder.start();
+
+        // Said once, on the first run: what is on and how to start recording.
+        const extraStore = settings.store as typeof settings.store & { welcomedShown?: boolean };
+        if (!extraStore.welcomedShown) {
+            extraStore.welcomedShown = true;
+            toast(
+                `Clipper is on. Pick a source from the chat-bar button to start recording (Alt+F10 drops a marker).${settings.store.autoStart ? "" : " The recording buffer stays off until you start it."}`,
+                Toasts.Type.MESSAGE,
+                8000
+            );
+        }
 
         // Not awaited: an unreachable GitHub must cost the launch nothing.
         void checkAtLaunch();

@@ -21,6 +21,7 @@
 import { React, Toasts, useEffect, useRef, useState } from "@webpack/common";
 
 import {
+    FolderReadError,
     listClips,
     loadClipUrl,
     loadThumbUrl,
@@ -30,6 +31,7 @@ import {
     writeClipCopy
 } from "../clips";
 import { logger } from "../recorder";
+import { settings } from "../settings";
 import {
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -67,6 +69,8 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
     const [progress, setProgress] = useState(-1);
     const [note, setNote] = useState("");
     const [error, setError] = useState("");
+    /** The folder listing failed: an unreadable folder is not an empty one. */
+    const [listError, setListError] = useState("");
 
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const cancelRef = useRef(false);
@@ -97,10 +101,22 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
 
     /** Reloads the clip list and every thumbnail that does not exist yet. */
     const reloadClips = async () => {
-        const next = await listClips();
+        let next: StoredClip[];
+
+        try {
+            next = await listClips();
+        } catch (e) {
+            if (!aliveRef.current) return;
+            logger.warn("Could not list clips for the simple studio", e);
+            const dir = e instanceof FolderReadError ? e.dir : settings.store.saveDirectory;
+            setClips([]);
+            setListError(`Could not read the clip folder (${dir}) - check the save location in Settings`);
+            return;
+        }
         if (!aliveRef.current) return;
 
         setClips(next);
+        setListError("");
 
         const fresh = await Promise.all(
             next
@@ -271,11 +287,13 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
             });
 
             const path = await writeClipCopy(blob, renderName(src.name, blob.type));
-            toast(`Clip saved (${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
+            const saved = path.split(/[\\/]/).pop() || "clip";
+            toast(`Clip saved: ${saved} (${Math.round(trimmed)}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             logger.info("Trimmed a clip from the simple studio", path);
 
-            await writeThumbnail(blob, path.split(/[\\/]/).pop() || "");
+            await writeThumbnail(blob, saved);
             void reloadClips();
+            setPicked(saved);
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
 
@@ -332,8 +350,9 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
                             </div>
                         )}
 
-                        {clips === null && <div className="vc-clipper-note">Reading the clip folder…</div>}
-                        {clips?.length === 0 && <div className="vc-clipper-note">No clip saved yet.</div>}
+                        {clips === null && !listError && <div className="vc-clipper-note">Reading the clip folder…</div>}
+                        {listError && <div className="vc-clipper-note vc-clipper-error">{listError}</div>}
+                        {!listError && clips?.length === 0 && <div className="vc-clipper-note">No clip saved yet.</div>}
                         {!!clips?.length && !shown.length && <div className="vc-clipper-note">No clip matches.</div>}
 
                         {shown.map(clip => (
@@ -480,7 +499,7 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
 
                         <div className="vc-clipper-studio-foot">
                             <button className="vc-clipper-primary" disabled={busy || !source || trimmed <= 0} onClick={() => void onRender()}>
-                                {progress >= 0 ? `Rendering ${Math.round(progress * 100)}%` : `Render ${formatTime(trimmed)}`}
+                                {progress >= 0 ? `Rendering ${Math.round(progress * 100)}%` : `Save ${formatTime(trimmed)}`}
                             </button>
 
                             {progress >= 0 && (

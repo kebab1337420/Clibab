@@ -95,6 +95,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                     autoPlay
                     loop
                     muted
+                    title="Click for sound"
                     onClick={e => {
                         // Click to hear it, click again to shut it up.
                         const video = e.currentTarget;
