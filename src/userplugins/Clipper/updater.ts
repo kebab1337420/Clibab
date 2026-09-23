@@ -39,7 +39,7 @@ const logger = new Logger("Clipper");
  * release tag, so a build has to go out under the tag it names here: publish
  * this one as v5.5.1, or the clients already running it are offered it again.
  */
-export const CLIPPER_VERSION = "6.5.0";
+export const CLIPPER_VERSION = "6.5.1";
 
 interface UpdateState {
     /** A check is in flight. */
@@ -106,7 +106,15 @@ type ExtraStore = typeof settings.store & {
     welcomedShown?: boolean;
 };
 
-const extraStore = settings.store as ExtraStore;
+/*
+ * Read lazily, never at module load: settings.tsx pulls UpdateStatus, which
+ * pulls this module, so reading settings.store here would run while the
+ * settings module is still evaluating and throw at startup (taking the whole
+ * renderer bundle with it).
+ */
+function extraStore(): ExtraStore {
+    return settings.store as ExtraStore;
+}
 
 /**
  * Turns a raw failure into something to do about it.
@@ -217,7 +225,7 @@ export async function installUpdate(info: UpdateInfo, quiet = false): Promise<bo
         // Kept in settings, not just in memory: after "Later", or a window
         // reload that wipes this module's state, the next launch still knows
         // a restart is owed. Cleared once the new bundle is seen running.
-        extraStore.pendingRestartVersion = info.version;
+        extraStore().pendingRestartVersion = info.version;
         change({ restartNeeded: true });
         offerRestart(info);
 
@@ -271,7 +279,7 @@ export async function checkAtLaunch(): Promise<void> {
     // A "Later" from a previous run still owes a restart: say so again
     // instead of staying quiet. The in-memory flag covers a plugin toggle,
     // the settings flag covers a window reload that wiped this module.
-    const pending = extraStore.pendingRestartVersion;
+    const pending = extraStore().pendingRestartVersion;
     if (pending && pending !== CLIPPER_VERSION) {
         change({ restartNeeded: true });
     }
@@ -279,7 +287,7 @@ export async function checkAtLaunch(): Promise<void> {
         toast("Clipper update ready — restart Discord to load it (quit from the tray, then start again)", Toasts.Type.MESSAGE);
     } else if (pending) {
         // The new bundle is the one running, so nothing is owed anymore.
-        extraStore.pendingRestartVersion = undefined;
+        extraStore().pendingRestartVersion = undefined;
     }
 
     if (!settings.store.updateCheck) return;
