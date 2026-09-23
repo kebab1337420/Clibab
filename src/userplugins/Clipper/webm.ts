@@ -411,3 +411,14 @@ export function repairWebm(data: Uint8Array): { bytes: Uint8Array | null; droppe
         length: Math.max(0, (clusters[clusters.length - 1].timecode - clusters[start].timecode) / 1000)
     };
 }
+
+/**
+ * The rebased bytes, or null when there is nothing to fix.
+ *
+ * Kept for the callers that only need the bytes: the repair above answers
+ * with the dropped seconds and the length as well, which is what the save
+ * path walks the buffer once for.
+ */
+export function rebaseWebm(data: Uint8Array): Uint8Array | null {
+    return repairWebm(data).bytes;
+}

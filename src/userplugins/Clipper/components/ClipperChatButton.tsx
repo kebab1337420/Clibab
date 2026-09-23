@@ -48,7 +48,7 @@ export const ClipperChatButton: ChatBarButtonFactory = ({ isMainChat }) => {
         ? `Save the last ${settings.store.clipLength}s (${formatKeybind(settings.store.saveKeybind)}) - right click to stop`
         : state === "saving"
             ? "Saving clip…"
-            : "Start the clip buffer";
+            : "Start the clip buffer - click again to save";
 
     return (
         <ChatBarButton

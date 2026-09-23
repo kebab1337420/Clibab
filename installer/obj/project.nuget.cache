@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "dgSpecHash": "nvnvG7l2ETQ=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\Pedregal\\OneDrive\\Documents\\dev\\Clibab\\installer\\ClipperInstaller.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Pedregal\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.31\\microsoft.net.illink.tasks.8.0.31.nupkg.sha512",
+    "C:\\Users\\Pedregal\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\8.0.31\\microsoft.netcore.app.runtime.win-x64.8.0.31.nupkg.sha512",
+    "C:\\Users\\Pedregal\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\8.0.31\\microsoft.windowsdesktop.app.runtime.win-x64.8.0.31.nupkg.sha512",
+    "C:\\Users\\Pedregal\\.nuget\\packages\\microsoft.aspnetcore.app.runtime.win-x64\\8.0.31\\microsoft.aspnetcore.app.runtime.win-x64.8.0.31.nupkg.sha512"
+  ],
+  "logs": []
+}

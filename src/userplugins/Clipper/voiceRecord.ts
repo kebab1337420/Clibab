@@ -223,6 +223,11 @@ class VoiceBuffers {
         // A flush waiting on this lane would otherwise wait out its timeout.
         for (const finish of lane.next.splice(0)) finish();
 
+        // Detached first, like the main recorder: a chunk arriving after this
+        // would land in an orphaned lane object outside `lanes`.
+        lane.recorder.ondataavailable = null;
+        lane.recorder.onerror = null;
+
         try {
             if (lane.recorder.state !== "inactive") lane.recorder.stop();
         } catch (e) {

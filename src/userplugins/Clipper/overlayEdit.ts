@@ -21,11 +21,12 @@
 import { getCurrentChannel } from "@utils/discord";
 import type { PluginNative } from "@utils/types";
 
-import { deleteClip, readClipBytes, typeOfClip, writeClipBytes } from "./clips";
+import { deleteClip, readClipBytes, typeOfClip, trashClip, writeClipBytes } from "./clips";
 import { dropMeta, readMeta, setMeta } from "./library";
 import { logger, recorder } from "./recorder";
 import { trimBytes } from "./repair";
 import { sendClipRange } from "./send";
+import { shareClipLink } from "./linkShare";
 import type { StudioAction } from "./studioOverlay";
 import { errorMessage } from "./utils";
 
@@ -80,6 +81,8 @@ async function cut(action: StudioAction): Promise<Outcome> {
         game: meta?.game ?? "",
         tags: meta?.tags,
         markers,
+        // Labels point at offsets that no longer exist after a cut.
+        markerLabels: [],
         taggedAt: Date.now()
     });
 
@@ -109,13 +112,21 @@ async function send(action: StudioAction): Promise<Outcome> {
     return { ok: false, message: "Could not attach it", close: false };
 }
 
+/** Uploads the whole clip and copies a share link, whatever Discord's size limit says. */
+async function link(action: StudioAction): Promise<Outcome> {
+    const shared = await shareClipLink(action.clip);
+
+    return shared
+        ? { ok: true, message: "Link copied - paste it in Discord", close: false }
+        : { ok: false, message: "Could not upload that clip", close: false };
+}
+
 /** Throws the clip away, wholesale. The editor has nothing left to show. */
 async function drop(action: StudioAction): Promise<Outcome> {
-    await deleteClip(action.clip);
-    await dropMeta(action.clip);
+    await trashClip(action.clip);
     recorder.forgetSaved(action.clip);
 
-    return { ok: true, message: "Clip deleted", close: true };
+    return { ok: true, message: "Clip moved to the trash", close: true };
 }
 
 /** Hands the clip to the real studio, and the screen back to Discord. */
@@ -131,6 +142,7 @@ async function open(action: StudioAction): Promise<Outcome> {
 const DOERS: Record<StudioAction["kind"], (action: StudioAction) => Promise<Outcome>> = {
     cut,
     send,
+    link,
     delete: drop,
     open
 };

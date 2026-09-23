@@ -27,9 +27,10 @@ import type { CaptureSource } from "../native";
 import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerOpener, setStudioOpener } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
+import { deleteProfile, hasProfile, matchesProfile, saveProfile } from "../profiles";
+import { runningGame } from "../game";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
-import { BufferPreview } from "./BufferPreview";
+import { formatBytes, formatTime, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
 import { SimpleStudio } from "./SimpleStudio";
@@ -553,86 +554,6 @@ const CSS = `
     cursor: default;
 }
 
-.vc-clipper-preview {
-    width: min(760px, 82vw);
-}
-.vc-clipper-preview-video {
-    width: 100%;
-    max-height: 46vh;
-    border-radius: 8px;
-    background: #000;
-}
-
-.vc-clipper-scrub {
-    position: relative;
-    height: 26px;
-    margin-top: 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    background: var(--background-tertiary, #1e1f22);
-}
-.vc-clipper-range {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    border-radius: 4px;
-    background: var(--brand-experiment, #5865f2);
-    opacity: .32;
-}
-.vc-clipper-tick {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    width: 2px;
-    margin-left: -1px;
-    border-radius: 1px;
-    background: var(--status-warning, #f0b232);
-}
-.vc-clipper-playhead {
-    position: absolute;
-    top: -2px;
-    bottom: -2px;
-    width: 2px;
-    margin-left: -1px;
-    background: var(--text-normal, #dbdee1);
-    pointer-events: none;
-}
-.vc-clipper-handle {
-    position: absolute;
-    top: -3px;
-    bottom: -3px;
-    width: 10px;
-    margin-left: -5px;
-    border-radius: 3px;
-    cursor: ew-resize;
-    background: var(--brand-experiment, #5865f2);
-}
-
-.vc-clipper-preview-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    font-size: 13px;
-    color: var(--text-muted, #949ba4);
-}
-.vc-clipper-preview-actions button {
-    padding: 6px 12px;
-    border: none;
-    border-radius: 6px;
-    background: var(--button-secondary-background, #4e5058);
-    color: #fff;
-    font-size: 13px;
-    cursor: pointer;
-}
-.vc-clipper-preview-actions button:hover {
-    background: var(--button-secondary-background-hover, #6d6f78);
-}
-.vc-clipper-preview-actions span {
-    margin-left: auto;
-    font-variant-numeric: tabular-nums;
-}
-
 .vc-clipper-replay {
     position: fixed;
     left: 10px;
@@ -701,6 +622,11 @@ const CSS = `
 }
 .vc-clipper-replay-actions .vc-clipper-danger:hover {
     background: var(--button-danger-background-hover, #a12828);
+}
+.vc-clipper-replay-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted, #949ba4);
 }
 
 @keyframes vc-clipper-fade {
@@ -776,6 +702,31 @@ function CaptureOptions() {
         if (recorder.isRecording) void recorder.restart();
     };
 
+    const applyPreset = (preset: CapturePreset) => {
+        settings.store.fps = preset.fps;
+        settings.store.resolution = preset.resolution;
+        settings.store.videoBitrate = preset.bitrate;
+        settings.store.clipLength = preset.length;
+        settings.store.container = preset.container as Container;
+        restartIfLive();
+        toast(`Preset ${preset.label}: ${preset.resolution}p${preset.fps} at ${preset.bitrate}Mbps for ${preset.length}s`, Toasts.Type.SUCCESS);
+
+        // A game profile still wins on every game change: say so now rather
+        // than letting the next alt-tab silently revert the preset.
+        const game = runningGame();
+        if (hasProfile(game)) {
+            toast(`${game}'s profile still applies on game change - save as profile to keep this preset`, Toasts.Type.MESSAGE, 8000);
+        }
+    };
+
+    const presetMatch = CAPTURE_PRESETS.find(p =>
+        p.fps === fps && p.resolution === resolution && p.bitrate === videoBitrate && p.length === clipLength && p.container === container
+    )?.label ?? "Custom";
+
+    // Video bytes held, roughly: bitrate over the whole length plus ~10%
+    // of container overhead. Audio and the header are noise next to it.
+    const estimate = formatBytes((videoBitrate * 1_000_000) / 8 * clipLength * 1.1);
+
     const select = (value: string | number, onPick: (v: string) => void, options: [string | number, string][]) => (
         <select
             value={String(value)}
@@ -787,6 +738,20 @@ function CaptureOptions() {
 
     return (
         <div className="vc-clipper-options">
+            <Field label="Preset">
+                <select
+                    value={presetMatch}
+                    title="One click sets frame rate, resolution, quality and length together"
+                    onChange={e => {
+                        const found = CAPTURE_PRESETS.find(p => p.label === e.currentTarget.value);
+                        if (found) applyPreset(found);
+                    }}
+                >
+                    {presetMatch === "Custom" && <option value="Custom">Custom</option>}
+                    {CAPTURE_PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
+                </select>
+            </Field>
+
             <Field label="Frame rate">
                 {select(fps, v => (settings.store.fps = Number(v)), [
                     [24, "24 FPS"], [30, "30 FPS"], [60, "60 FPS"], [120, "120 FPS"]
@@ -829,7 +794,7 @@ function CaptureOptions() {
                     value={clipLength}
                     onChange={e => (settings.store.clipLength = Number(e.currentTarget.value))}
                 />
-                <div className="vc-clipper-value">{clipLength} s</div>
+                <div className="vc-clipper-value" title="Estimated footage held (older chunks spill to disk past 256MB)">{clipLength} s (≈ {estimate})</div>
             </Field>
         </div>
     );
@@ -841,6 +806,8 @@ function Picker({ onClose }: { onClose(): void; }) {
     const [tab, setTab] = useState<Tab>("all");
     const [query, setQuery] = useState("");
     const [refreshedAt, setRefreshedAt] = useState(0);
+    // Bumped after a profile save/forget so the row below re-reads it.
+    const [profileTick, setProfileTick] = useState(0);
     const searchRef = useRef<HTMLInputElement | null>(null);
     const refreshRef = useRef<(() => void) | null>(null);
 
@@ -968,6 +935,38 @@ function Picker({ onClose }: { onClose(): void; }) {
 
                 <CaptureOptions />
 
+                {!!runningGame() && (
+                    <div className="vc-clipper-note" key={profileTick}>
+                        {matchesProfile(runningGame()) && (
+                            <span>Using {runningGame()}'s saved profile. </span>
+                        )}
+                        <button
+                            className="vc-clipper-tab"
+                            title="Remember the settings above for this game"
+                            onClick={() => {
+                                if (saveProfile(runningGame())) {
+                                    toast(`Profile saved for ${runningGame()}`, Toasts.Type.SUCCESS);
+                                    setProfileTick(t => t + 1);
+                                }
+                            }}
+                        >
+                            {hasProfile(runningGame()) ? `Update ${runningGame()}'s profile` : `Save as ${runningGame()}'s profile`}
+                        </button>
+                        {hasProfile(runningGame()) && (
+                            <button
+                                className="vc-clipper-tab"
+                                title="Forget this game's saved profile"
+                                onClick={() => {
+                                    deleteProfile(runningGame());
+                                    setProfileTick(t => t + 1);
+                                }}
+                            >
+                                Forget
+                            </button>
+                        )}
+                    </div>
+                )}
+
                 <div className="vc-clipper-body">
                     {error && <div className="vc-clipper-note vc-clipper-error">{error}</div>}
                     {!error && sources == null && <div className="vc-clipper-note">Loading sources…</div>}
@@ -1014,10 +1013,9 @@ function Picker({ onClose }: { onClose(): void; }) {
     );
 }
 
-function ActionMenu({ recording, onClose, onPreview, onStudio }: {
+function ActionMenu({ recording, onClose, onStudio }: {
     recording: boolean;
     onClose(): void;
-    onPreview(): void;
     onStudio(): void;
 }) {
     // The buffer grows while the menu is open, so the readout ticks with it.
@@ -1051,7 +1049,7 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
 
     // Offered lengths, shortest first, none of them longer than the buffer:
     // asking for more than was recorded is asking for the whole buffer twice.
-    const cuts = [15, 30, 60].filter(n => n < settings.store.clipLength);
+    const cuts = TRIM_CUTS.filter(n => n < settings.store.clipLength);
 
     return (
         <div className="vc-clipper-menu" ref={menuRef}>
@@ -1076,7 +1074,6 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
             </div>
 
             <div className="vc-clipper-menu-row">
-                {item("Preview buffer", onPreview, !recording || !buffered, undefined, "Preview the buffer before saving")}
                 {item(
                     recorder.markCount ? `Marker (${recorder.markCount})` : "Marker",
                     () => { recorder.mark(); toast(`Marker ${recorder.markCount} saved`, Toasts.Type.SUCCESS); },
@@ -1084,16 +1081,17 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
                     undefined,
                     "Drop a marker on this moment"
                 )}
-                {item("Everyone's angle", () => void requestPov(), !recording, undefined, "Ask everyone in the call to save their own angle")}
+                {item("Everyone", () => void requestPov(), !recording, undefined, "Ask everyone in the call to save their own angle")}
+                {item("Source", () => recorder.chooseSource(), false, undefined, "Pick what to record")}
             </div>
 
             {last && (
                 <>
                     <div className="vc-clipper-menu-label" title={last.name}>{last.name}</div>
                     <div className="vc-clipper-menu-row">
-                        {item("Send to channel", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
-                        {item("Copy link", () => void shareClipLink(last.name), false, undefined, "Upload it whole and copy a link that plays in chat")}
-                        {item("Ending as GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
+                        {item("Send", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
+                        {item("GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
+                        {item("Link", () => void shareClipLink(last.name), false, undefined, "Upload it and copy a share link")}
                         {cuts.map(n => (
                             <React.Fragment key={n}>
                                 {item(`${n}s`, () => void recorder.trimLastSaved(n), false, "vc-clipper-menu-chip", `Keep only its last ${n} seconds`)}
@@ -1107,11 +1105,13 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
 
             <div className="vc-clipper-menu-foot">
                 {CLIPS_AVAILABLE && item("Clip studio", onStudio)}
-                <span className="vc-clipper-menu-status">
-                    {recording
-                        ? `Buffered ${buffered}s of ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`
-                        : "Recording stopped"}
-                </span>
+                {recording
+                    ? (
+                        <span className="vc-clipper-menu-status">
+                            {`${buffered}s / ${settings.store.clipLength}s - ${formatBytes(recorder.bufferedBytes)}`}
+                        </span>
+                    )
+                    : item("Start the buffer", () => void recorder.toggle(), false, "vc-clipper-menu-main")}
             </div>
         </div>
     );
@@ -1122,7 +1122,6 @@ export function ClipperOverlay() {
     const [picker, setPicker] = useState(false);
     const [studio, setStudio] = useState<{ initial?: string; } | null>(null);
     const [menu, setMenu] = useState(false);
-    const [preview, setPreview] = useState(false);
     const [replay, setReplay] = useState<SavedClip | null>(null);
 
     useStyle();
@@ -1141,7 +1140,7 @@ export function ClipperOverlay() {
             /*
              * Only a clip that has not been played back already.
              *
-             * A save that comes to nothing - an empty window, a write that
+             * A save that comes to nothing - a write that
              * failed - still ends by going back to recording, and the last clip
              * in hand is then the one before it. Showing that again would pass
              * an old clip off as the moment that was just asked for, which is
@@ -1212,7 +1211,6 @@ export function ClipperOverlay() {
                         <ActionMenu
                             recording={recording}
                             onClose={() => setMenu(false)}
-                            onPreview={() => setPreview(true)}
                             onStudio={() => setStudio({})}
                         />
                     )}
@@ -1220,9 +1218,12 @@ export function ClipperOverlay() {
                         className={`vc-clipper-trigger${recording ? " vc-clipper-live" : ""}`}
                         aria-label={recording ? "Clipper - recording" : "Clipper - pick a source"}
                         title={recording
-                            ? `Clipper - recording ${sourceName || "screen"} (right click: stop / save / studio)`
-                            : `Clipper - pick a source${sourceName ? ` (current: ${sourceName})` : ""}`}
-                        onClick={e => { e.stopPropagation(); setMenu(false); setPicker(true); }}
+                            ? `Clipper - recording ${sourceName || "screen"} (click: stop / save / studio)`
+                            : `Clipper - pick a source${sourceName ? ` (current: ${sourceName})` : ""} (right click: menu)`}
+                        // While recording the menu is the useful click (stop, save,
+                        // studio); the picker moves into it as "Source". Idle,
+                        // the click picks a source, which also starts the buffer.
+                        onClick={e => { e.stopPropagation(); if (recording) { setPicker(false); setMenu(true); } else { setMenu(false); setPicker(true); } }}
                         onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMenu(v => !v); }}
                     >
                         <Icon />
@@ -1247,7 +1248,6 @@ export function ClipperOverlay() {
             )}
 
             {picker && <Picker onClose={() => setPicker(false)} />}
-            {preview && <BufferPreview onClose={() => setPreview(false)} />}
             {/*
               * Fenced off from the rest of the overlay.
               *

@@ -36,10 +36,11 @@ const hooks = registerHooks({
                 "./library": "export const dropMeta = async () => {}; export const readMeta = async () => ({ 'known.webm': { title: 'Keep' } }); export const setMeta = async name => { globalThis.__clipperTest.adopted.push(name); }; export const tagSavedClip = async () => {};",
                 "./micInput": "export class MicInput {}",
                 "./mixer": "export const gainOf = () => 1; export const readMixer = () => ({}); export const MIC_CHANNEL = 'mic'; export const SYSTEM_CHANNEL = 'system'; export const voiceLevelsFrom = () => ({});",
-                "./mp4": "export const probeAudioTracks = async () => [];",
+                "./mp4": "export const lengthMp4 = () => 0; export const probeAudioTracks = async () => []; export const trimMp4 = () => null;",
                 "./mux": "export const muxNativeAudio = async () => null;",
                 "./nativeClips": "export const arm = async () => {}; export const disarm = () => {}; export const canRecord = () => false; export const engineTornDown = () => false; export const goLiveActive = () => false; export const nativeAvailability = async () => ({ canUse: false }); export const saveNativeClip = async () => null; export const setOnIdleCallback = () => {}; export const setRecordUser = () => {}; export const watchRecording = () => {};",
                 "./nativeTracks": "export const hasVideoTrack = () => false;",
+                "./profiles": "export const applyProfile = () => false; export const deleteProfile = () => false; export const hasProfile = () => false; export const matchesProfile = () => false; export const profileFor = () => null; export const saveProfile = () => false;",
                 "./repair": "export const lengthBytes = () => 0; export const repairBytes = b => b; export const trimBytes = b => b;",
                 "./thumbnail": "export const writeThumbnail = async () => {};",
                 "./toasts": "export const toast = (...args) => { globalThis.__clipperTest.toasts.push(args); };",
@@ -64,6 +65,18 @@ test("importing the recorder does not touch settings before the plugin is initia
     assert.equal(fixture.settingsReads, 0);
     assert.deepEqual(fixture.warnings, []);
     assert.deepEqual(fixture.listed, []);
+});
+
+test("a save with the buffer stopped says so and reports failure", async () => {
+    (mod.recorder as any).state = "idle";
+    try {
+        const before = fixture.toasts.length;
+        assert.equal(await mod.recorder.save(), false);
+        assert.equal(fixture.toasts.length, before + 1);
+        assert.match(String(fixture.toasts[before][0]), /not running/i);
+    } finally {
+        (mod.recorder as any).state = "idle";
+    }
 });
 
 test("a save pressed while one is running says so instead of vanishing", async () => {

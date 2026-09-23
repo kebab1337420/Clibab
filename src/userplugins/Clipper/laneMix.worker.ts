@@ -76,8 +76,8 @@ function startWorker(): Worker | null {
         const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
         const created = new Worker(url);
 
-        // Construction keeps what it needs: holding the URL past this point
-        // leaks one blob URL per worker ever created.
+        // Revoked at once: the worker holds its own copy, and the URL would
+        // otherwise sit in the blob store for the rest of the session.
         URL.revokeObjectURL(url);
 
         created.onmessage = (event: MessageEvent) => {

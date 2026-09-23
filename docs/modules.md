@@ -97,6 +97,7 @@ message, only a file that will not open — and it is the part the tests cover.
 | `mixer.ts` | 181 | The mixer model the settings and the studio share. |
 | `voiceMix.ts` | 188 | One file's separated soundtrack, kept around so it is not rebuilt on every scrub. |
 | `voiceBand.ts` | 188 | Turning one voice down without turning the whole clip down with it. |
+| `spectralMask.ts` | 400 | Isolating a muted voice by its learned spectrum, where the notch only ducks. |
 | `components/AudioTimeline.tsx` | 202 | The sound lane. |
 | `components/CutRuler.tsx` | 188 | The ruler and its cut marks. |
 | `components/VoiceLanes.tsx` | 138 | Who was talking, drawn under the timeline. |
@@ -107,7 +108,6 @@ message, only a file that will not open — and it is the part the tests cover.
 | --- | --- | --- |
 | `components/ClipperOverlay.tsx` | 1142 | Everything mounted in the plugin's own React root: the button, the replay card, the studio's mount point. |
 | `components/ReplayCard.tsx` | 139 | The clip that was just saved, playing straight back. |
-| `components/BufferPreview.tsx` | 218 | Watching the buffer before deciding to write it. |
 | `components/VoicePanel.tsx` | 225 | One channel per person in the call. |
 | `components/AudioMixer.tsx` | 368 | The mixer rows in the plugin settings. |
 | `components/Meter.tsx` | 48 | What a channel is sending, right now. |
@@ -191,8 +191,10 @@ The always-on-top window, and the two files that decide what it draws.
 | `angleCut.ts` | 384 | Cutting between those angles: who is on screen, second by second, and one soundtrack under it. |
 | `chat.ts` | 208 | What the chat said while it was happening. |
 | `clips.ts` | 329 | Access to the clip folder. |
+| `profiles.ts` | 130 | Capture settings remembered per game. |
 | `library.ts` | 408 | Clip metadata and categories. |
 | `send.ts` | 160 | Sending a clip to the channel that is open. |
+| `linkShare.ts` | 122 | Uploading a clip to 0x0.st for a share link and copying it. |
 | `updater.ts` | 269 | Checking for a new version and installing it. |
 | `utils.ts` | 371 | The shared helpers that had no better home. |
 | `toasts.ts` | 32 | The one line that shows a toast, which five files each had a copy of. |

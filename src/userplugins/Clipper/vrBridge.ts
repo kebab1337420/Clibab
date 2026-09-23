@@ -47,8 +47,9 @@
  */
 
 import { type ChildProcess, spawn } from "child_process";
+import { createHash } from "crypto";
 import { app } from "electron";
-import { writeFileSync } from "fs";
+import { readFileSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 import { SCRIPT } from "./vrHelper";
@@ -101,8 +102,6 @@ const GRACE_MS = 2000;
 export interface VrStatus {
     /** Whether a bridge is attached to SteamVR right now. */
     running: boolean;
-    /** Whether the plugin is meant to be attached, attached or not. */
-    wanted: boolean;
     /** The SteamVR version the bridge reported, once it has. */
     runtime: string;
     /** The last thing that went wrong and is not just SteamVR being off. */
@@ -302,6 +301,13 @@ function open(): Promise<void> {
         const script = scriptPath();
         writeFileSync(script, SCRIPT, "utf8");
 
+        // Read back what will run: the folder is the user's own, but a file
+        // swapped between the write above and the spawn below would run as
+        // this plugin with full client privileges.
+        const written = readFileSync(script, "utf8");
+        const digest = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+        if (digest(written) !== digest(SCRIPT)) throw new Error("The SteamVR bridge script changed between writing and starting it.");
+
         const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 
         started = spawn(shell, [
@@ -365,9 +371,11 @@ function open(): Promise<void> {
         });
 
         // Whatever PowerShell could not swallow. Kept only if nothing better is
-        // known, so a real message from the bridge always wins.
-        started.stderr?.on("data", (chunk: Buffer) => {
-            if (!problem) problem = chunk.toString("utf8").trim().slice(0, 300);
+        // known, so a real message from the bridge always wins. Generic on
+        // purpose: raw stderr can carry paths and usernames into settings rows
+        // and diagnostics.
+        started.stderr?.on("data", () => {
+            if (!problem) problem = "The SteamVR bridge printed an error and gave no usable message.";
         });
 
         started.on("error", e => {
@@ -483,7 +491,7 @@ export function closeBridge(): Promise<void> {
 }
 
 export function status(): VrStatus {
-    return { running: child !== null && runtime !== "", wanted, runtime, problem, waiting };
+    return { running: child !== null && runtime !== "", runtime, problem, waiting };
 }
 
 /**
@@ -532,16 +540,30 @@ export function showPanel(pixels: Uint8Array, width: number, height: number, dwe
     if (!child?.stdin?.writable) return false;
     if (width <= 0 || height <= 0 || pixels.length !== width * height * 4) return false;
 
+    // Bounded before a single byte is written or sent: the C# side caps at
+    // 2048 itself, but only after the pixels have crossed IPC and disk.
+    if (width > 2048 || height > 2048 || pixels.length > 16 * 1024 * 1024) return false;
+
+    // Enforced here rather than in C#: a huge dwell would nail the card
+    // across the game until the bridge is restarted.
+    const dwell = Math.min(10_000, Math.max(1_000, Math.round(dwellMs)));
+
     const path = join(dirname(scriptPath()), `panel-${panels++ % 8}.rgba`);
 
     try {
         writeFileSync(path, pixels);
-        child.stdin.write(`panel ${width} ${height} ${Math.round(dwellMs)} ${path}\n`);
+        child.stdin.write(`panel ${width} ${height} ${dwell} ${path}\n`);
 
         return true;
     } catch {
         // Nothing to say about it: a picture that did not arrive is a picture
         // nobody saw, and the binds this bridge exists for are unaffected.
+        try {
+            unlinkSync(path);
+        } catch {
+            // Already gone with the failed write.
+        }
+
         return false;
     }
 }

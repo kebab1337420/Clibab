@@ -28,10 +28,16 @@ import {
     probeRange,
     renderName,
     type StoredClip,
+    typeOfClip,
     writeClipCopy
 } from "../clips";
+import { probeAudioTracks } from "../mp4";
+import { trimBytes } from "../repair";
 import { logger } from "../recorder";
+import { readMeta } from "../library";
+import { sendClipFitted } from "../send";
 import { settings } from "../settings";
+import { shareClipLink } from "../linkShare";
 import {
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -42,7 +48,8 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
+import { settings } from "../settings";
+import { formatBytes, chaptersOf, formatTime } from "../utils";
 
 /** Clamp a trim point to the file's own range. */
 function clampPoint(point: number, min: number, max: number): number {
@@ -251,6 +258,57 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
     const trimmed = Math.max(0, trim.to - trim.from);
     const pct = trim.length > 0 ? Math.round((trimmed / trim.length) * 100) : 0;
 
+    /** Copies the picked clip's markers as video chapters. */
+    const onChapters = async (name: string) => {
+        const entry = (await readMeta())[name];
+        const text = chaptersOf(entry?.markers ?? [], entry?.markerLabels);
+
+        if (!text) {
+            toast("No markers on this clip", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        try {
+            await navigator.clipboard.writeText(text);
+            toast("Chapters copied", Toasts.Type.SUCCESS);
+        } catch {
+            toast("Could not reach the clipboard", Toasts.Type.FAILURE);
+        }
+    };
+
+    /**
+     * The trim, cut out of the file instead of re-encoded.
+     *
+     * Null when the timeline asks for anything the container cannot express,
+     * and the caller falls back to the renderer. Saved clips start at zero,
+     * so the trim points read off the player are already clip time. A file
+     * that cannot even be read is not a failure either: the renderer opens
+     * tolerant decoders the byte reader does not have.
+     */
+    const losslessTrim = async (): Promise<Blob | null> => {
+        const src = sourceRef.current;
+        if (!src || !/\.(webm|mp4)$/i.test(src.name)) return null;
+
+        let data: Uint8Array;
+        try {
+            data = new Uint8Array(await (await fetch(src.url)).arrayBuffer());
+        } catch (e) {
+            logger.warn("Fast trim could not read the file, rendering instead", e);
+            return null;
+        }
+
+        // A native clip keeps one track per person, and every player that
+        // matters plays the first audio track alone - the game, with the
+        // whole call missing. Only a render mixes them down.
+        if ((probeAudioTracks(data) ?? []).length > 1) return null;
+
+        const type = typeOfClip(src.name);
+        const cut = trimBytes(data, type, trim.from, trim.to);
+
+        // Nothing back: the range already covers the whole file.
+        return new Blob([(cut ?? data) as BlobPart], { type });
+    };
+
     const onRender = async () => {
         const src = sourceRef.current;
         if (!src) return;
@@ -281,14 +339,19 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
         };
 
         try {
-            const blob = await renderProject(project, [src], {
+            // A plain trim is cut out of the file, not re-encoded: seconds
+            // instead of minutes. Anything else - a multi-track native clip
+            // whose voices need mixing down, or an undecodable import - goes
+            // through the renderer below.
+            const fast = await losslessTrim();
+            const blob = fast ?? await renderProject(project, [src], {
                 onProgress: setProgress,
                 cancelled: () => cancelRef.current
             });
 
             const path = await writeClipCopy(blob, renderName(src.name, blob.type));
             const saved = path.split(/[\\/]/).pop() || "clip";
-            toast(`Clip saved: ${saved} (${Math.round(trimmed)}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
+            toast(fast ? `Cut without re-encoding: ${saved} (${formatBytes(blob.size)})` : `Clip saved: ${saved} (${Math.round(trimmed)}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             logger.info("Trimmed a clip from the simple studio", path);
 
             await writeThumbnail(blob, saved);
@@ -325,6 +388,7 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
                         <small>Simple - one clip, trimmed and saved</small>
                     </div>
                     <div className="vc-clipper-studio-head-right">
+                        <button className="vc-clipper-studio-switch" disabled={busy} title="Open the full montage timeline" onClick={() => { settings.store.studioMode = "advanced"; }}>Advanced</button>
                         <button className="vc-clipper-studio-ok" disabled={busy} onClick={onClose}>Done</button>
                         <button className="vc-clipper-studio-close" onClick={onClose} disabled={busy} aria-label="Close">
                             <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
@@ -501,6 +565,14 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
                             <button className="vc-clipper-primary" disabled={busy || !source || trimmed <= 0} onClick={() => void onRender()}>
                                 {progress >= 0 ? `Rendering ${Math.round(progress * 100)}%` : `Save ${formatTime(trimmed)}`}
                             </button>
+
+                            {!!picked && (
+                                <>
+                                    <button disabled={busy} title="Attach it to the channel" onClick={() => void sendClipFitted(picked)}>Send</button>
+                                    <button disabled={busy} title="Upload it and copy a share link" onClick={() => void shareClipLink(picked)}>Link</button>
+                                    <button disabled={busy} title="Copy video chapters for the markers" onClick={() => void onChapters(picked)}>Chapters</button>
+                                </>
+                            )}
 
                             {progress >= 0 && (
                                 <>

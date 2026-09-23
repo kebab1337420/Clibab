@@ -28,8 +28,9 @@ import type { ChatLine } from "./chat";
 import { buildMixBus, logger } from "./recorder";
 import { pickMimeType, settings } from "./settings";
 import { seekVideo } from "./utils";
-import { speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
+import { maskActors, speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
 import { createVoiceBand, type VoiceBand } from "./voiceBand";
+import { createMaskNode, dropMaskModule, learnRenderProfiles, planMask, type MaskHandle } from "./spectralMask";
 import { type VoiceMix, voiceMixFor } from "./voiceMix";
 
 export interface Effects {
@@ -698,6 +699,19 @@ export function cutSilence(
     }
 
     return { project: next, removed, ranges };
+}
+
+/**
+ * Dead-air ranges without cutting anything, for a preview the user confirms.
+ *
+ * Same detection as {@link cutSilence}, same defaults: the list Apply works
+ * from is exactly what the one-click cut would have taken.
+ */
+export function previewSilence(
+    project: Project,
+    sources: StudioSource[]
+): { from: number; to: number; }[] {
+    return silentRanges(project, sources);
 }
 
 /*
@@ -2558,6 +2572,44 @@ export async function renderProject(project: Project, sources: StudioSource[], o
     for (const [id, mix] of built) if (mix) mixes.set(id, mix);
 
     /*
+     * Spectral prints for the mask below, learned from each file's own solo
+     * stretches. Only when somebody was actually muted: untouched levels
+     * mean no mask, no extra decode, no extra node anywhere.
+     */
+    let maskPlan = { muted: [] as string[], engaged: false };
+    const masks = new Map<string, MaskHandle>();
+
+    if (voiceLevelsTouched(project.voiceLevels)) {
+        try {
+            const prints = await learnRenderProfiles(sources, audioCtx);
+            maskPlan = planMask(prints, project.voiceLevels);
+
+            if (maskPlan.engaged) {
+                for (const [id, entry] of loaded) {
+                    try {
+                        const mask = await createMaskNode(audioCtx);
+                        mask.setProfiles(prints);
+
+                        // The notch stays where it is; the mask sits behind it
+                        // and takes over exactly the frames it is told to.
+                        entry.band.output.disconnect();
+                        entry.band.output.connect(mask.node);
+                        mask.node.connect(entry.gain);
+
+                        masks.set(id, mask);
+                    } catch (e) {
+                        logger.warn("Could not insert the voice mask for a source", e);
+                    }
+                }
+
+                if (!masks.size) maskPlan = { muted: [], engaged: false };
+            }
+        } catch (e) {
+            logger.warn("Voice prints unavailable, muting the usual way", e);
+        }
+    }
+
+    /*
      * Avatars are decoded before the recorder is armed.
      *
      * They come off the network, and a badge that pops in three seconds into the
@@ -2610,6 +2662,33 @@ export async function renderProject(project: Project, sources: StudioSource[], o
     let elapsed = 0;
     let frame = 0;
     let started = false;
+
+    /*
+     * A hidden page stops painting frames while the audio keeps running, and
+     * the two drift apart in the file. So backgrounding pauses the picture
+     * and the graph clock together, and foregrounding resumes both: the file
+     * holds a frozen frame for the gap instead of a desync.
+     */
+    const playing: HTMLVideoElement[] = [];
+    let saidHidden = false;
+    const onVisibility = () => {
+        if (document.hidden) {
+            for (const video of playing) video.pause();
+            audioCtx.suspend().catch(() => void 0);
+
+            if (!saidHidden) {
+                saidHidden = true;
+                logger.warn("Render paused while Discord is hidden - it resumes when the window is visible again");
+            }
+
+            return;
+        }
+
+        audioCtx.resume().catch(() => void 0).then(() => {
+            for (const video of playing) void video.play().catch(() => void 0);
+        });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     /*
      * The frame the outgoing segment ended on, kept for the cut.
@@ -2774,6 +2853,9 @@ export async function renderProject(project: Project, sources: StudioSource[], o
             // driven by: an angle that stalls must not hold up the shot.
             for (const other of angles) void other.play().catch(() => void 0);
 
+            // What the background guard resumes: everything audible right now.
+            playing.push(video, ...angles);
+
             /*
              * The sounds of this stretch are scheduled once playback is actually
              * running, and the clock is read at that moment.
@@ -2878,22 +2960,36 @@ export async function renderProject(project: Project, sources: StudioSource[], o
                          * and the duck sits flat at 1.
                          */
                         if (base > 0 && ducking) {
-                            const level = voiceDuckAt(
-                                voices,
-                                voiceBand ? mix!.duck : project.voiceLevels,
-                                video.currentTime
-                            );
+                            const mask = !replacing ? masks.get(segment.sourceId) : undefined;
+                            const actors = mask
+                                ? maskActors(voices, project.voiceLevels, video.currentTime)
+                                : { muted: [] as string[], others: [] as string[] };
 
-                            /*
-                             * On the notch, not on the gain.
-                             *
-                             * The segment's own volume stays where it was put:
-                             * what a per-person level moves is the speech band
-                             * and nothing else, so a muted person digs a hole
-                             * where their voice is and the game carries on
-                             * through it at full level.
-                             */
-                            (voiceBand ?? band).set(level);
+                            if (mask && actors.muted.length) {
+                                // The mask isolates; the notch stands aside so
+                                // the two do not suppress the same voice twice.
+                                band.set(1);
+                                mask.setFrame(actors.muted, actors.others);
+                            } else {
+                                if (mask) mask.setFrame([], []);
+
+                                const level = voiceDuckAt(
+                                    voices,
+                                    voiceBand ? mix!.duck : project.voiceLevels,
+                                    video.currentTime
+                                );
+
+                                /*
+                                 * On the notch, not on the gain.
+                                 *
+                                 * The segment's own volume stays where it was put:
+                                 * what a per-person level moves is the speech band
+                                 * and nothing else, so a muted person digs a hole
+                                 * where their voice is and the game carries on
+                                 * through it at full level.
+                                 */
+                                (voiceBand ?? band).set(level);
+                            }
                         }
 
                         if (video.currentTime >= segment.to || video.ended) {
@@ -2935,10 +3031,16 @@ export async function renderProject(project: Project, sources: StudioSource[], o
 
             video.pause();
             for (const other of angles) other.pause();
+            playing.length = 0;
             setGain(audioCtx, gain, 0);
             elapsed += length;
         }
     } finally {
+        document.removeEventListener("visibilitychange", onVisibility);
+
+        for (const mask of masks.values()) mask.disconnect();
+        dropMaskModule();
+
         current = null;
         cancelAnimationFrame(frame);
 

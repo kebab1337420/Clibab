@@ -59,7 +59,7 @@ export interface StudioLook {
  * than a new channel.
  */
 export interface StudioAction {
-    kind: "cut" | "send" | "delete" | "open";
+    kind: "cut" | "send" | "delete" | "open" | "link";
     /** Clip the editor is showing, by name. */
     clip: string;
     /** Selection in seconds, from the in handle to the out handle. */
@@ -174,17 +174,22 @@ ipcMain.on(ACTION_CHANNEL, (event, kind: unknown, payload: unknown) => {
         return;
     }
 
-    if (asked !== "cut" && asked !== "send" && asked !== "delete" && asked !== "open") return;
+    if (asked !== "cut" && asked !== "send" && asked !== "delete" && asked !== "open" && asked !== "link") return;
 
     const body = (payload ?? {}) as Record<string, unknown>;
     const from = Number(body.from);
     const to = Number(body.to);
 
+    // The page is ours, but the channel is IPC: a giant name burns through
+    // readClipBytes, and an absurd span burns through the trim parsers.
+    const clip = String(body.clip ?? "");
+    if (!clip || clip.length > 128) return;
+
     queue({
         kind: asked,
-        clip: String(body.clip ?? ""),
-        from: Number.isFinite(from) ? Math.max(0, from) : 0,
-        to: Number.isFinite(to) ? Math.max(0, to) : 0
+        clip,
+        from: Number.isFinite(from) ? Math.min(3600, Math.max(0, from)) : 0,
+        to: Number.isFinite(to) ? Math.min(3600, Math.max(0, to)) : 0
     });
 });
 
@@ -309,6 +314,7 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
             <button data-do="all">All</button>
             <button class="go" data-do="cut">Cut</button>
             <button class="go" data-do="send">Send</button>
+            <button class="go" data-do="link" title="Upload the whole clip and copy a share link">Link</button>
             <button class="danger" data-do="delete">Delete</button>
             <span class="grp"></span>
             <span class="spacer"></span>
@@ -380,7 +386,7 @@ function studioPage(clip: StudioClip, look: StudioLook): string {
 
     function working(state) {
         busy = state;
-        var buttons = document.querySelectorAll("[data-do=cut], [data-do=send], [data-do=delete], [data-do=open]");
+        var buttons = document.querySelectorAll("[data-do=cut], [data-do=send], [data-do=link], [data-do=delete], [data-do=open]");
         for (var i = 0; i < buttons.length; i++) buttons[i].disabled = state;
     }
 

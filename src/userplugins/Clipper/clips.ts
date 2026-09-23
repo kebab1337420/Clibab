@@ -18,6 +18,7 @@
 import type { PluginNative } from "@utils/types";
 
 import type { StoredClip } from "./native";
+import { dropMeta, readMeta, setMeta } from "./library";
 import { logger } from "./recorder";
 import { extensionFor, settings } from "./settings";
 
@@ -119,6 +120,93 @@ export function loadVoiceTrack(file: string): Promise<Uint8Array> {
 
 export function deleteClip(name: string): Promise<void> {
     return Native.deleteClip(settings.store.saveDirectory, name);
+}
+
+export interface TrashedClip {
+    /** Handle restore and empty use. */
+    stored: string;
+    /** Name the clip had in the folder. */
+    name: string;
+    size: number;
+    /** Epoch ms of the deletion. */
+    deletedAt: number;
+    /** Category the clip was filed under. */
+    game: string;
+}
+
+/**
+ * Deletes a clip into the folder's own trash, keeping it restorable.
+ *
+ * The library entry travels with the file and is dropped here, so a
+ * restore brings the category, markers and lanes back with it.
+ */
+export async function trashClip(name: string): Promise<void> {
+    const meta = (await readMeta())[name] ?? null;
+    await Native.trashClip(settings.store.saveDirectory, name, meta ? JSON.stringify(meta) : null);
+    await dropMeta(name);
+}
+
+/** Brings a trashed clip back, with the library entry it left with. */
+export async function restoreClip(stored: string): Promise<string> {
+    const { name, meta } = await Native.restoreClip(settings.store.saveDirectory, stored);
+
+    if (meta) {
+        try {
+            await setMeta(name, JSON.parse(meta));
+        } catch {
+            // The file made it; the metadata did not.
+            logger.warn("Could not restore a clip's metadata", name);
+        }
+    }
+
+    return name;
+}
+
+/** What is waiting in the trash, oldest deletions first. */
+export function listTrash(): Promise<TrashedClip[]> {
+    return Native.listTrash(settings.store.saveDirectory);
+}
+
+/** Empties the trash for good. */
+export function emptyTrash(): Promise<void> {
+    return Native.emptyTrash(settings.store.saveDirectory);
+}
+
+/**
+ * Moves clips older than `maxAgeMs` to the trash, pinned ones spared.
+ *
+ * Returns what went. Old meta entries for clips that vanished outside the
+ * plugin (file explorer) are left to pruneMeta, which already owns that.
+ */
+export async function cleanupOldClips(maxAgeMs: number): Promise<string[]> {
+    if (!CLIPS_AVAILABLE || !(maxAgeMs > 0)) return [];
+
+    const cutoff = Date.now() - maxAgeMs;
+
+    let found: StoredClip[];
+    try {
+        found = await listClips();
+    } catch (e) {
+        logger.warn("Could not list clips for cleanup", e);
+        return [];
+    }
+
+    const meta = await readMeta();
+    const removed: string[] = [];
+
+    for (const clip of found) {
+        if (clip.modified >= cutoff) continue;
+        if (meta[clip.name]?.pinned) continue;
+
+        try {
+            await trashClip(clip.name);
+            removed.push(clip.name);
+        } catch (e) {
+            logger.warn("Could not clean up an old clip", clip.name, e);
+        }
+    }
+
+    return removed;
 }
 
 export function renameClip(name: string, next: string): Promise<string> {

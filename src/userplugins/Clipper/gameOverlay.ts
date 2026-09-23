@@ -145,7 +145,8 @@ async function openClipEditor(name: string): Promise<void> {
  * The keybind: opens the editor on the last clip, or closes the open one.
  *
  * Closing it is what gives the pointer back to the game, so one key does both
- * ways of the same thing.
+ * ways of the same thing. With Discord itself focused there is no game to
+ * draw over, so the in-client studio opens instead of a window on top of it.
  */
 export async function toggleGameOverlay(): Promise<void> {
     if (!IS_DISCORD_DESKTOP && !IS_VESKTOP) return;
@@ -162,6 +163,11 @@ export async function toggleGameOverlay(): Promise<void> {
     const clip = recorder.lastClip;
     if (!clip) {
         nothingSaved();
+        return;
+    }
+
+    if (document.hasFocus()) {
+        recorder.openStudio(clip.name);
         return;
     }
 

@@ -16,12 +16,13 @@ import definePlugin from "@utils/types";
 import { createRoot, Toasts } from "@webpack/common";
 
 import { attachMenuPatch } from "./attachMenu";
+import { cleanupOldClips } from "./clips";
 import { ClipperChatButton, ClipperIcon } from "./components/ClipperChatButton";
 import { ClipperOverlay } from "./components/ClipperOverlay";
 import { encoderSummary, probeEncoders } from "./encoders";
 import { gameAudioReport } from "./gameAudio";
 import { gameEventReport, stopGameEvents, syncGameEvents } from "./gameEvents";
-import { hideGameOverlay, toggleGameOverlay, watchLastClip } from "./gameOverlay";
+import { hideGameOverlay } from "./gameOverlay";
 import { gameVideo } from "./gameVideo";
 import { runShortcut, startGlobalKeybinds, stopGlobalKeybinds, syncGlobalKeybinds } from "./globalKeybinds";
 import { micReport } from "./micInput";
@@ -30,7 +31,7 @@ import { installPovRequests, requestPov, uninstallPovRequests } from "./multipov
 import { adoptOrphans, logger, recorder } from "./recorder";
 import { settings } from "./settings";
 import { toast } from "./toasts";
-import { checkAtLaunch, checkNow } from "./updater";
+import { checkAtLaunch } from "./updater";
 import { isTypingTarget, keybindMatches, keybindsSuspended, parseKeybind } from "./utils";
 import { installVoiceTaps, probeVoiceTaps, uninstallVoiceTaps } from "./voiceTaps";
 import { stopVr, syncVr, vrReport } from "./vr";
@@ -90,6 +91,7 @@ const WATCHED: Array<readonly [string, () => void]> = [
     ["gameAudioWatch", () => recorder.restartHighlights()],
     ["gameVideoWatch", () => recorder.restartHighlights()],
     ["gameIntegrations", () => void syncGameEvents()],
+    ["vrInstalled", () => void syncVr()],
     ["vrControls", () => void syncVr()]
 ];
 
@@ -132,10 +134,21 @@ function unwatchSettings() {
  * Chromium reloads the client on Ctrl+R / Ctrl+Shift+R before any DOM listener
  * runs, so those binds can never reach the plugin. Move anyone still on the old
  * defaults over to the new ones.
+ *
+ * Alt+F9 / Alt+F10 moved a second time: they are GeForce Experience's own
+ * defaults (record / instant replay), so the plugin's binds lost to NVIDIA on
+ * exactly the machines most likely to clip. Only exact old defaults move -
+ * a custom bind is never touched.
  */
 function migrateReloadKeybinds() {
-    if (settings.store.toggleKeybind === "ctrl+shift+KeyR") settings.store.toggleKeybind = "alt+F9";
-    if (settings.store.saveKeybind === "ctrl+shift+KeyS") settings.store.saveKeybind = "alt+F10";
+    if (settings.store.toggleKeybind === "ctrl+shift+KeyR") settings.store.toggleKeybind = "ctrl+alt+F9";
+    if (settings.store.saveKeybind === "ctrl+shift+KeyS") settings.store.saveKeybind = "ctrl+alt+F10";
+
+    if (settings.store.toggleKeybind === "alt+F9") settings.store.toggleKeybind = "ctrl+alt+F9";
+    if (settings.store.saveKeybind === "alt+F10") settings.store.saveKeybind = "ctrl+alt+F10";
+    if (settings.store.markKeybind === "alt+F11") settings.store.markKeybind = "ctrl+alt+F11";
+    if (settings.store.povKeybind === "alt+F12") settings.store.povKeybind = "ctrl+alt+F12";
+    if (settings.store.replayKeybind === "alt+F8") settings.store.replayKeybind = "ctrl+alt+F8";
 }
 
 /*
@@ -199,61 +212,56 @@ export default definePlugin({
     },
 
     toolboxActions: {
-        "Start / stop clip buffer": () => recorder.toggle(),
         "Save clip": () => recorder.save(),
-        "Marker": () => recorder.mark(),
+        "Open the clip studio": () => recorder.openStudio(),
+        "Choose capture source": () => recorder.chooseSource(),
         "Clip everyone's angle": () => void requestPov(),
+        "Marker": () => recorder.mark(),
         "Edit the last clip over the game": () => void toggleGameOverlay(),
         "Watch the last clip over the game": () => void watchLastClip(),
-        "Choose capture source": () => recorder.chooseSource(),
-        "Open the clip studio": () => recorder.openStudio(),
-        "Check the video encoders": () => {
+        "Run diagnostics": () => {
             void (async () => {
-                const reports = await probeEncoders();
-                const summary = encoderSummary(reports);
+                const parts: string[] = [];
 
-                logger.info(`Encoder probe\n${summary}`);
+                try {
+                    const reports = await probeEncoders();
+                    parts.push(encoderSummary(reports));
 
-                // A container that has just encoded is not broken, whatever it
-                // did the last time the buffer armed: let the next start try it.
-                if (reports.some(r => r.ok)) recorder.retryEncoders();
+                    // A container that has just encoded is not broken, whatever it
+                    // did the last time the buffer armed: let the next start try it.
+                    if (reports.some(r => r.ok)) recorder.retryEncoders();
+                } catch (e) {
+                    parts.push(`Encoders: could not probe (${e instanceof Error ? e.message : String(e)})`);
+                }
 
-                toast(summary, reports.some(r => r.ok) ? Toasts.Type.MESSAGE : Toasts.Type.FAILURE, 12000);
-            })();
-        },
-        "Check for a new Clipper version": () => void checkNow(),
-        "Check what is watching the game": () => {
-            void (async () => {
-                const report = [
+                parts.push(
                     settings.store.gameAudioWatch
                         ? gameAudioReport(recorder.channelSpectrum(SYSTEM_CHANNEL))
-                        : "The game's sound is not being listened to: the call is in the same stream, so it stays off unless turned on.",
-                    gameVideo.active ? "The picture is being watched." : "The picture is not being watched - start the clip buffer, or turn it on in the settings.",
+                        : "Game sound: not listened to.",
+                    gameVideo.active ? "Picture: watched." : "Picture: not watched.",
                     await gameEventReport(),
                     // Empty unless the VR side is installed, and dropped
                     // below rather than printed as a blank line.
                     await vrReport(),
                     settings.store.voiceHighlights
-                        ? "The call can mark a moment on its own."
-                        : "How loud the call is counts for nothing."
-                ].filter(Boolean).join("\n");
+                        ? "Call loudness: counts towards markers."
+                        : "Call loudness: ignored."
+                );
 
-                logger.info(`Game watchers\n${report}`);
+                try {
+                    parts.push(probeVoiceTaps());
+                } catch (e) {
+                    parts.push(`Voice taps: could not probe (${e instanceof Error ? e.message : String(e)})`);
+                }
 
-                toast(report, Toasts.Type.MESSAGE, 12000);
-            })();
-        },
-        "Check per-person voice audio": () => {
-            const report = probeVoiceTaps();
-            logger.info(report);
-            toast(report, Toasts.Type.MESSAGE, 8000);
-        },
-        "Check the microphone": () => {
-            void (async () => {
-                const report = await micReport();
+                try {
+                    parts.push(await micReport());
+                } catch (e) {
+                    parts.push(`Microphone: could not check (${e instanceof Error ? e.message : String(e)})`);
+                }
 
-                logger.info(`Microphone check\n${report}`);
-
+                const report = parts.filter(Boolean).join("\n");
+                logger.info(`Diagnostics\n${report}`);
                 toast(report, Toasts.Type.MESSAGE, 12000);
             })();
         }
@@ -293,6 +301,19 @@ export default definePlugin({
                 Toasts.Type.MESSAGE,
                 8000
             );
+        }
+
+        // Folder hygiene, once per launch and off the critical path: old
+        // clips go to the folder's own trash, so this is undoable for 7 days.
+        if (settings.store.autoCleanup) {
+            void cleanupOldClips(settings.store.autoCleanupDays * 86400 * 1000)
+                .then(removed => {
+                    if (removed.length) {
+                        logger.info(`Cleaned ${removed.length} clips older than ${settings.store.autoCleanupDays} days`, removed);
+                        toast(`Cleaned ${removed.length} old clip${removed.length === 1 ? "" : "s"} (in the trash)`, Toasts.Type.MESSAGE, 8000);
+                    }
+                })
+                .catch(e => logger.warn("Automatic cleanup failed", e));
         }
 
         // Not awaited: an unreachable GitHub must cost the launch nothing.

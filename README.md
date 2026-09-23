@@ -145,11 +145,6 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
   on `127.0.0.1` for the game to post to. Nothing leaves the machine. *Check
   what is watching the game* in the actions menu says what is actually hooked
   up. Every other game gets the sound and the picture, which need no setup.
-- **Watch the buffer before you save it.** The actions menu plays a copy of
-  what is in memory right now, with the markers drawn on the scrub bar and two
-  handles to pick the piece worth keeping. The window you pick is what gets
-  written, so a 30s buffer can become the 6s that mattered without a round trip
-  through the studio.
 - **Instant replay after a save.** The clip that was just written plays itself
   in the corner, muted and looping, next to the things anybody does about a clip
   they just watched: send it, turn its ending into a GIF, shorten it to 15s or
@@ -160,6 +155,9 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
   the limit first — the whole moment, softer, rather than the half of it that
   happened to fit. Resolution only comes down once the bitrate has been cut far
   enough that leaving it alone would spend it all on macroblocks.
+- **Share a link instead of the file.** The studio's *Link* button uploads the
+  clip to a file host (no account, nothing to configure) and copies the link,
+  so even a clip Discord would refuse to attach can be posted. Up to 200MB.
 - **GIF export.** The last seconds of a clip become a looping GIF small enough
   to post, written next to the clips and attached to the message box. The
   encoder is the plugin's own, with frame differencing and a median-cut palette,
@@ -340,8 +338,8 @@ quietly — run `install.bat` again in that case.
 
 | Action | Default |
 | --- | --- |
-| Start / stop the buffer | `Alt + F9`, panel button menu, chat bar button right click, or toolbox |
-| Save the last N seconds | `Alt + F10`, panel or chat bar button left click, or toolbox |
+| Start / stop the buffer | `Ctrl + Alt + F9`, panel button menu, chat bar button right click, or toolbox |
+| Save the last N seconds | `Ctrl + Alt + F10`, panel or chat bar button left click, or toolbox |
 | Trim, cut or montage clips | Panel button right click → *Open the clip studio*, or toolbox |
 | Manage the clip folder | Same window: pick a clip on the left, then rename / reveal / delete / file it |
 | Sort clips by game | Category dropdown above the clip list; *File it* refiles the picked clip |
@@ -407,12 +405,13 @@ anything. Run them with `.\scripts\test.ps1`.
   untouched: their fragments need a different parser.
 - **The studio renders in real time**, because there is no muxer in the plugin:
   the timeline is played into one canvas and one audio mix, and a single MediaRecorder
-  records the run, so a 2-minute montage takes 2 minutes. The preview plays one
+  records the run, so a 2-minute montage takes 2 minutes. A plain trim skips
+  the render: it is cut out of the file losslessly, in seconds. The preview plays one
   file at a time, so a dissolve and the extra angles of a shot only appear in
   the render. Sources of different shapes are letterboxed into the output
   rather than stretched, unless the segment is set to crop.
-  Keep the window visible while it renders: a hidden window stops painting
-  frames while the audio keeps running, and the two drift apart.
+  Hiding Discord pauses the render instead of desyncing it: the picture and
+  the sound freeze together and resume together.
 - **Imports are capped at 512 MB.** An imported file is read in the main
   process, copied across IPC and held in memory while the timeline is open, so
   a bigger one is refused rather than allowed to take the client down with it.

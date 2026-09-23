@@ -116,12 +116,18 @@ export async function syncVr(): Promise<void> {
 
     let status: VrStatus;
 
+    // A stop landing while the bridge is starting must not be resurrected
+    // by what comes back: the generation below is the stop's doing.
+    const started = generation;
+
     try {
         status = await Native.startVrBridge(true);
     } catch (e) {
         logger.warn("Could not start the SteamVR bridge", e);
         return;
     }
+
+    if (started !== generation) return;
 
     // Not alternatives: a session can be attached and have something wrong with
     // it at the same time, and the log is the only place the version it
@@ -240,12 +246,23 @@ export async function vrReport(): Promise<string> {
  * an idle client does no work, and no work at all when there is no headset.
  */
 async function pump(mine: number): Promise<void> {
+    let failures = 0;
+
     while (mine === generation) {
         let event: VrEvent | null = null;
 
         try {
             event = await Native.waitForVrEvent();
+            failures = 0;
         } catch (e) {
+            // A listener that keeps failing is a dead bridge, not a slow one:
+            // without a cap this loop warns every five seconds for ever.
+            if (++failures > 5) {
+                logger.warn("The SteamVR listener keeps failing - stopping it until the controls are toggled", e);
+                running = false;
+                return;
+            }
+
             logger.warn("The SteamVR listener failed, retrying", e);
             await new Promise(r => setTimeout(r, 5000));
             continue;

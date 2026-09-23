@@ -37,10 +37,11 @@ import {
 } from "../audio";
 import type { ChatLine } from "../chat";
 import {
-    deleteClip,
     frameName,
     listClips,
+    listTrash,
     loadAudioFile,
+    loadClipFile,
     loadClipUrl,
     loadImageFile,
     loadThumbUrl,
@@ -51,16 +52,19 @@ import {
     probeRange,
     renameClip,
     renderName,
+    restoreClip,
+    emptyTrash,
     revealClip,
     saveFrame,
     type StoredClip,
+    trashClip,
+    type TrashedClip,
     typeOfClip,
     writeClipCopy
 } from "../clips";
 import {
     categoriesOf,
     type ClipMeta,
-    dropMeta,
     moveMeta,
     pruneMeta,
     readMeta,
@@ -70,14 +74,15 @@ import {
 import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
-import { Container, extensionFor, pickMimeType } from "../settings";
+import { shareClipLink } from "../linkShare";
+import { Container, extensionFor, pickMimeType, settings } from "../settings";
 import {
     type AngleLayout,
     type AvatarCache,
     bestOf,
     type Caption,
     cutRange,
-    cutSilence,
+    previewSilence,
     decodeImage,
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -117,7 +122,8 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { formatBytes, formatTime } from "../utils";
+import { findDuplicates, formatBytes, formatTime, type ClipEntry } from "../utils";
+import { chaptersOf, formatBytes, formatTime } from "../utils";
 import { fromMeta, mutedFraction, VOICE_HZ, voiceDuckAt, voiceGainOf, voiceLevelsTouched, type VoiceTrack } from "../voice";
 import { createVoiceBand, type VoiceBand } from "../voiceBand";
 import { forgetVoiceMixes, type VoiceMix, voiceMixFor } from "../voiceMix";
@@ -216,6 +222,22 @@ export const STUDIO_CSS = `
     transform: scale(.97);
 }
 .vc-clipper-studio-ok:disabled {
+    opacity: .5;
+    cursor: default;
+}
+.vc-clipper-studio-switch {
+    padding: 7px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+}
+.vc-clipper-studio-switch:hover:not(:disabled) {
+    background: var(--button-secondary-background-hover, #6d6f78);
+}
+.vc-clipper-studio-switch:disabled {
     opacity: .5;
     cursor: default;
 }
@@ -1100,9 +1122,76 @@ export const STUDIO_CSS = `
     opacity: .4;
     cursor: default;
 }
+.vc-clipper-silence {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--background-tertiary, #1e1f22);
+    font-size: 12px;
+}
+.vc-clipper-silence-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--text-normal, #dbdee1);
+    font-weight: 600;
+}
+.vc-clipper-silence-head button {
+    padding: 4px 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--background-modifier-hover, rgba(78, 80, 88, .3));
+    color: var(--text-muted, #949ba4);
+    font-size: 11px;
+    cursor: pointer;
+}
+.vc-clipper-silence-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    color: var(--text-muted, #949ba4);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+.vc-clipper-silence-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+.vc-clipper-silence-actions button:not(.vc-clipper-studio-ok) {
+    padding: 7px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+}
 .vc-clipper-ruler-actions button.vc-clipper-danger:not(:disabled) {
     background: var(--button-danger-background, #da373c);
     color: #fff;
+}
+.vc-clipper-trash-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    background: var(--button-secondary-background, #4e5058);
+    color: #fff;
+    font-size: 12px;
+    cursor: pointer;
+}
+.vc-clipper-trash-btn:hover:not(:disabled) {
+    background: var(--button-secondary-background-hover, #6d6f78);
+}
+.vc-clipper-trash-btn:disabled {
+    opacity: .5;
+    cursor: default;
+}
+.vc-clipper-trash-btn.vc-clipper-danger:not(:disabled) {
+    background: var(--button-danger-background, #da373c);
 }
 .vc-clipper-mark-badge {
     flex: 0 0 auto;
@@ -2169,6 +2258,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [note, setNote] = useState("");
     const [error, setError] = useState("");
     const [search, setSearch] = useState("");
+    const [showTrash, setShowTrash] = useState(false);
+    const [trash, setTrash] = useState<TrashedClip[] | null>(null);
+    const [confirmEmpty, setConfirmEmpty] = useState(false);
 
     // The clip library, which used to be its own modal: the picked clip is the
     // one the rename, category and delete actions act on, and it is kept apart
@@ -2178,6 +2270,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [picked, setPicked] = useState("");
     const [renaming, setRenaming] = useState("");
     const [thumbs, setThumbs] = useState<Record<string, string>>({});
+    const [dupes, setDupes] = useState<ClipEntry[][] | null>(null);
+    const [dupeKeep, setDupeKeep] = useState<Record<string, boolean>>({});
 
     /*
      * Where the playhead is, and how long the file under it runs.
@@ -2189,6 +2283,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const [playhead, setPlayhead] = useState({ at: 0, length: 0 });
     const [playing, setPlaying] = useState(false);
     const [tagging, setTagging] = useState("");
+    const [tagInput, setTagInput] = useState("");
+    const [thumbAt, setThumbAt] = useState("");
+
+    // The rows edit the picked clip, so they follow it around.
+    useEffect(() => {
+        setTagInput(meta[picked]?.tags?.join(", ") ?? "");
+        setThumbAt("");
+    }, [picked]);
     const [confirmDelete, setConfirmDelete] = useState(false);
 
     /** Rough length the auto-montage aims for, in seconds. */
@@ -2281,6 +2383,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const refreshGen = useRef(0);
     const projectRef = useRef(project);
     const cancelRef = useRef(false);
+    /** Guards the multi-download auto-cut against double clicks. */
+    const autoRunningRef = useRef(false);
 
     sourcesRef.current = sources;
     projectRef.current = project;
@@ -2620,10 +2724,122 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const categoryOf = (name: string) => meta[name]?.game?.trim() || UNCATEGORISED;
 
     const needle = search.trim().toLowerCase();
-    const shown = (clips ?? []).filter(c =>
-        (!category || categoryOf(c.name) === category)
-        && (!needle || c.name.toLowerCase().includes(needle) || categoryOf(c.name).toLowerCase().includes(needle))
-    );
+    const shown = (clips ?? [])
+        .filter(c =>
+            (!category || categoryOf(c.name) === category)
+            && (!needle
+                || c.name.toLowerCase().includes(needle)
+                || categoryOf(c.name).toLowerCase().includes(needle)
+                || (meta[c.name]?.tags ?? []).some(t => t.includes(needle)))
+        )
+        // Pinned clips first, newest first inside each half.
+        .sort((a, b) => Number(meta[b.name]?.pinned ?? false) - Number(meta[a.name]?.pinned ?? false));
+
+    /** Pins or unpins the picked clip. Pinned clips top the list and skip cleanup. */
+    const onTogglePin = async () => {
+        if (!picked) return;
+
+        try {
+            await setMeta(picked, { pinned: !meta[picked]?.pinned });
+            setMetaState({ ...await readMeta() });
+        } catch (e) {
+            logger.warn("Pin failed", e);
+            toast("Could not pin that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Groups the listed clips into same-moment duplicates, largest kept by default. */
+    const findDupes = () => {
+        const found = findDuplicates((clips ?? []).map(c => ({
+            name: c.name,
+            size: c.size,
+            modified: c.modified,
+            game: categoryOf(c.name)
+        })));
+
+        const keep: Record<string, boolean> = {};
+        for (let gi = 0; gi < found.length; gi++) {
+            const biggest = found[gi].reduce((a, b) => (b.size > a.size ? b : a)).name;
+            for (const entry of found[gi]) keep[`${gi}:${entry.name}`] = entry.name === biggest;
+        }
+
+        setDupeKeep(keep);
+        setDupes(found);
+
+        if (!found.length) toast("No duplicates found", Toasts.Type.MESSAGE);
+    };
+
+    /** Trashes every duplicate left unchecked. */
+    const deleteUncheckedDupes = async () => {
+        if (!dupes?.length) return;
+
+        let removed = 0;
+        for (let gi = 0; gi < dupes.length; gi++) {
+            for (const entry of dupes[gi]) {
+                if (dupeKeep[`${gi}:${entry.name}`]) continue;
+
+                try {
+                    await trashClip(entry.name);
+                    removed++;
+                } catch (e) {
+                    logger.warn("Could not delete a duplicate", entry.name, e);
+                }
+            }
+        }
+
+        setDupes(null);
+        await refreshClips("");
+        void refreshTrash();
+        toast(removed ? `Deleted ${removed} duplicate${removed === 1 ? "" : "s"} (in the trash)` : "Nothing deleted", Toasts.Type.MESSAGE);
+    };
+
+    /** Rereads the trash: what is waiting, and what expired since. */
+    const refreshTrash = async () => {
+        try {
+            setTrash(await listTrash());
+        } catch (e) {
+            logger.warn("Could not list the trash", e);
+            setTrash([]);
+        }
+    };
+
+    const onRestore = async (stored: string) => {
+        try {
+            const name = await restoreClip(stored);
+            await refreshTrash();
+            await refreshClips(name);
+            toast(`Restored ${name}`, Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Restore failed", e);
+            toast("Could not restore that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    const onEmptyTrash = async () => {
+        if (!confirmEmpty) {
+            setConfirmEmpty(true);
+            setTimeout(() => setConfirmEmpty(false), 4000);
+            return;
+        }
+
+        setConfirmEmpty(false);
+
+        try {
+            await emptyTrash();
+            await refreshTrash();
+            toast("Trash emptied", Toasts.Type.MESSAGE);
+        } catch (e) {
+            logger.warn("Empty trash failed", e);
+            toast("Could not empty the trash", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Days left before a deletion goes for good. */
+    const trashLeft = (deletedAt: number) => {
+        const days = Math.max(0, Math.ceil((7 * 86400 * 1000 - (Date.now() - deletedAt)) / (86400 * 1000)));
+
+        return days <= 0 ? "last day" : `${days}d left`;
+    };
 
     /**
      * Rereads the clip folder and its categories.
@@ -2700,12 +2916,31 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         setConfirmDelete(false);
 
         try {
-            await deleteClip(picked);
-            await dropMeta(picked);
+            await trashClip(picked);
+            toast("Clip moved to the trash - 7 days to change your mind", Toasts.Type.MESSAGE);
             await refreshClips("");
+            if (trash !== null) void refreshTrash();
         } catch (e) {
             logger.warn("Delete failed", e);
             toast("Could not delete that clip", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Copies the markers as video chapters, named by what dropped them. */
+    const onChapters = async () => {
+        const entry = picked ? meta[picked] : undefined;
+        const text = chaptersOf(entry?.markers ?? [], entry?.markerLabels);
+
+        if (!text) {
+            toast("No markers on this clip", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        try {
+            await navigator.clipboard.writeText(text);
+            toast("Chapters copied", Toasts.Type.SUCCESS);
+        } catch {
+            toast("Could not reach the clipboard", Toasts.Type.FAILURE);
         }
     };
 
@@ -2721,6 +2956,61 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         } catch (e) {
             logger.warn("Could not tag that clip", e);
             toast("Could not save that category", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Saves the tags row, lower-cased and split on commas. */
+    const applyTags = async () => {
+        if (!picked) return;
+
+        const tags = tagInput.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+
+        try {
+            await setMeta(picked, { tags });
+            setMetaState({ ...await readMeta() });
+            toast(tags.length ? `Tagged ${tags.join(", ")}` : "Tags cleared", Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Could not save the tags", e);
+            toast("Could not save those tags", Toasts.Type.FAILURE);
+        }
+    };
+
+    /** Uses the frame at the typed seconds for the library picture. */
+    const onSetThumb = async () => {
+        if (!picked) return;
+
+        const at = Number(thumbAt);
+        if (!(at >= 0)) {
+            toast("Enter the seconds first", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        setThumbAt("");
+
+        try {
+            const file = await loadClipFile(picked);
+            await writeThumbnail(file, picked, at);
+            await refreshClips(picked);
+
+            const found = (await listClips()).find(c => c.name === picked);
+            const old = thumbs[picked];
+            if (old) {
+                URL.revokeObjectURL(old);
+                urlsRef.current.delete(old);
+            }
+
+            if (found?.thumb) {
+                const url = await loadThumbUrl(found);
+                if (url) {
+                    urlsRef.current.add(url);
+                    setThumbs(current => ({ ...current, [picked]: url }));
+                }
+            }
+
+            toast("Thumbnail updated", Toasts.Type.SUCCESS);
+        } catch (e) {
+            logger.warn("Could not set the thumbnail", e);
+            toast("Could not set that thumbnail", Toasts.Type.FAILURE);
         }
     };
 
@@ -3106,25 +3396,23 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     /**
-     * Pulls one of the clips posted in the channel in beside this shot.
+     * Downloads one posted angle and lines it up by ear.
      *
      * The download is the easy half. The hard half is that their buffer started
      * whenever their client felt like it, so the two files are the same moment
      * minutes apart: the sound is what they have in common, and the offset that
      * lines their loudness up with ours is what puts them on the same clock.
+     * Throws when the file itself cannot be read; a failed alignment only
+     * warns and leaves the offset at zero for the hand nudge below.
      */
-    const addAngle = async (angle: PostedAngle) => {
-        if (!segment || !source) return;
+    const openAngle = async (angle: PostedAngle): Promise<{ item: StudioSource; offset: number; }> => {
+        if (!segment || !source) throw new Error("Pick a shot first");
 
-        setError("");
         setNote(`Downloading ${angle.name}…`);
-
-        let opened: { url: string; bytes: ArrayBuffer; } | null = null;
+        const opened = await fetchAngle(angle);
+        track({ url: opened.url });
 
         try {
-            opened = await fetchAngle(angle);
-            track({ url: opened.url });
-
             const range = await probeFile(opened.url);
             if (range.end - range.start <= 0) throw new Error(`"${angle.name}" has nothing to play`);
 
@@ -3152,15 +3440,143 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 toast("Could not read the sound of that angle - line it up by hand below", Toasts.Type.FAILURE);
             }
 
+            return { item, offset };
+        } catch (e) {
+            drop(opened.url);
+            throw e;
+        }
+    };
+
+    /**
+     * Pulls one of the clips posted in the channel in beside this shot.
+     */
+    const addAngle = async (angle: PostedAngle) => {
+        if (!segment || !source) return;
+
+        setError("");
+
+        try {
+            const { item, offset } = await openAngle(angle);
+
             setSources(list => [...list, item]);
             patchSegment(segment.id, { angles: [...(segment.angles ?? []), { sourceId: item.id, offset }] });
 
             toast(`Added ${angle.author}'s angle`, Toasts.Type.SUCCESS);
         } catch (e) {
-            if (opened) drop(opened.url);
             logger.warn("Could not add a posted angle", e);
             setError(e instanceof Error ? e.message : String(e));
         } finally {
+            setNote("");
+        }
+    };
+
+    /**
+     * Downloads every posted angle and cuts between them in one step.
+     *
+     * One undo step whatever the headcount: the angles land on the timeline
+     * only as the edit they become, never as an intermediate state to clean.
+     */
+    const autoAngles = async () => {
+        if (!segment || !source) return;
+        if (autoRunningRef.current) return;
+        autoRunningRef.current = true;
+
+        const posted = postedAngles();
+        if (!posted.length) {
+            toast("Nobody posted an angle in the channel", Toasts.Type.MESSAGE);
+            return;
+        }
+
+        setError("");
+
+        try {
+            const items: StudioSource[] = [];
+            const offsets: number[] = [];
+            let failed = 0;
+
+            for (const angle of posted) {
+                try {
+                    const opened = await openAngle(angle);
+                    items.push(opened.item);
+                    offsets.push(opened.offset);
+                } catch (e) {
+                    failed++;
+                    logger.warn(`Could not fetch a posted angle (${angle.name})`, e);
+                }
+            }
+
+            if (!items.length) {
+                toast("None of the posted angles could be read", Toasts.Type.FAILURE);
+                return;
+            }
+
+            const attachedNames = new Set(
+                (segment.angles ?? [])
+                    .map(a => sources.find(s => s.id === a.sourceId)?.name)
+                    .filter((name): name is string => !!name)
+            );
+
+            // Posted twice, or posted after being added by hand: one copy is
+            // already cutting, the second would only double it.
+            const fresh = items.filter(item => {
+                if (!attachedNames.has(item.name)) return true;
+                drop(item.url);
+                return false;
+            });
+            const freshOffsets = offsets.filter((_, i) => !attachedNames.has(items[i].name));
+
+            setSources(list => [...list, ...fresh]);
+            setNote("Listening to the angles…");
+
+            const tracks: AngleTrack[] = [{
+                sourceId: source.id,
+                offset: 0,
+                envelope: envelopeOf(await audioOf(source)),
+                hz: ENVELOPE_HZ
+            }];
+
+            // Angles attached by hand earlier cut along, rather than being
+            // replaced: they were lined up on purpose.
+            for (const angle of segment.angles ?? []) {
+                const item = sources.find(s => s.id === angle.sourceId);
+                if (!item) continue;
+
+                tracks.push({
+                    sourceId: item.id,
+                    offset: angle.offset,
+                    envelope: envelopeOf(await audioOf(item)),
+                    hz: ENVELOPE_HZ
+                });
+            }
+
+            for (let i = 0; i < fresh.length; i++) {
+                tracks.push({
+                    sourceId: fresh[i].id,
+                    offset: freshOffsets[i],
+                    envelope: envelopeOf(await audioOf(fresh[i])),
+                    hz: ENVELOPE_HZ
+                });
+            }
+
+            const made = cutBetweenAngles(segment, tracks, ANGLE_PACES[anglePace]);
+
+            if (made.length < 2) {
+                toast("One angle carried the whole shot - there was nothing to cut to", Toasts.Type.MESSAGE);
+                return;
+            }
+
+            commitAngleEdit(segment, made, source.id);
+            setSelected(made[0].id);
+
+            toast(
+                `Cut into ${made.length} shots across ${tracks.length} angles${failed ? ` (${failed} unreadable skipped)` : ""}`,
+                Toasts.Type.SUCCESS
+            );
+        } catch (e) {
+            logger.warn("Could not auto-cut the angles", e);
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            autoRunningRef.current = false;
             setNote("");
         }
     };
@@ -3177,6 +3593,55 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
         const angles = (segment.angles ?? []).filter((_, i) => i !== index);
         patchSegment(segment.id, { angles });
+    };
+
+    /**
+     * Swaps a shot for an angle-cutting run of shots, in one undo step.
+     *
+     * The soundtrack stays on the angle the shot was cut from rather than
+     * following whoever is on screen: every one of these captures has the
+     * same call in it, at its own level and its own few hundred milliseconds
+     * of latency, so an edit that took the sound of each angle in turn would
+     * jump mix and echo on every cut. One sound clip over the whole run
+     * instead, and the pictures cut under it.
+     *
+     * A sound clip has no rate of its own, so it only lines up at speed 1:
+     * a stretched shot keeps the sound of each angle, and a silent one has
+     * nothing to keep.
+     */
+    const commitAngleEdit = (base: Segment, made: Segment[], soundtrackId: string) => {
+        commit(p => {
+            const index = p.segments.findIndex(s => s.id === base.id);
+            if (index < 0) return p;
+
+            const together = base.speed === 1 && base.volume > 0 && p.audio;
+
+            const segments = [
+                ...p.segments.slice(0, index),
+                ...(together ? made.map(one => ({ ...one, volume: 0 })) : made),
+                ...p.segments.slice(index + 1)
+            ];
+
+            if (!together) return { ...p, segments };
+
+            const at = p.segments.slice(0, index).reduce((sum, s) => sum + segmentLength(s), 0);
+
+            const clip: AudioClip = {
+                id: newId(),
+                sourceId: soundtrackId,
+                at,
+                from: base.from,
+                to: base.to,
+                gain: base.volume,
+                fadeIn: base.effects?.fadeIn ?? 0,
+                fadeOut: base.effects?.fadeOut ?? 0,
+                muted: false
+            };
+
+            return { ...p, segments, audioClips: [...(p.audioClips ?? []), clip] };
+        });
+
+        setSelected(made[0].id);
     };
 
     /**
@@ -3229,52 +3694,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 return;
             }
 
-            commit(p => {
-                const index = p.segments.findIndex(s => s.id === base.id);
-                if (index < 0) return p;
-
-                /*
-                 * The soundtrack stays on the angle the shot was cut from
-                 * rather than following whoever is on screen.
-                 *
-                 * Every one of these captures has the same call in it, at its
-                 * own level and its own few hundred milliseconds of latency, so
-                 * an edit that took the sound of each angle in turn would jump
-                 * mix and echo on every cut. One sound clip over the whole run
-                 * instead, and the pictures cut under it.
-                 *
-                 * A sound clip has no rate of its own, so it only lines up at
-                 * speed 1: a stretched shot keeps the sound of each angle, and
-                 * a silent one has nothing to keep.
-                 */
-                const together = base.speed === 1 && base.volume > 0 && p.audio;
-
-                const segments = [
-                    ...p.segments.slice(0, index),
-                    ...(together ? made.map(one => ({ ...one, volume: 0 })) : made),
-                    ...p.segments.slice(index + 1)
-                ];
-
-                if (!together) return { ...p, segments };
-
-                const at = p.segments.slice(0, index).reduce((sum, s) => sum + segmentLength(s), 0);
-
-                const clip: AudioClip = {
-                    id: newId(),
-                    sourceId: source.id,
-                    at,
-                    from: base.from,
-                    to: base.to,
-                    gain: base.volume,
-                    fadeIn: base.effects?.fadeIn ?? 0,
-                    fadeOut: base.effects?.fadeOut ?? 0,
-                    muted: false
-                };
-
-                return { ...p, segments, audioClips: [...(p.audioClips ?? []), clip] };
-            });
-
-            setSelected(made[0].id);
+            commitAngleEdit(base, made, source.id);
 
             toast(`Cut into ${made.length} shots across ${tracks.length} angles`, Toasts.Type.SUCCESS);
         } catch (e) {
@@ -3951,7 +4371,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const cutSound = (clip: AudioClip, edge: "start" | "end") => {
         const at = projectTime();
         const inside = at - clip.at;
-        if (inside <= 0 || inside >= clipLengthOf(clip)) return;
+        if (inside <= 0 || inside >= clipLengthOf(clip)) {
+            toast("Park the playhead over the sound first", Toasts.Type.MESSAGE);
+            return;
+        }
 
         if (edge === "start") patchSound(clip.id, { at, from: clip.from + inside });
         else patchSound(clip.id, { to: clip.from + inside });
@@ -3969,7 +4392,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const splitSound = (clip: AudioClip) => {
         const at = projectTime();
         const inside = at - clip.at;
-        if (inside <= 0 || inside >= clipLengthOf(clip)) return;
+        if (inside <= 0 || inside >= clipLengthOf(clip)) {
+            toast("Park the playhead over the sound first", Toasts.Type.MESSAGE);
+            return;
+        }
 
         const cut = clip.from + inside;
         const head: AudioClip = { ...clip, to: cut, fadeOut: 0 };
@@ -4058,7 +4484,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const segment = project.segments.find(s => s.id === id);
         if (!segment) return false;
 
-        setClipboard({ kind: "segment", segment });
+        setClipboard({ kind: "segment", segment: forkSegment(segment, segment.id) });
         pasteRun.current = null;
         return true;
     };
@@ -4125,6 +4551,21 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     /**
+     * A segment copy that shares nothing mutable with its source.
+     *
+     * The spread alone keeps `moves` and `angles` by reference: editing the
+     * framing or the angles of a duplicate then moves the original too.
+     * Effects, keys and angle attachments are all flat, so one level each.
+     */
+    const forkSegment = (segment: Segment, id: string): Segment => ({
+        ...segment,
+        id,
+        effects: { ...segment.effects },
+        moves: segment.moves?.map(m => ({ ...m })),
+        angles: segment.angles?.map(a => ({ ...a }))
+    });
+
+    /**
      * Puts a copy of a shot after the one that is selected.
      *
      * A segment has no placement of its own - the montage is the order of the
@@ -4135,7 +4576,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     const pasteSegment = (): boolean => {
         if (clipboard?.kind !== "segment") return false;
 
-        const copy: Segment = { ...clipboard.segment, id: newId(), effects: { ...clipboard.segment.effects } };
+        const copy: Segment = forkSegment(clipboard.segment, newId());
 
         commit(p => {
             const index = p.segments.findIndex(s => s.id === selected);
@@ -4188,16 +4629,20 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
     };
 
     const duplicate = (id: string) => {
+        const next = newId();
+
         commit(p => {
             const index = p.segments.findIndex(s => s.id === id);
             if (index < 0) return p;
 
-            const copy: Segment = { ...p.segments[index], id: newId(), effects: { ...p.segments[index].effects } };
+            const copy: Segment = forkSegment(p.segments[index], next);
             const segments = [...p.segments];
             segments.splice(index + 1, 0, copy);
 
             return { ...p, segments };
         });
+
+        setSelected(next);
     };
 
     /**
@@ -4220,8 +4665,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             const index = p.segments.findIndex(s => s.id === segment.id);
             if (index < 0) return p;
 
-            const left: Segment = { ...segment, to: at };
-            const right: Segment = { ...segment, id: newId(), from: at, effects: { ...segment.effects } };
+            const left: Segment = { ...forkSegment(segment, segment.id), to: at };
+            const right: Segment = { ...forkSegment(segment, newId()), from: at };
             const segments = [...p.segments];
             segments.splice(index, 1, left, right);
 
@@ -4291,6 +4736,22 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
      * found: a montage that comes back the same length is one whose sources
      * never carried the activity, not one with no dead air in it.
      */
+    /*
+     * Dead-air preview: what "Trim silence" would cut, listed for approval.
+     * Ranges plus one checked flag each, in timeline order; the cut walks
+     * them back to front the way cutSilence does.
+     */
+    const [silencePreview, setSilencePreview] = useState<{ from: number; to: number; }[] | null>(null);
+    const [silenceChecked, setSilenceChecked] = useState<boolean[]>([]);
+
+    // Ranges are measured against the timeline they were found on: any edit
+    // after that closes the preview rather than cutting stale coordinates.
+    // The whole project, not just the segments: captions and sounds move
+    // with a cut too.
+    useEffect(() => {
+        setSilencePreview(null);
+    }, [project]);
+
     const trimSilence = () => {
         const before = projectRef.current;
         if (!before.segments.length) {
@@ -4298,10 +4759,36 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             return;
         }
 
-        const { project: next, removed, ranges } = cutSilence(before, sourcesRef.current);
+        const found = previewSilence(before, sourcesRef.current);
+        if (!found.length) {
+            toast("Found no dead air to cut", Toasts.Type.FAILURE);
+            return;
+        }
+
+        setSilencePreview(found);
+        setSilenceChecked(found.map(() => true));
+    };
+
+    const applySilenceCut = () => {
+        const picked = (silencePreview ?? []).filter((_, i) => silenceChecked[i]);
+        setSilencePreview(null);
+        if (!picked.length) return;
+
+        const before = projectRef.current;
+        let next = before;
+        let removed = 0;
+        let ranges = 0;
+
+        for (const { from, to } of [...picked].sort((a, b) => b.from - a.from)) {
+            const after = cutRange(next, from, to);
+            if (after === next || !after.segments.length) continue;
+            next = after;
+            removed += to - from;
+            ranges++;
+        }
 
         if (next === before || !ranges) {
-            toast("Found no dead air to cut", Toasts.Type.FAILURE);
+            toast("Nothing could be cut off those stretches", Toasts.Type.FAILURE);
             return;
         }
 
@@ -5271,6 +5758,11 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         }
     };
 
+    /** Uploads the clip and copies a share link, so Discord's size limit never applies. */
+    const onShareLink = async (name: string) => {
+        await shareClipLink(name);
+    };
+
     const slider = (label: string, value: number, min: number, max: number, step: number, onChange: (v: number) => void, suffix = "") => (
         <div className="vc-clipper-field">
             <label>
@@ -5381,6 +5873,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                         <small>{headline}</small>
                     </div>
                     <div className="vc-clipper-studio-head-right">
+                        <button className="vc-clipper-studio-switch" disabled={busy} title="Switch to the simple trimmer" onClick={() => { settings.store.studioMode = "simple"; }}>Simple</button>
                         <button className="vc-clipper-studio-ok" disabled={busy} onClick={onClose}>Done</button>
                         <button className="vc-clipper-studio-close" onClick={onClose} disabled={busy} aria-label="Close">
                             <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
@@ -5406,6 +5899,49 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                         >
                             Best of the evening…
                         </button>
+
+                        <button
+                            className="vc-clipper-side-clip vc-clipper-add"
+                            disabled={busy || !(clips ?? []).length}
+                            title="Group clips that look like the same moment saved twice"
+                            onClick={() => findDupes()}
+                        >
+                            Find duplicates…
+                        </button>
+
+                        {!!dupes && (
+                            <div className="vc-clipper-silence">
+                                <div className="vc-clipper-silence-head">
+                                    <span>{dupes.length ? "Uncheck what goes - largest kept by default" : "Same moment, saved twice"}</span>
+                                    <button disabled={busy} onClick={() => setDupes(null)}>Close</button>
+                                </div>
+                                {!dupes.length && <div className="vc-clipper-note">No duplicates.</div>}
+                                {dupes.map((group, gi) => (
+                                    <div key={gi}>
+                                        {group.map(entry => {
+                                            const k = `${gi}:${entry.name}`;
+
+                                            return (
+                                                <label key={entry.name} className="vc-clipper-silence-row">
+                                                    <input
+                                                        type="checkbox"
+                                                        disabled={busy}
+                                                        checked={dupeKeep[k] ?? false}
+                                                        onChange={() => setDupeKeep(prev => ({ ...prev, [k]: !prev[k] }))}
+                                                    />
+                                                    <span>{entry.name} ({formatBytes(entry.size)})</span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                ))}
+                                {!!dupes.length && (
+                                    <div className="vc-clipper-silence-actions">
+                                        <button className="vc-clipper-studio-ok" disabled={busy} onClick={() => void deleteUncheckedDupes()}>Delete unchecked</button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="vc-clipper-field">
                             <label>
@@ -5444,6 +5980,51 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                             </div>
                         )}
 
+                        <div className="vc-clipper-field">
+                            <button
+                                className="vc-clipper-trash-btn"
+                                disabled={busy}
+                                title="Deleted clips stay 7 days, then go for good"
+                                onClick={() => setShowTrash(showing => {
+                                    if (!showing) void refreshTrash();
+                                    return !showing;
+                                })}
+                            >
+                                {showTrash ? "Back to clips" : trash?.length ? `Trash (${trash.length})` : "Trash"}
+                            </button>
+                        </div>
+
+                        {showTrash ? (
+                            <>
+                                <div className="vc-clipper-note">Deleted clips stay 7 days, then go for good.</div>
+                                {trash === null && <div className="vc-clipper-note">Reading the trash…</div>}
+                                {trash?.length === 0 && <div className="vc-clipper-note">Trash is empty.</div>}
+                                {trash?.map(t => (
+                                    <div key={t.stored} className="vc-clipper-side-clip">
+                                        <div className="vc-clipper-clip-row">
+                                            <div className="vc-clipper-clip-text">
+                                                <div className="vc-clipper-name" title={t.name}>{t.name}</div>
+                                                <div className="vc-clipper-meta">
+                                                    {formatBytes(t.size)}{t.game ? ` - ${t.game}` : ""} - {trashLeft(t.deletedAt)}
+                                                </div>
+                                            </div>
+                                            <button className="vc-clipper-trash-btn" disabled={busy} title="Bring it back to the folder" onClick={() => void onRestore(t.stored)}>Restore</button>
+                                        </div>
+                                    </div>
+                                ))}
+                                {!!trash?.length && (
+                                    <button
+                                        className={`vc-clipper-trash-btn${confirmEmpty ? " vc-clipper-danger" : ""}`}
+                                        disabled={busy}
+                                        title="Delete everything in the trash for good"
+                                        onClick={() => void onEmptyTrash()}
+                                    >
+                                        {confirmEmpty ? "Sure?" : "Empty trash"}
+                                    </button>
+                                )}
+                            </>
+                        ) : (
+                            <>
                         {clips === null && <div className="vc-clipper-note">Reading the clip folder…</div>}
                         {clips?.length === 0 && <div className="vc-clipper-note">No clip saved yet.</div>}
                         {!!clips?.length && !shown.length && <div className="vc-clipper-note">No clip matches.</div>}
@@ -5467,7 +6048,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         <div className="vc-clipper-clip-text">
                                             <div className="vc-clipper-name">{clip.name}</div>
                                             <div className="vc-clipper-meta">
-                                                {formatBytes(clip.size)} - {categoryOf(clip.name)}
+                                                {meta[clip.name]?.pinned ? "Pinned - " : ""}{formatBytes(clip.size)} - {categoryOf(clip.name)}
                                                 {marks ? ` - ${marks} marker${marks === 1 ? "" : "s"}` : ""}
                                             </div>
                                         </div>
@@ -5475,6 +6056,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                 </button>
                             );
                         })}
+                            </>
+                        )}
 
                         {!!picked && (
                             <div className="vc-clipper-side-manage">
@@ -5492,6 +6075,9 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     <button disabled={busy} title="Attach it to the channel behind the studio" onClick={() => void onSend(picked)}>
                                         Send
                                     </button>
+                                    <button disabled={busy} title="Upload it and copy a share link instead of the file" onClick={() => void onShareLink(picked)}>
+                                        Link
+                                    </button>
                                     <button disabled={busy} title="Show the file in the folder" onClick={() => void revealClip(picked)}>
                                         Folder
                                     </button>
@@ -5505,10 +6091,18 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         </button>
                                     )}
                                     <button disabled={busy} title="Rename the file" onClick={() => setRenaming(picked)}>Rename</button>
+                                    <button disabled={busy} title="Copy video chapters for the markers" onClick={() => void onChapters()}>Chapters</button>
+                                    <button
+                                        disabled={busy}
+                                        title={meta[picked]?.pinned ? "Unpin it: back in date order, cleanup applies again" : "Pin it to the top and spare it from cleanup"}
+                                        onClick={() => void onTogglePin()}
+                                    >
+                                        {meta[picked]?.pinned ? "Unpin" : "Pin"}
+                                    </button>
                                     <button
                                         className={confirmDelete ? "vc-clipper-danger" : ""}
                                         disabled={busy}
-                                        title="Delete the file from the folder"
+                                        title="Move the file to the trash (7 days to restore it)"
                                         onClick={() => void onDeleteClip()}
                                     >
                                         {confirmDelete ? "Sure?" : "Delete"}
@@ -5561,6 +6155,47 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                     >
                                         Unfile
                                     </button>
+                                </div>
+
+                                <div className="vc-clipper-field">
+                                    <label><span>Tags</span><span>comma separated, searchable</span></label>
+                                    <input
+                                        type="text"
+                                        value={tagInput}
+                                        placeholder="clutch, overtime…"
+                                        disabled={busy}
+                                        onChange={e => setTagInput(e.currentTarget.value)}
+                                        onKeyDown={e => {
+                                            e.stopPropagation();
+                                            if (e.key === "Enter") void applyTags();
+                                            if (e.key === "Escape") setTagInput(meta[picked]?.tags?.join(", ") ?? "");
+                                        }}
+                                    />
+                                </div>
+
+                                <div className="vc-clipper-side-actions">
+                                    <button disabled={busy} onClick={() => void applyTags()}>Tag</button>
+                                </div>
+
+                                <div className="vc-clipper-field">
+                                    <label><span>Thumbnail</span><span>seconds into the clip</span></label>
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={thumbAt}
+                                        placeholder="1.5"
+                                        disabled={busy}
+                                        onChange={e => setThumbAt(e.currentTarget.value)}
+                                        onKeyDown={e => {
+                                            e.stopPropagation();
+                                            if (e.key === "Enter") void onSetThumb();
+                                            if (e.key === "Escape") setThumbAt("");
+                                        }}
+                                    />
+                                </div>
+
+                                <div className="vc-clipper-side-actions">
+                                    <button disabled={busy} title="Use that frame for the library picture" onClick={() => void onSetThumb()}>Set thumb</button>
                                 </div>
                             </div>
                         )}
@@ -5701,10 +6336,41 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                         <button
                                             disabled={busy}
                                             onClick={trimSilence}
-                                            title="Cut every stretch nobody is talking over, using the clip's own voice lanes"
+                                            title="List every stretch nobody is talking over, using the clip's own voice lanes"
                                         >
                                             Trim silence
                                         </button>
+                                    </div>
+                                )}
+                                {!!silencePreview && (
+                                    <div className="vc-clipper-silence">
+                                        <div className="vc-clipper-silence-head">
+                                            <span>
+                                                Cut the checked stretches ({silenceChecked.filter(Boolean).length}/{silencePreview.length}
+                                                {(() => {
+                                                    const checked = silencePreview.reduce((sum, range, i) => sum + (silenceChecked[i] ? range.to - range.from : 0), 0);
+
+                                                    return checked > 0 ? `, ${formatTime(checked)}` : "";
+                                                })()})
+                                            </span>
+                                            <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => true))}>All</button>
+                                            <button disabled={busy} onClick={() => setSilenceChecked(silencePreview.map(() => false))}>None</button>
+                                        </div>
+                                        {silencePreview.map((range, i) => (
+                                            <label key={`${range.from}-${range.to}-${i}`} className="vc-clipper-silence-row">
+                                                <input
+                                                    type="checkbox"
+                                                    disabled={busy}
+                                                    checked={!!silenceChecked[i]}
+                                                    onChange={() => setSilenceChecked(prev => prev.map((v, j) => j === i ? !v : v))}
+                                                />
+                                                <span>{formatTime(range.from)} - {formatTime(range.to)} ({formatTime(range.to - range.from)})</span>
+                                            </label>
+                                        ))}
+                                        <div className="vc-clipper-silence-actions">
+                                            <button className="vc-clipper-studio-ok" disabled={busy} onClick={applySilenceCut}>Cut checked</button>
+                                            <button disabled={busy} onClick={() => setSilencePreview(null)}>Cancel</button>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -6006,6 +6672,14 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                 onClick={() => setPosted(postedAngles())}
                                             >
                                                 Look in the chat
+                                            </button>
+                                            <button
+                                                className="vc-clipper-primary"
+                                                disabled={busy || !source}
+                                                title="Download every posted angle and cut between them in one step"
+                                                onClick={() => void autoAngles()}
+                                            >
+                                                Fetch all & cut
                                             </button>
                                             {!!segment.angles?.length && (
                                                 <select

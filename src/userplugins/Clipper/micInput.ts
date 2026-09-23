@@ -533,6 +533,7 @@ export class MicInput {
 
         if (plan.matched === "none") {
             logger.warn(`Discord is set to "${plan.discordDeviceName || plan.discordDeviceId}" but nothing in Chromium's list matches it; recording ${plan.openedLabel || "the system default"} instead`);
+            toast(`Discord's microphone was not found - recording ${plan.openedLabel || "the system default"} instead`, Toasts.Type.MESSAGE);
         }
 
         return mic;

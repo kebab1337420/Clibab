@@ -83,6 +83,19 @@ export interface ClipMeta {
      * the moment that caused it. Only what arrived while the buffer ran.
      */
     chat?: ChatLine[];
+    /**
+     * Pinned to the top of the library, and spared by the automatic cleanup.
+     *
+     * Absent means unpinned, like every clip saved before this existed.
+     */
+    pinned?: boolean;
+    /**
+     * What the automatic markers were, per marker in `markers`.
+     *
+     * Manual marks are blank strings. Absent on clips saved before this
+     * existed, which read as all-manual. Powers the chapters export.
+     */
+    markerLabels?: string[];
 }
 
 interface LibraryDocument {
@@ -408,13 +421,19 @@ export async function tagSavedClip(
     voices?: VoiceTrackMeta[],
     tracks?: VoiceFileMeta[],
     levels?: VoiceLevels,
-    chat?: ChatLine[]
+    chat?: ChatLine[],
+    markerLabels?: string[]
 ): Promise<void> {
     const name = path.split(/[\\/]/).pop();
     if (!name) return;
 
     const game = detectGame();
-    const kept = markers?.filter(m => Number.isFinite(m) && m >= 0).sort((a, b) => a - b) ?? [];
+    const pairs = (markers ?? [])
+        .map((m, i) => ({ m, label: markerLabels?.[i]?.trim() ?? "" }))
+        .filter(p => Number.isFinite(p.m) && p.m >= 0)
+        .sort((a, b) => a.m - b.m);
+    const kept = pairs.map(p => p.m);
+    const keptLabels = pairs.map(p => p.label);
     const lanes = voices?.filter(v => v.levels) ?? [];
     const files = tracks?.filter(t => t.file) ?? [];
     const balance = Object.entries(levels ?? {}).filter(([, gain]) => Number.isFinite(gain) && gain !== 1);
@@ -428,6 +447,7 @@ export async function tagSavedClip(
         await setMeta(name, {
             ...(game ? { game } : {}),
             ...(kept.length ? { markers: kept } : {}),
+            ...(keptLabels.some(label => label) ? { markerLabels: keptLabels } : {}),
             ...(lanes.length ? { voices: lanes } : {}),
             ...(files.length ? { tracks: files } : {}),
             ...(balance.length ? { levels: Object.fromEntries(balance) } : {}),

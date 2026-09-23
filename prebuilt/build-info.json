@@ -2,17 +2,17 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "5.5.1",
-  "clipperCommit": "9863ee3",
-  "builtAt": "2026-09-21T20:19:18",
+  "clipperVersion": "6.5.0",
+  "clipperCommit": "868c474",
+  "builtAt": "2026-09-23T20:17:48",
   "files": {
     "discord-voice-capture.exe": {
-      "size": 3395584,
-      "sha256": "0fe4f51b79aa682cdb0d22c4530aa7b28c5a7a884676ef11c74fbae11d16b569"
+      "size": 2014720,
+      "sha256": "ae513ca2b9343ae85cce867c2311d7c436d52fe9325dbbf42eedc4d8908d06b5"
     },
     "patcher.js": {
-      "size": 139245,
-      "sha256": "8f96bcaa0731b4dcf5e11287a3d37bd8b79d15eff14b2eaf6b6b8a1d18c782f8"
+      "size": 145738,
+      "sha256": "1b09620e4f3e44f24193fdb18043612e876093415604f14e28590026163319c5"
     },
     "patcher.js.LEGAL.txt": {
       "size": 964,
@@ -27,16 +27,16 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "renderer.js": {
-      "size": 1127108,
-      "sha256": "75db03fd3bc1065a726a69e83375f91ebde8c4884688407ff4e824305ea59671"
+      "size": 1159647,
+      "sha256": "a0c93d52cfc9a6415ef9554103394c73438493d2bdc1b3b5ed46253f75f58763"
     },
     "renderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
     },
     "vencordDesktopMain.js": {
-      "size": 135510,
-      "sha256": "7e099f3843b8cea10e62e942af3717693b75443145878ecf5aba8e6ef706379e"
+      "size": 142007,
+      "sha256": "6d9c65709e240a063e69fdce84d0e696ba9aa440888adeb857c1c162bc409cc1"
     },
     "vencordDesktopMain.js.LEGAL.txt": {
       "size": 964,
@@ -51,12 +51,34 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "vencordDesktopRenderer.js": {
-      "size": 1135006,
-      "sha256": "3ce6ad41f9fec4bb1a156ece50c4c69f55d65ee36da36cbc5e0d3ddbe81c8ef7"
+      "size": 1167547,
+      "sha256": "9891aac14a56423e9eb65988baf6c60e8503b84c13430bf4819fbe0ee9915f4d"
     },
     "vencordDesktopRenderer.js.LEGAL.txt": {
       "size": 1880,
       "sha256": "180a18086f32719f048206e5516fa98449bd49c3967811969c34c8c7facf1bfc"
+    }
+  },
+  "root": {
+    "install.bat": {
+      "size": 5900,
+      "sha256": "0596b052bf12dc947285aefdf06c584e23e4bf6ae09180e26b0f26b238c46efb"
+    },
+    "VRinstaller.bat": {
+      "size": 18190,
+      "sha256": "e01159b781f32b5f5256220fb11756fd993d964f4660fb96e5e1472ecbe8591e"
+    },
+    "scripts/install-prebuilt.ps1": {
+      "size": 10076,
+      "sha256": "d8c19fe3caae1efa64d420252dbd9997a1aeb900bed0d03bfd901cd3b2930cb7"
+    },
+    "scripts/uninstall.ps1": {
+      "size": 3760,
+      "sha256": "1b41348db1c21077cb23c0985a7fe0dfcfec35d9b99607539ce5f098cc0e86c1"
+    },
+    "scripts/install-vesktop.ps1": {
+      "size": 2832,
+      "sha256": "3c04ef303778dbc6e928f2d20f482c8b8965965388bfe01c0f7759146aba069e"
     }
   }
 }

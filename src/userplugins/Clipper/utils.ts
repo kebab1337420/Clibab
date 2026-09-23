@@ -21,7 +21,7 @@ export function thumbNameFor(name: string): string {
 
 export function captureFrameRate(value: unknown): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 30;
-    return Math.min(60, Math.max(1, value));
+    return Math.min(120, Math.max(1, value));
 }
 
 export function captureVideoBitrate(value: unknown): number {
@@ -311,6 +311,113 @@ export function suspendKeybinds(): () => void {
  * quietly stop agreeing.
  */
 export const TIMESLICE = 1000;
+
+/**
+ * Short-save lengths offered wherever a clip is cut down, shortest first.
+ *
+ * Shared by the overlay menu, the replay card and the in-game editor, which
+ * each had their own copy with their own upper bound.
+ */
+export const TRIM_CUTS = [15, 30, 60];
+
+/** One-click capture setup: frame rate, height, bitrate in Mbps, length in s. */
+export interface CapturePreset {
+    label: string;
+    fps: number;
+    resolution: number;
+    bitrate: number;
+    length: number;
+    /** Container value, as stored: presets are whole setups, not four knobs. */
+    container: string;
+}
+
+/**
+ * Eco sips memory (~15MB held), Balanced is the everyday middle (~90MB),
+ * Quality spends more (~225MB) for demanding games. All stay well under
+ * the 512MB the buffer refuses to cross.
+ */
+export const CAPTURE_PRESETS: CapturePreset[] = [
+    { label: "Eco", fps: 30, resolution: 720, bitrate: 4, length: 30, container: "mp4-h264" },
+    { label: "Balanced", fps: 60, resolution: 1080, bitrate: 12, length: 60, container: "mp4-h264" },
+    { label: "Quality", fps: 60, resolution: 1440, bitrate: 20, length: 90, container: "mp4-h264" }
+];
+
+/** One clip for the duplicate hunt: size, filesystem time, filed category. */
+export interface ClipEntry {
+    name: string;
+    size: number;
+    modified: number;
+    game: string;
+}
+
+/**
+ * Clips that are probably the same moment saved twice.
+ *
+ * A manual save, a multi-angle request and an end-of-call clip of one play
+ * land within seconds of each other under one game; an hour-long session of
+ * distinct plays does not. Groups are per game, opened by the first clip and
+ * closed 90 seconds later, so back-to-back evenings never chain into one.
+ */
+export function findDuplicates(entries: ClipEntry[]): ClipEntry[][] {
+    const WINDOW_MS = 90_000;
+
+    const byGame = new Map<string, ClipEntry[]>();
+    for (const entry of entries) {
+        const list = byGame.get(entry.game) ?? [];
+        list.push(entry);
+        byGame.set(entry.game, list);
+    }
+
+    const groups: ClipEntry[][] = [];
+
+    for (const list of byGame.values()) {
+        const sorted = [...list].sort((a, b) => a.modified - b.modified);
+
+        let run: ClipEntry[] = [];
+        for (const entry of sorted) {
+            if (run.length && entry.modified - run[0].modified > WINDOW_MS) {
+                if (run.length > 1) groups.push(run);
+                run = [];
+            }
+            run.push(entry);
+        }
+
+        if (run.length > 1) groups.push(run);
+    }
+
+    return groups.sort((a, b) => b[0].modified - a[0].modified);
+}
+
+/**
+ * Marker offsets as video chapters, one `timestamp title` line each.
+ *
+ * Labels come from the automatic markers ("a kill in Counter-Strike 2"); a
+ * manual mark with none reads "Highlight N". Sorted, starting at 00:00 as
+ * chapters must, empty when there is nothing to chapter.
+ */
+export function chaptersOf(markers: number[], labels?: Array<string | null | undefined>): string {
+    const rows = markers
+        .map((at, i) => ({ at: Math.max(0, Math.floor(Number(at) || 0)), index: i }))
+        .filter(r => Number.isFinite(r.at))
+        .sort((a, b) => a.at - b.at)
+        .map((r, position) => ({
+            at: r.at,
+            label: labels?.[r.index]?.trim() || `Highlight ${position + 1}`
+        }));
+
+    if (!rows.length) return "";
+    if (rows[0].at > 0) rows.unshift({ at: 0, label: "Start" });
+
+    const stamp = (total: number) => {
+        const hours = Math.floor(total / 3600);
+        const minutes = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+        const seconds = String(total % 60).padStart(2, "0");
+
+        return `${hours ? `${hours}:` : ""}${minutes}:${seconds}`;
+    };
+
+    return rows.map(r => `${stamp(r.at)} ${r.label}`).join("\n");
+}
 
 /**
  * Something readable out of anything that was thrown.

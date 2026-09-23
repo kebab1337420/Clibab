@@ -52,6 +52,10 @@ const DEDUPE_MS = 250;
  * sees the key. That is not guaranteed on every setup, hence the guard.
  */
 export function runShortcut(action: ShortcutAction): boolean {
+    // The main process only ever answers the five known actions, but the pump
+    // also reads this straight off IPC: anything else is junk, not a shortcut.
+    if (!(action in ACTIONS)) return false;
+
     const now = Date.now();
     if (now - (lastFired.get(action) ?? 0) < DEDUPE_MS) return false;
 
@@ -68,6 +72,7 @@ export async function startGlobalKeybinds(): Promise<void> {
         const { wayland } = await Native.getPlatformInfo();
         if (wayland) {
             logger.warn("Wayland ignores application-registered hotkeys, so the keybinds only fire while Discord is focused. Bind them in your compositor to a command instead, or use the chat bar button.");
+            toast("Wayland: keybinds only fire while Discord is focused", Toasts.Type.MESSAGE, 8000);
         }
     } catch (e) {
         logger.warn("Could not read the platform info", e);

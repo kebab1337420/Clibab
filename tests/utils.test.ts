@@ -2,7 +2,25 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
-import { clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind } from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind, toAccelerator } from "../src/userplugins/Clipper/utils.ts";
+
+test("capture presets stay within sane bounds", () => {
+    assert.ok(CAPTURE_PRESETS.length >= 2);
+
+    for (const preset of CAPTURE_PRESETS) {
+        // Held memory, same estimate the picker shows: bitrate over the
+        // whole length plus container overhead, under the 512MB buffer cap.
+        const held = (preset.bitrate * 1_000_000) / 8 * preset.length * 1.1;
+        assert.ok(held < 512 * 1024 * 1024, `${preset.label} holds ${held}`);
+
+        // Each value must survive the clamps that sanitize the settings.
+        assert.equal(utils.captureFrameRate(preset.fps), preset.fps);
+        assert.equal(utils.captureHeight(preset.resolution), preset.resolution);
+        assert.ok(utils.captureVideoBitrate(preset.bitrate) === preset.bitrate * 1_000_000);
+        assert.ok(retention(preset.length) >= preset.length);
+        assert.ok(["mp4-h264", "webm-vp9", "webm-vp8"].includes(preset.container), `${preset.label} container`);
+    }
+});
 
 test("capture frame rates remain finite and within encoder limits", () => {
     for (const value of [NaN, Infinity, -Infinity, undefined, null, "60", {}, 0, -10]) {
@@ -12,7 +30,8 @@ test("capture frame rates remain finite and within encoder limits", () => {
     assert.equal(utils.captureFrameRate(24), 24);
     assert.equal(utils.captureFrameRate(30), 30);
     assert.equal(utils.captureFrameRate(60), 60);
-    assert.equal(utils.captureFrameRate(240), 60);
+    assert.equal(utils.captureFrameRate(120), 120);
+    assert.equal(utils.captureFrameRate(240), 120);
 });
 
 test("video bitrate settings produce bounded bits per second for the encoder", () => {
@@ -72,4 +91,43 @@ test("valid shortcuts still parse and match their modifiers", () => {
     assert.equal(keybindMatches("ctrl+KeyS", event), true);
     assert.equal(keybindMatches("alt+KeyS", event), false);
     assert.equal(parseKeybind(""), null);
+
+    assert.equal(toAccelerator("ctrl+KeyS"), "Control+S");
+    assert.equal(toAccelerator("alt+F10"), "Alt+F10");
+    assert.equal(toAccelerator("ctrl+shift+Digit1"), "Control+Shift+1");
+    assert.equal(toAccelerator(""), "");
+    assert.equal(toAccelerator("ctrl+Foo"), "");
+});
+
+test("duplicates are same-game saves seconds apart", () => {
+    const at = (s: number) => ({ size: 10, modified: s * 1000, game: "CS2", name: `c${s}` });
+
+    assert.deepEqual(findDuplicates([]), []);
+    assert.deepEqual(findDuplicates([at(0)]), []);
+
+    // Save, POV request and auto-clip of one play.
+    const burst = findDuplicates([at(0), at(20), at(70)]);
+    assert.equal(burst.length, 1);
+    assert.deepEqual(burst[0].map(e => e.name), ["c0", "c20", "c70"]);
+
+    // Different games never group, however close.
+    const other = { size: 10, modified: 10_000, game: "LoL", name: "x" };
+    assert.deepEqual(findDuplicates([at(0), other]), []);
+
+    // An hour-long session does not chain into one group.
+    const evening = [0, 100, 200, 300, 400].map(at);
+    assert.deepEqual(findDuplicates(evening), []);
+
+    // Two bursts stay two groups, newest first.
+    const two = findDuplicates([at(0), at(30), at(1000), at(1030)]);
+    assert.equal(two.length, 2);
+    assert.deepEqual(two[0].map(e => e.name), ["c1000", "c1030"]);
+});
+
+test("chapters read like chapters", () => {
+    assert.equal(chaptersOf([]), "");
+    assert.equal(chaptersOf([75], ["a kill in Counter-Strike 2"]), "00:00 Start\n01:15 a kill in Counter-Strike 2");
+    assert.equal(chaptersOf([0, 65], ["", "woo"]), "00:00 Highlight 1\n01:05 woo");
+    assert.equal(chaptersOf([3661], []), "00:00 Start\n1:01:01 Highlight 1");
+    assert.equal(chaptersOf([30, 10], ["b", "a"]), "00:00 Start\n00:10 a\n00:30 b");
 });

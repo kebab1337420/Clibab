@@ -1,6 +1,7 @@
 # Worker behind the NSIS setup wizard (installer\clipper.nsi): downloads the
 # newest Clipper release, verifies it against the published file list, and
-# runs its install.bat - plus VRinstaller.bat when -SteamVR is given.
+# runs its scripts\install-prebuilt.ps1 -PatchClients - plus VRinstaller.bat
+# when -SteamVR is given.
 #
 # This is the PowerShell port of what installer\Program.cs used to do. NSIS
 # ships no HTTPS downloader and no SHA256 hasher in its stock plugins, while
@@ -19,7 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$UpdateRepo = "kebab1337420/vencord-clipper"
+$UpdateRepo = "kebab1337420/Clibab"
 
 function Get-LatestRelease {
     # The version is read from the release list rather than pinned: a tag
@@ -109,6 +110,23 @@ function Test-Bundle([string] $tag, [string] $repoRoot) {
     }
 }
 
+function Invoke-Prebuilt([string] $repoRoot) {
+    # The release's own installer: copies the bundle and patches every client
+    # it finds (plain install.bat never patched anything, which is how a
+    # "successful" install once left Discord unpatched). A nonzero exit means
+    # no client was set up, and that fails the install rather than silently
+    # leaving a bundle nobody loads.
+    $script = Join-Path $repoRoot "scripts\install-prebuilt.ps1"
+    if (-not (Test-Path $script)) { throw "The release archive is missing scripts\install-prebuilt.ps1." }
+
+    $process = Start-Process "powershell.exe" `
+        -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$script`"", "-PatchClients" `
+        -WorkingDirectory $repoRoot -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "The bundle installed, but no Discord or Vesktop install was set up (exit $($process.ExitCode))."
+    }
+}
+
 function Invoke-Batch([string] $file, [string] $workingDirectory) {
     # stdin comes from NUL: install scripts end in `pause`, and there is no
     # console to press a key on under the wizard.
@@ -163,10 +181,27 @@ try {
         if (-not $root) { throw "The release archive is missing install.bat." }
 
         Write-Host "Verifying the bundle against the release..."
-        Test-Bundle $release.Tag $root
+        try {
+            Test-Bundle $release.Tag $root
+        } catch {
+            # A stale cache verifies against a tag that moved on: fetch once
+            # more rather than failing the install on yesterday's bytes.
+            if (-not $useCache) { throw }
+            Write-Host "Cached data failed verification - refetching a fresh copy..."
+            Remove-Item $cachePath -Force -ErrorAction SilentlyContinue
+            $temporaryZip = Join-Path ([IO.Path]::GetTempPath()) ("clipper-installer-" + [Guid]::NewGuid().ToString("N") + ".zip")
+            Invoke-WebRequest -Uri $release.Url -OutFile $temporaryZip -TimeoutSec 600
+            Copy-Item $temporaryZip $cachePath -Force
+            Remove-Item $temporaryExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $temporaryExtractDir | Out-Null
+            Expand-Archive $temporaryZip $temporaryExtractDir -Force
+            $root = Find-ReleaseRoot $temporaryExtractDir
+            if (-not $root) { throw "The release archive is missing install.bat." }
+            Test-Bundle $release.Tag $root
+        }
 
         Write-Host "Installing Clipper..."
-        Invoke-Batch (Join-Path $root "install.bat") $root
+        Invoke-Prebuilt $root
 
         if ($SteamVR) {
             Write-Host "Installing SteamVR integration..."

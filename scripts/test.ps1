@@ -13,6 +13,19 @@
 
 $ErrorActionPreference = "Stop"
 
+# Node 22.6+ runs the TypeScript directly, 24+ without a flag: fail fast with
+# the download link instead of a page of resolver errors on an old runtime.
+try {
+    $version = (node --version) -replace '^v', ''
+    if ([version]$version -lt [version]"22.6.0") {
+        Write-Host "[ERROR] node $($version) is too old - install node 24 or newer from https://nodejs.org, then run this again."
+        exit 1
+    }
+} catch {
+    Write-Host "[ERROR] node was not found - install node 24 or newer from https://nodejs.org, then run this again."
+    exit 1
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 
 # The preload gives Node the bundler's resolution for relative imports, which

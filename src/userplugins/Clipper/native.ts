@@ -11,10 +11,11 @@
  * here and written to the folder chosen in the settings.
  */
 
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
+import { tmpdir } from "os";
 import { basename, extname, isAbsolute, join } from "path";
 
 import { closeFeeds, type FeedStatus, type GameEvent, startFeeds, status as feedStatus, waitForFeedEvent } from "./gameFeeds";
@@ -56,9 +57,58 @@ const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
-    if (trimmed && isAbsolute(trimmed)) return trimmed;
+    const target = trimmed && isAbsolute(trimmed)
+        ? trimmed
+        : join(app.getPath("videos"), "DiscordClips");
 
-    return join(app.getPath("videos"), "DiscordClips");
+    // The folder comes from the renderer, so it is never trusted with a
+    // system location: clips have no business inside the OS, its program
+    // folders, or the bundle this code runs from. Anything else - including
+    // a custom folder the user typed - is theirs to keep.
+    const needle = target.toLowerCase().replace(/[\\/]+$/, "");
+    for (const root of forbiddenClipRoots()) {
+        const base = root.toLowerCase().replace(/[\\/]+$/, "");
+        if (needle === base || needle.startsWith(`${base}\\`) || needle.startsWith(`${base}/`)) {
+            throw new Error("That folder is not a place for clips");
+        }
+    }
+
+    return target;
+}
+
+/** Roots no clip folder may point at or into. */
+function forbiddenClipRoots(): string[] {
+    const roots: string[] = [];
+
+    for (const name of ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]) {
+        const value = process.env[name]?.trim();
+        if (value) roots.push(value);
+    }
+
+    // Off Windows the variables above are empty, so the usual homes for
+    // keys, configs and the system get named outright. A clip folder has no
+    // business in any of them on any OS.
+    if (process.platform !== "win32") {
+        const home = process.env.HOME?.trim();
+        if (home) roots.push(home, join(home, ".ssh"), join(home, ".config"));
+        roots.push("/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin");
+    }
+
+    try {
+        roots.push(bundleDirectory());
+    } catch {
+        // A checkout without an installed bundle: nothing extra to protect.
+    }
+
+    try {
+        // Discord's own data dir, not all of %APPDATA%: users keep their own
+        // folders there, but nothing that belongs to the client itself.
+        roots.push(app.getPath("userData"));
+    } catch {
+        // Paths unavailable this early: the bundle root above still holds.
+    }
+
+    return roots;
 }
 
 /**
@@ -141,6 +191,11 @@ function writeClipBytes(path: string, data: Uint8Array): void {
 }
 
 export function saveClip(_: IpcMainInvokeEvent, dir: string, name: string, data: Uint8Array, keep = false): Promise<string> {
+    // Reads are capped (readClip, readVideoFile), so writes are too: an
+    // oversized buffer handed across IPC would otherwise OOM the main
+    // process before anything validates it.
+    if (data.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to write");
+
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
 
@@ -215,6 +270,12 @@ export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string
  * a `-1` suffix for a name that is actually free.
  */
 export function releaseClipPath(_: IpcMainInvokeEvent, path: string): void {
+    // Only reservations this plugin hands out: absolute paths to clip-like
+    // files. Deleting anything else from the set is either a no-op or frees
+    // a name somebody else's save is still holding.
+    if (typeof path !== "string" || !isAbsolute(path)) return;
+    if (!clipName(basename(path) ?? "")) return;
+
     reservedClipPaths.delete(path);
 }
 
@@ -269,6 +330,10 @@ export function saveVoiceTrack(_: IpcMainInvokeEvent, dir: string, clip: string,
     const name = voiceName(clip, userId);
     if (!name) return null;
 
+    // One lane is seconds of Opus: anything past this is not a lane but a
+    // buffer handed across IPC whole, and writing it would fill the disk.
+    if (data.length > MAX_VOICE_BYTES) throw new Error("That voice track is too large to write");
+
     const target = join(resolveDirectory(dir), VOICE_DIR);
     mkdirSync(target, { recursive: true });
 
@@ -282,12 +347,28 @@ export function saveVoiceTrack(_: IpcMainInvokeEvent, dir: string, clip: string,
     return path;
 }
 
+/** Largest single voice lane read or written, in bytes. */
+const MAX_VOICE_BYTES = 64 * 1024 * 1024;
+
 /** Reads one of them back. */
 export function readVoiceTrack(_: IpcMainInvokeEvent, dir: string, file: string): Uint8Array {
     const flat = basename(String(file ?? "").replace(/[\\/]/g, "_"));
     if (!flat.toLowerCase().endsWith(".webm") || flat.includes("..")) throw new Error("not a voice track");
 
-    return new Uint8Array(readFileSync(join(resolveDirectory(dir), VOICE_DIR, flat)));
+    const path = join(resolveDirectory(dir), VOICE_DIR, flat);
+    const fd = openSync(path, "r");
+
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_VOICE_BYTES) throw new Error("That voice track is too large to open");
+
+        const data = new Uint8Array(readFileSync(fd));
+        if (data.length > MAX_VOICE_BYTES) throw new Error("That voice track is too large to open");
+
+        return data;
+    } finally {
+        closeSync(fd);
+    }
 }
 
 /** Drops everything recorded for a clip, for when the clip itself goes. */
@@ -318,6 +399,14 @@ export interface StoredClip {
 export function listClips(_: IpcMainInvokeEvent, dir: string): StoredClip[] {
     const target = resolveDirectory(dir);
     if (!existsSync(target)) return [];
+
+    // Expired trash goes with any listing: the 7-day expiry must not wait
+    // for somebody to open the trash view.
+    try {
+        purgeTrash(target);
+    } catch {
+        // A stuck trash must never hide the clips themselves.
+    }
 
     const clips: StoredClip[] = [];
     const files = new Set<string>();
@@ -374,12 +463,352 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
         const { size } = fstatSync(fd);
         if (size > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
 
-        const buf = new Uint8Array(readFileSync(fd));
-        if (buf.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
+        const data = new Uint8Array(readFileSync(fd));
 
-        return buf;
+        // Checked again after the read: a file that grew in between still
+        // cannot get past the cap on its way to the renderer.
+        if (data.length > MAX_CLIP_BYTES) throw new Error("That clip is too large to open");
+
+        return data;
     } finally {
         closeSync(fd);
+    }
+}
+
+/**
+ * Deleted clips wait here instead of going to the OS trash.
+ *
+ * A rename on the same volume is atomic and instant whatever the file weighs,
+ * and keeping the file next to the clips means restoring is the same rename
+ * backwards - including the thumbnail and the metadata the library dropped.
+ * Entries older than TRASH_KEEP_MS are removed for good whenever the trash
+ * is listed or the clip folder is.
+ */
+const TRASH_DIR = ".trash";
+const TRASH_INDEX = ".trash.json";
+const TRASH_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+interface TrashEntry {
+    /** File name inside the trash dir (deduped, so not the clip's name). */
+    stored: string;
+    /** Name the clip had in the folder, for the restore. */
+    name: string;
+    /** Epoch ms of the deletion, for the 7-day expiry. */
+    deletedAt: number;
+    /** Library entry as JSON, handed back on restore. */
+    meta: string | null;
+}
+
+function trashDir(target: string): string {
+    return join(target, TRASH_DIR);
+}
+
+function readTrashIndex(trash: string): Record<string, TrashEntry> {
+    let parsed: unknown;
+
+    try {
+        parsed = JSON.parse(readFileSync(join(trash, TRASH_INDEX), "utf8"));
+    } catch {
+        // Missing or corrupt: start the index over rather than losing the files.
+        return {};
+    }
+
+    if (!parsed || typeof parsed !== "object") return {};
+
+    // The index is ours until somebody hand-edits it: entries that are not
+    // plain clip names in this folder are dropped before any path is built
+    // from them, so a "../" smuggled in can never escape the trash dir.
+    const clean: Record<string, TrashEntry> = {};
+
+    for (const [stored, entry] of Object.entries(parsed as Record<string, TrashEntry>)) {
+        if (!/^([\w.\-+ ()[\]]{1,120})\.(webm|mp4|png|jpg|gif)$/i.test(stored)) continue;
+        if (!entry || typeof entry !== "object" || entry.stored !== stored) continue;
+        clean[stored] = entry;
+    }
+
+    return clean;
+}
+
+function writeTrashIndex(trash: string, index: Record<string, TrashEntry>): void {
+    mkdirSync(trash, { recursive: true });
+    writeFileSync(join(trash, TRASH_INDEX), JSON.stringify(index));
+}
+
+/** Drops the per-person lanes left behind by a trashed stem. */
+function dropTrashedVoices(target: string, stem: string): void {
+    if (!stem) return;
+
+    const voices = join(target, VOICE_DIR);
+    let entries: string[];
+    try {
+        entries = readdirSync(voices);
+    } catch {
+        return;
+    }
+
+    for (const file of entries) {
+        if (file.startsWith(`${stem}.`) && file.toLowerCase().endsWith(".webm")) {
+            try {
+                unlinkSync(join(voices, file));
+            } catch {
+                // Already gone, or held open by a decoder.
+            }
+        }
+    }
+}
+
+/** Removes entries older than TRASH_KEEP_MS, with their files and voice lanes. */
+function purgeTrash(target: string): void {
+    const trash = trashDir(target);
+    if (!existsSync(trash)) return;
+
+    const index = readTrashIndex(trash);
+    const now = Date.now();
+    let changed = false;
+
+    for (const [stored, entry] of Object.entries(index)) {
+        if (!entry || now - (entry.deletedAt ?? 0) < TRASH_KEEP_MS) continue;
+
+        for (const file of [stored, thumbNameFor(stored)]) {
+            try {
+                unlinkSync(join(trash, file));
+            } catch {
+                // Already gone.
+            }
+        }
+
+        // The per-person lanes were left beside the voices under the clip's
+        // own stem; without the clip they are orphaned the same day.
+        dropTrashedVoices(target, (entry.name ?? "").replace(/\.(webm|mp4|png|jpg|gif)$/i, ""));
+
+        delete index[stored];
+        changed = true;
+    }
+
+    if (changed) writeTrashIndex(trash, index);
+}
+
+export interface TrashedClip {
+    /** File name inside the trash dir, the handle restore and empty use. */
+    stored: string;
+    /** Name the clip had in the folder. */
+    name: string;
+    size: number;
+    /** Epoch ms of the deletion. */
+    deletedAt: number;
+    /** Category the clip was filed under, when its metadata says. */
+    game: string;
+}
+
+/** Moves a clip into the trash, with its thumbnail and library entry. */
+export function trashClip(_: IpcMainInvokeEvent, dir: string, name: string, meta: string | null): void {
+    const clip = clipName(name);
+    if (!clip) throw new Error("That is not a clip name");
+
+    if (meta !== null && (typeof meta !== "string" || meta.length > 1024 * 1024)) {
+        throw new Error("That metadata is not metadata");
+    }
+
+    const target = resolveDirectory(dir);
+    const from = join(target, clip);
+    if (!existsSync(from)) throw new Error("That clip is already gone");
+
+    const trash = trashDir(target);
+    mkdirSync(trash, { recursive: true });
+
+    const stored = freePath(trash, clip).split(/[\\/]/).pop() || clip;
+    renameSync(from, join(trash, stored));
+
+    const thumb = thumbNameFor(clip);
+    if (existsSync(join(target, thumb))) {
+        try {
+            renameSync(join(target, thumb), join(trash, thumbNameFor(stored)));
+        } catch {
+            // A still frame is regenerable; the clip is not.
+        }
+    }
+
+    const index = readTrashIndex(trash);
+    index[stored] = { stored, name: clip, deletedAt: Date.now(), meta };
+    writeTrashIndex(trash, index);
+}
+
+/** Moves a trashed clip back into the folder, with its metadata. */
+export function restoreClip(_: IpcMainInvokeEvent, dir: string, stored: string): { name: string; meta: string | null; } {
+    const file = clipName(stored);
+    if (!file) throw new Error("That is not a clip name");
+
+    const target = resolveDirectory(dir);
+    const trash = trashDir(target);
+    const index = readTrashIndex(trash);
+    const entry = index[file];
+
+    if (!entry || !existsSync(join(trash, file))) {
+        delete index[file];
+        writeTrashIndex(trash, index);
+        throw new Error("That clip is no longer in the trash");
+    }
+
+    const name = freePath(target, entry.name).split(/[\\/]/).pop() || entry.name;
+    renameSync(join(trash, file), join(target, name));
+
+    const thumb = thumbNameFor(file);
+    if (existsSync(join(trash, thumb))) {
+        try {
+            renameSync(join(trash, thumb), join(target, thumbNameFor(name)));
+        } catch {
+            // Regenerable; the clip made it.
+        }
+    }
+
+    delete index[file];
+    writeTrashIndex(trash, index);
+
+    return { name, meta: entry.meta ?? null };
+}
+
+/** What is waiting in the trash, oldest deletions first. */
+export function listTrash(_: IpcMainInvokeEvent, dir: string): TrashedClip[] {
+    const target = resolveDirectory(dir);
+    purgeTrash(target);
+
+    const trash = trashDir(target);
+    const index = readTrashIndex(trash);
+    const out: TrashedClip[] = [];
+
+    for (const [stored, entry] of Object.entries(index)) {
+        if (!entry) continue;
+
+        let size = 0;
+        try {
+            size = statSync(join(trash, stored)).size;
+        } catch {
+            // Listed but unreadable: drop it rather than showing a dead row.
+            delete index[stored];
+            continue;
+        }
+
+        let game = "";
+        try {
+            const meta = entry.meta ? JSON.parse(entry.meta) : null;
+            if (meta && typeof meta.game === "string") game = meta.game;
+        } catch {
+            // Metadata is a bonus, not the listing.
+        }
+
+        out.push({ stored, name: entry.name ?? stored, size, deletedAt: entry.deletedAt ?? 0, game });
+    }
+
+    return out.sort((a, b) => a.deletedAt - b.deletedAt);
+}
+
+/** Empties the trash for good: files, index and orphaned voice lanes. */
+export function emptyTrash(_: IpcMainInvokeEvent, dir: string): void {
+    const target = resolveDirectory(dir);
+    const trash = trashDir(target);
+    if (!existsSync(trash)) return;
+
+    for (const [stored, entry] of Object.entries(readTrashIndex(trash))) {
+        for (const file of [stored, thumbNameFor(stored)]) {
+            try {
+                unlinkSync(join(trash, file));
+            } catch {
+                // Already gone.
+            }
+        }
+
+        if (entry) dropTrashedVoices(target, (entry.name ?? "").replace(/\.(webm|mp4|png|jpg|gif)$/i, ""));
+    }
+
+    writeTrashIndex(trash, {});
+}
+
+/**
+ * Oldest buffer chunks, parked on disk instead of RAM.
+ *
+ * Past a quarter gigabyte the rolling buffer stops being memory: the oldest
+ * whole-second chunks are written here as they age out, read back when a save
+ * assembles them, and dropped with the prune. A rename-free layout - one file
+ * per chunk, ids minted by the renderer against a strict pattern, so no path
+ * passed over IPC can ever escape this folder.
+ */
+const SPILL_CHUNK_CAP = 32 * 1024 * 1024;
+
+function spillDir(): string {
+    const dir = join(tmpdir(), `clipper-spill-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+
+    return dir;
+}
+
+function spillPath(id: string): string {
+    if (!/^spill-\d+-[a-z0-9]+$/i.test(id)) throw new Error("That is not a spill file");
+
+    return join(spillDir(), `${id}.frag`);
+}
+
+export function spillWrite(_: IpcMainInvokeEvent, id: string, data: Uint8Array): void {
+    if (data.length > SPILL_CHUNK_CAP) throw new Error("That spill chunk is too large");
+
+    writeFileSync(spillPath(id), Buffer.from(data));
+}
+
+export function spillRead(_: IpcMainInvokeEvent, id: string): Uint8Array {
+    const path = spillPath(id);
+    const fd = openSync(path, "r");
+
+    try {
+        const { size } = fstatSync(fd);
+        if (size > SPILL_CHUNK_CAP) throw new Error("That spill chunk is too large");
+
+        return new Uint8Array(readFileSync(fd));
+    } finally {
+        closeSync(fd);
+    }
+}
+
+export function spillDrop(_: IpcMainInvokeEvent, ids: string[]): void {
+    for (const id of ids) {
+        try {
+            unlinkSync(spillPath(id));
+        } catch {
+            // Bad id, or already gone with a prune.
+        }
+    }
+}
+
+/** Drops this session's spill folder, plus crashed sessions older than a day. */
+export function spillClear(): void {
+    const mine = `clipper-spill-${process.pid}`;
+
+    let entries: string[];
+    try {
+        entries = readdirSync(tmpdir());
+    } catch {
+        return;
+    }
+
+    for (const entry of entries) {
+        if (!entry.startsWith("clipper-spill-")) continue;
+
+        const full = join(tmpdir(), entry);
+
+        if (entry !== mine) {
+            let age = 0;
+            try {
+                age = Date.now() - statSync(full).mtimeMs;
+            } catch {
+                continue;
+            }
+
+            if (age < 24 * 3600 * 1000) continue;
+        }
+
+        try {
+            rmSync(full, { recursive: true, force: true });
+        } catch {
+            // Held open by a save still reading it back.
+        }
     }
 }
 
@@ -472,13 +901,27 @@ export function renameClip(_: IpcMainInvokeEvent, dir: string, name: string, nex
  */
 const LIBRARY_FILE = "clipper-library.json";
 
+/** Largest metadata document read or written: categories, not footage. */
+const MAX_LIBRARY_BYTES = 5 * 1024 * 1024;
+
 /** Raw metadata document, kept opaque here: the renderer owns its shape. */
 export function readLibrary(_: IpcMainInvokeEvent, dir: string): string {
     const path = join(resolveDirectory(dir), LIBRARY_FILE);
     if (!existsSync(path)) return "";
 
     try {
-        return readFileSync(path, "utf8");
+        const fd = openSync(path, "r");
+        try {
+            const { size } = fstatSync(fd);
+            if (size > MAX_LIBRARY_BYTES) return "";
+
+            const data = new Uint8Array(readFileSync(fd));
+            if (data.length > MAX_LIBRARY_BYTES) return "";
+
+            return Buffer.from(data).toString("utf8");
+        } finally {
+            closeSync(fd);
+        }
     } catch {
         // Unreadable or mid-write: the renderer treats this as an empty library
         // rather than losing the clips it is listing.
@@ -489,6 +932,10 @@ export function readLibrary(_: IpcMainInvokeEvent, dir: string): string {
 export function writeLibrary(_: IpcMainInvokeEvent, dir: string, json: string): void {
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
+
+    if (String(json ?? "").length > MAX_LIBRARY_BYTES) {
+        throw new Error("That library document is too large to write");
+    }
 
     // A metadata file is small, but it is rewritten on every tag change while
     // clips may be recording: write beside it and rename, so a crash mid-write
@@ -945,6 +1392,12 @@ export function registerShortcuts(_: IpcMainInvokeEvent, binds: Partial<Record<S
     const failed: string[] = [];
 
     for (const [action, accelerator] of Object.entries(binds) as Array<[ShortcutAction, string]>) {
+        // Keys come off IPC: only the five actions exist, and anything else
+        // would register a system-wide bind that fires junk into the pump.
+        if (action !== "save" && action !== "toggle" && action !== "mark" && action !== "pov" && action !== "replay") {
+            continue;
+        }
+
         if (!accelerator) continue;
 
         let ok = false;
@@ -985,6 +1438,12 @@ export function waitForShortcut(_: IpcMainInvokeEvent, timeoutMs = 30_000): Prom
     const queued = pending.shift();
     if (queued) return Promise.resolve(queued);
 
+    // Clamped: a negative timeout fires at once (busy poll), a huge one parks
+    // a timer for weeks. Overflowed beyond that into a crowded room: polls
+    // past this many mean the other end stopped collecting.
+    const wait = Math.min(120_000, Math.max(1_000, Number(timeoutMs) || 30_000));
+    if (waiters.length > 32) waiters.shift()?.(null);
+
     return new Promise(resolve => {
         let done = false;
 
@@ -998,7 +1457,8 @@ export function waitForShortcut(_: IpcMainInvokeEvent, timeoutMs = 30_000): Prom
         const timer = setTimeout(() => {
             waiters = waiters.filter(w => w !== settle);
             settle(null);
-        }, timeoutMs);
+        }, wait);
+
 
         waiters.push(settle);
     });
@@ -1271,7 +1731,7 @@ export function focusClient(event: IpcMainInvokeEvent): void {
  */
 
 /** Where the prebuilt bundle is published. */
-const UPDATE_REPO = "kebab1337420/vencord-clipper";
+const UPDATE_REPO = "kebab1337420/Clibab";
 
 /** GitHub rejects an API request with no user agent, so every call carries one. */
 const UPDATE_AGENT = `VencordClipper (+https://github.com/${UPDATE_REPO})`;
@@ -1289,8 +1749,35 @@ interface Fetched {
     body: Buffer;
 }
 
+/**
+ * Where a download may come from: the API, the site itself for archives,
+ * and the file hosts both answer behind. Anything else - a release JSON
+ * pointing somewhere unexpected, a redirect off domain - is refused rather
+ * than followed, since every byte past this point lands in the client.
+ */
+function allowedUpdateUrl(url: string): boolean {
+    let host = "";
+
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:") return false;
+        host = parsed.hostname.toLowerCase();
+    } catch {
+        return false;
+    }
+
+    return host === "api.github.com"
+        || host === "github.com"
+        || host === "codeload.github.com"
+        || host === "raw.githubusercontent.com"
+        || host === "objects.githubusercontent.com"
+        || host.endsWith(".githubusercontent.com");
+}
+
 /** One GET, following redirects, with the whole body in memory. */
 function httpGet(url: string, redirects = 0): Promise<Fetched> {
+    if (!allowedUpdateUrl(url)) return Promise.reject(new Error(`Refusing to fetch outside the update hosts: ${url}`));
+
     return new Promise((resolve, reject) => {
         const request = httpsGet(url, { headers: { "User-Agent": UPDATE_AGENT, Accept: "*/*" } }, response => {
             const status = response.statusCode ?? 0;
@@ -1465,8 +1952,15 @@ async function fetchManifest(tag: string): Promise<Record<string, ManifestEntry>
  *
  * Returns the names of the files that were replaced.
  */
-export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string): Promise<string[]> {
+export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, installed: string): Promise<string[]> {
     if (!/^[\w.-]{1,40}$/.test(tag)) throw new Error(`Refusing to fetch a release named ${tag}`);
+
+    // The tag alone says nothing about direction: a renderer asking for an
+    // older release by name would otherwise install a downgrade over a
+    // newer bundle, hashes and all.
+    if (!isNewer(tag.replace(/^v/i, ""), String(installed ?? ""))) {
+        throw new Error(`Refusing to install ${tag}: it is not newer than the installed bundle`);
+    }
 
     const dir = bundleDirectory();
     if (!bundleInstalled(dir)) throw new Error(`No installed bundle at ${dir}`);
@@ -1484,8 +1978,11 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string): Promis
 
     const names = Object.keys(manifest);
 
-    const staging = join(dir, ".clipper-update");
-    rmSync(staging, { recursive: true, force: true });
+    // Unpredictable, and never shared: a fixed staging name lets anything
+    // else on the machine pre-plant a link where the swap walks, and the
+    // finally below sweeps this folder so failures leave nothing behind.
+    const staging = join(dir, `.clipper-update-${randomBytes(8).toString("hex")}`);
+    if (existsSync(staging)) throw new Error("An update staging folder is already there; refusing to share it");
     mkdirSync(staging, { recursive: true });
 
     try {

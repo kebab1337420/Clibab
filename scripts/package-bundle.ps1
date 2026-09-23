@@ -49,7 +49,7 @@ if (-not $Version) { $Version = "0" }
 $asset = "clipper-bundle-v$Version.zip"
 
 # ------------------------------------------------------------- stage the zip --
-$stage = Join-Path $env:TEMP "clipper-bundle-$(Get-Random)"
+$stage = Join-Path $env:TEMP "clipper-bundle-$([System.IO.Path]::GetRandomFileName())"
 $root = Join-Path $stage "clipper-bundle-v$Version"
 New-Item -ItemType Directory -Force $root | Out-Null
 
@@ -64,6 +64,13 @@ foreach ($script in @("install-prebuilt.ps1", "uninstall.ps1", "install-vesktop.
 New-Item -ItemType Directory -Force (Join-Path $root "prebuilt") | Out-Null
 Copy-Item (Join-Path $prebuilt "build-info.json") (Join-Path $root "prebuilt")
 Copy-Item $dist (Join-Path $root "prebuilt\dist") -Recurse
+
+# Text files ride LF, like the git blobs the installer otherwise reads: a
+# CRLF checkout must not ship bytes the manifest (hashed normalized) refuses.
+Get-ChildItem $root -Recurse -Include *.bat, *.ps1 | ForEach-Object {
+    $text = [IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
+    [IO.File]::WriteAllText($_.FullName, $text)
+}
 
 # ---------------------------------------------------------------- ship it ----
 New-Item -ItemType Directory -Force $outputDir | Out-Null

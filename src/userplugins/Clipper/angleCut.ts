@@ -376,8 +376,10 @@ export function cutBetweenAngles(base: Segment, tracks: AngleTrack[], options: P
         };
 
         // A moving framing was set on the base angle's own frames, so it means
-        // nothing on somebody else's capture and is left off there.
-        if (shot.track === 0 && base.moves?.length) segment.moves = base.moves;
+        // nothing on somebody else's capture and is left off there. Copied
+        // key by key: every shot owns its framing, or reframing one reframes
+        // the whole edit.
+        if (shot.track === 0 && base.moves?.length) segment.moves = base.moves.map(m => ({ ...m }));
 
         return segment;
     });

@@ -167,6 +167,11 @@ function register(track: MediaStreamTrack) {
 
     try {
         const context = audioContext();
+
+        // Woken back up after an idle: the context resumes in audioContext(),
+        // but the ticker this tap is sampled by does not restart itself.
+        if (!ticker) ticker = setInterval(tick, SAMPLE_MS);
+
         const own = new MediaStream([track]);
 
         const keepAlive = new Audio();
@@ -199,7 +204,7 @@ function register(track: MediaStreamTrack) {
     }
 }
 
-function drop(id: string) {
+function drop(id: string): void {
     const entry = tracked.get(id);
     if (!entry) return;
 
@@ -213,6 +218,24 @@ function drop(id: string) {
     }
 
     tracked.delete(id);
+    idle();
+}
+
+/**
+ * Powers the tap layer down when nothing is left to sample.
+ *
+ * An AudioContext holds an audio thread and a device handle whether anything
+ * is connected to it or not, so after a call the shared context idles hot
+ * for the rest of the session. Suspended it costs nothing and resumes on the
+ * next tap; the ticker goes with it, since an empty tick is pure wakeups.
+ */
+function idle(): void {
+    if (tracked.size) return;
+
+    if (ticker) clearInterval(ticker);
+    ticker = null;
+
+    ctx?.suspend().catch(() => void 0);
 }
 
 /** Loudness of one tap right now, as a plain RMS over the latest frame. */
