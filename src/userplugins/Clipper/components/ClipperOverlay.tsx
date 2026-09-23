@@ -21,6 +21,7 @@ import { React, Toasts, useEffect, useMemo, useRef, useState } from "@webpack/co
 
 import { CLIPS_AVAILABLE } from "../clips";
 import { hideClipPlayback, notifySaved } from "../gameOverlay";
+import { shareClipLink } from "../linkShare";
 import { requestPov } from "../multipov";
 import type { CaptureSource } from "../native";
 import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerOpener, setStudioOpener } from "../recorder";
@@ -1091,6 +1092,7 @@ function ActionMenu({ recording, onClose, onPreview, onStudio }: {
                     <div className="vc-clipper-menu-label" title={last.name}>{last.name}</div>
                     <div className="vc-clipper-menu-row">
                         {item("Send to channel", () => void sendClipFitted(last.name), false, undefined, "Send it to this channel")}
+                        {item("Copy link", () => void shareClipLink(last.name), false, undefined, "Upload it whole and copy a link that plays in chat")}
                         {item("Ending as GIF", () => void sendClipGif(last.name), false, undefined, "Post its ending as a GIF")}
                         {cuts.map(n => (
                             <React.Fragment key={n}>

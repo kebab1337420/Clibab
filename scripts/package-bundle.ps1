@@ -1,7 +1,7 @@
 # Maintainer script: packages the bundle-only release asset distributed with
 # a Clipper release.
 #
-# The exe installer (installer\Program.cs) used to pull GitHub's source archive
+# The NSIS setup (installer\clipper.nsi) used to pull GitHub's source archive
 # of the whole repo, because install.bat, the scripts and prebuilt\dist all live
 # in it. A release that ships the source code just to install a bundle gives
 # anyone who grabs it the entire plugin sources as well.

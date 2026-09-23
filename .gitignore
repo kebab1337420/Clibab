@@ -8,9 +8,6 @@ dist/
 # Standalone installer output, rebuilt per release by scripts\build-installer.ps1
 release/
 
-# .NET build output for the graphical installer
-installer/bin/
-installer/obj/
 .vs/
 *.user
 
