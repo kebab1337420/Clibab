@@ -67,7 +67,9 @@ Copy-Item $dist (Join-Path $root "prebuilt\dist") -Recurse
 
 # Text files ride LF, like the git blobs the installer otherwise reads: a
 # CRLF checkout must not ship bytes the manifest (hashed normalized) refuses.
-Get-ChildItem $root -Recurse -Include *.bat, *.ps1 | ForEach-Object {
+# The extension list mirrors Get-StableHash in build-prebuilt.ps1 - every file
+# the manifest checks, minus the exe, which is binary and ships untouched.
+Get-ChildItem $root -Recurse -Include *.bat, *.ps1, *.js, *.css, *.txt, *.json, *.md | ForEach-Object {
     $text = [IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
     [IO.File]::WriteAllText($_.FullName, $text)
 }
