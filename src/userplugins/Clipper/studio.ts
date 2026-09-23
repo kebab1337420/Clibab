@@ -424,9 +424,26 @@ export function projectLength(project: Project): number {
     return project.segments.reduce((total, s) => total + segmentLength(s), 0);
 }
 
+/**
+ * Prefix sums of segment starts, keyed on the segment list itself.
+ *
+ * The starts are a property of the list alone, and every edit builds a new
+ * list, so the sums are cached on the array: the common case is a render
+ * reading a table it already built instead of slicing and reducing the
+ * segments for every frame. A WeakMap keyed on the array means a stale sum
+ * can never outlive the list it was computed from.
+ */
+const segmentStartsCache = new WeakMap<Segment[], number[]>();
+
 /** Project time at which a segment starts, for the caption editor. */
 export function segmentStart(project: Project, index: number): number {
-    return project.segments.slice(0, index).reduce((total, s) => total + segmentLength(s), 0);
+    let starts = segmentStartsCache.get(project.segments);
+    if (!starts) {
+        starts = [0];
+        for (const segment of project.segments) starts.push(starts[starts.length - 1] + segmentLength(segment));
+        segmentStartsCache.set(project.segments, starts);
+    }
+    return starts[Math.min(Math.max(0, index), starts.length - 1)];
 }
 
 export function newId(): string {
@@ -1037,7 +1054,15 @@ export function bestOf(picks: MontagePick[], options: Partial<MontageOptions> = 
     }));
 }
 
+const filterCache = new Map<string, string>();
+
 function filterFor(effects: Effects): string {
+    // Keyed on the values, not the object: the editor mutates effects in
+    // place, so an identity cache would serve the previous grade forever.
+    const key = `${effects.brightness}|${effects.contrast}|${effects.saturate}|${effects.grayscale}|${effects.blur}`;
+    const hit = filterCache.get(key);
+    if (hit !== undefined) return hit;
+
     const parts: string[] = [];
 
     if (effects.brightness !== 100) parts.push(`brightness(${effects.brightness}%)`);
@@ -1046,7 +1071,11 @@ function filterFor(effects: Effects): string {
     if (effects.grayscale > 0) parts.push(`grayscale(${effects.grayscale}%)`);
     if (effects.blur > 0) parts.push(`blur(${effects.blur}px)`);
 
-    return parts.join(" ") || "none";
+    const out = parts.join(" ") || "none";
+    if (filterCache.size >= 64) filterCache.clear();
+    filterCache.set(key, out);
+
+    return out;
 }
 
 /** Smoothstep, so a move leaves and arrives at rest. */
@@ -1333,10 +1362,10 @@ function fitted(video: HTMLVideoElement, width: number, height: number, zoom: nu
    frame: a wrap that almost always answers from cache keeps a caption from
    re-measuring itself at the display rate. The cache is cleared on growth
    rather than unbounded, and entries are never mutated by the painter. */
-const wrapCache = new Map<string, string[]>();
+const wrapCache = new Map<string, { lines: string[]; widest: number }>();
 
 /** Splits a caption on its own newlines, then on width. */
-function wrap(ctx: CanvasRenderingContext2D, text: string, max: number): string[] {
+function wrap(ctx: CanvasRenderingContext2D, text: string, max: number): { lines: string[]; widest: number } {
     const key = `${ctx.font}\u0000${max}\u0000${text}`;
     const hit = wrapCache.get(key);
     if (hit) return hit;
@@ -1362,10 +1391,21 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, max: number): string[
     }
 
     const wrapped = lines.length > 1 ? lines.filter(Boolean) : lines;
-    if (wrapCache.size >= 256) wrapCache.clear();
-    wrapCache.set(key, wrapped);
 
-    return wrapped;
+    // Measured once, here, rather than once per painted frame: the background
+    // box needs the widest line every frame, and the wrap that produces it is
+    // already cached, so the widest rides along for free.
+    let widest = 0;
+    for (const line of wrapped) {
+        const w = ctx.measureText(line).width;
+        if (w > widest) widest = w;
+    }
+
+    const out = { lines: wrapped, widest };
+    if (wrapCache.size >= 256) wrapCache.clear();
+    wrapCache.set(key, out);
+
+    return out;
 }
 
 /**
@@ -1385,14 +1425,13 @@ function drawCaption(ctx: CanvasRenderingContext2D, text: string, style: Caption
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
 
-    const lines = wrap(ctx, text, width * 0.9);
+    const { lines, widest } = wrap(ctx, text, width * 0.9);
     const step = size * 1.2;
     const block = step * (lines.length - 1) + size * 1.35;
     const bottom = height * style.position - offset;
     const top = bottom - step * (lines.length - 1);
 
     if (style.background) {
-        const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
         const pad = size * 0.35;
 
         ctx.fillStyle = style.outline;
@@ -1590,6 +1629,9 @@ function drawOverlays(ctx: CanvasRenderingContext2D, width: number, height: numb
 /** An avatar decoded once and drawn on every frame, by user id. */
 export type AvatarCache = Map<string, CanvasImageSource>;
 
+/** Speaker name widths, keyed on font and name: measured once, not per frame. */
+const speakerWidthCache = new Map<string, number>();
+
 /**
  * Draws the people talking right now, stacked down the top-left corner.
  *
@@ -1621,7 +1663,13 @@ function drawSpeakers(ctx: CanvasRenderingContext2D, width: number, height: numb
     for (const speaker of speakers.slice(0, 4)) {
         const centre = y + size / 2;
         const name = speaker.name.slice(0, 22);
-        const text = ctx.measureText(name).width;
+        const key = `${ctx.font}\u0000${name}`;
+        let text = speakerWidthCache.get(key);
+        if (text === undefined) {
+            text = ctx.measureText(name).width;
+            if (speakerWidthCache.size >= 256) speakerWidthCache.clear();
+            speakerWidthCache.set(key, text);
+        }
         const box = size + gap * 0.5 + text + gap;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
@@ -1672,6 +1720,56 @@ const CHAT_HOLD = 9;
 const CHAT_LINES = 4;
 
 /**
+ * Chat layout cache, keyed on everything a message's geometry is a function
+ * of.
+ *
+ * A chat row is wrapped against `box` in a specific font, and none of those
+ * change between frames while the chat itself barely does: re-wrapping every
+ * live message with measureText per word per frame is the same layout work
+ * done at the display rate. The age is the only per-frame part, so it is
+ * applied after the cache answers. Cleared on growth, like the captions.
+ */
+const chatRowsCache = new Map<string, { lead0: number; rows: { name: string; text: string }[] }>();
+
+/** One typed name and text per wrapped row, cached. */
+function chatLayout(ctx: CanvasRenderingContext2D, font: number, box: number, name: string, text: string): { lead0: number; rows: { name: string; text: string }[] } {
+    const key = `${font}\u0000${box}\u0000${name}\u0000${text}`;
+    const hit = chatRowsCache.get(key);
+    if (hit) return hit;
+
+    ctx.font = `600 ${font}px "gg sans", "Segoe UI", system-ui, sans-serif`;
+    const lead0 = ctx.measureText(`${name} `).width;
+
+    ctx.font = `400 ${font}px "gg sans", "Segoe UI", system-ui, sans-serif`;
+
+    const rows: { name: string; text: string }[] = [];
+    let current = "";
+    let room = box - lead0;
+    let first = true;
+
+    for (const word of text.split(" ")) {
+        const next = current ? `${current} ${word}` : word;
+
+        if (ctx.measureText(next).width <= room || !current) {
+            current = next;
+            continue;
+        }
+
+        rows.push({ name: first ? name : "", text: current });
+        first = false;
+        current = word;
+        room = box;
+    }
+
+    if (current || first) rows.push({ name: first ? name : "", text: current });
+
+    const laid = { lead0, rows };
+    if (chatRowsCache.size >= 256) chatRowsCache.clear();
+    chatRowsCache.set(key, laid);
+    return laid;
+}
+
+/**
  * Draws the call's chat down the bottom-left corner, as it arrived.
  *
  * The messages are laid out the way they were read at the time: newest at the
@@ -1693,36 +1791,16 @@ function drawChat(ctx: CanvasRenderingContext2D, width: number, height: number, 
     ctx.textBaseline = "alphabetic";
 
     /** Every line of every message, top to bottom, so the stack can be measured. */
-    const rows: { name: string; text: string; age: number; }[] = [];
+    const rows: { name: string; text: string; age: number; lead: number; }[] = [];
 
     for (const line of live) {
-        ctx.font = `600 ${font}px "gg sans", "Segoe UI", system-ui, sans-serif`;
-        const lead0 = ctx.measureText(`${line.name} `).width;
-
-        ctx.font = `400 ${font}px "gg sans", "Segoe UI", system-ui, sans-serif`;
-
-        const words = line.text.split(" ");
+        const laid = chatLayout(ctx, font, box, line.name, line.text);
         const age = (seconds - line.at) / CHAT_HOLD;
 
-        let current = "";
-        let room = box - lead0;
-        let first = true;
-
-        for (const word of words) {
-            const next = current ? `${current} ${word}` : word;
-
-            if (ctx.measureText(next).width <= room || !current) {
-                current = next;
-                continue;
-            }
-
-            rows.push({ name: first ? line.name : "", text: current, age });
-            first = false;
-            current = word;
-            room = box;
-        }
-
-        if (current || first) rows.push({ name: first ? line.name : "", text: current, age });
+        // The first row carries the name's width with it: it was measured once
+        // when the message was laid out, and re-measuring it per frame was the
+        // last per-frame layout left in this function.
+        laid.rows.forEach((row, i) => rows.push({ name: row.name, text: row.text, age, lead: i === 0 ? laid.lead0 : 0 }));
     }
 
     const shown = rows.slice(-CHAT_LINES * 2);
@@ -1741,7 +1819,7 @@ function drawChat(ctx: CanvasRenderingContext2D, width: number, height: number, 
             ctx.fillText(row.name, x + 1, y + 1);
             ctx.fillStyle = "#c9cdfb";
             ctx.fillText(row.name, x, y);
-            x += ctx.measureText(`${row.name} `).width;
+            x += row.lead;
         }
 
         ctx.font = `400 ${font}px "gg sans", "Segoe UI", system-ui, sans-serif`;
@@ -1927,7 +2005,11 @@ export function paintFrame(ctx: CanvasRenderingContext2D, video: HTMLVideoElemen
     if (effects.fadeOut > 0) alpha = Math.min(alpha, left / effects.fadeOut);
 
     ctx.globalAlpha = Math.min(1, Math.max(0, alpha));
-    ctx.filter = filterFor(effects);
+
+    // Guarded: assigning the filter flushes canvas state even when the value
+    // did not change, and this runs every painted frame.
+    const filter = filterFor(effects);
+    if (ctx.filter !== filter) ctx.filter = filter;
 
     const framing = framingAt(segment, video.currentTime);
 
@@ -2215,7 +2297,14 @@ export async function loadAvatars(tracks: VoiceTrack[]): Promise<AvatarCache> {
             image.crossOrigin = "anonymous";
             image.src = track.avatar;
 
-            await image.decode();
+            // One stalled host must not hold the whole render: decode() has no
+            // timeout of its own, so a CDN URL that hangs (captive portal,
+            // blackholed IPv6) would park this await, and with it the
+            // Promise.all around it, before the recorder is even armed.
+            await Promise.race([
+                image.decode(),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error("avatar took too long to load")), 8000))
+            ]);
             cache.set(track.id, image);
         } catch (e) {
             logger.warn("Could not load a speaker avatar", e);

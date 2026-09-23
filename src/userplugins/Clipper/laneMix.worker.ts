@@ -27,7 +27,7 @@
  */
 
 /** What the worker measures: the bed's loudness curve and each track's. */
-export interface LanePreparation {
+interface LanePreparation {
     bedEnvelope: Float32Array;
     lanes: { offset: number; gain: number; rms: Float32Array; gate: Float32Array; }[];
 }
@@ -89,6 +89,9 @@ function startWorker(): Worker | null {
         };
 
         created.onerror = event => {
+            // A faulted worker never recovers: leave it alive and it sits
+            // there holding its thread, so terminate it with the jobs.
+            created.terminate();
             worker = null;
             const list = [...pending.values()];
             pending.clear();

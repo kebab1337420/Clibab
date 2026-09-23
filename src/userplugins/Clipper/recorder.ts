@@ -522,6 +522,13 @@ class ClipRecorder {
     private pendingStop = false;
 
     /**
+     * The video track ended on its own (source revoked), as opposed to a
+     * voluntary stop through toggle(). Read by stop() for its toast, then
+     * cleared.
+     */
+    private sourceLost = false;
+
+    /**
      * The 500 ms flush timers still armed when a save/stop gives up.
      *
      * `cleanup` resolves the `nextChunk` waiters, which leaves the timeout in
@@ -618,6 +625,12 @@ class ClipRecorder {
 
         const at = Math.max(0, Math.round((Date.now() - this.bufferStart) / 1000));
         toast(`Marker at ${at}s (${this.marks.length} in the buffer)`, Toasts.Type.MESSAGE);
+
+        try {
+            void playClipSound(ms => this.duckSystem(ms));
+        } catch {
+            // No sound, no problem: the toast above already said the marker landed.
+        }
     }
 
     /**
@@ -736,14 +749,18 @@ class ClipRecorder {
             if (!videoTrack) throw new Error("The picked source returned no video track");
 
             // User stopped the capture from Discord's / the OS' own UI.
+            this.sourceLost = false;
+            this.pendingStop = false;
             this.onTrackEnded = () => {
                 // A track ending while a save has the state on "saving" would pull
                 // the rug from under the file being written: hold the stop until
                 // the save has handed back, then stop from there.
                 if (this.state === "saving") {
                     this.pendingStop = true;
+                    this.sourceLost = true;
                     return;
                 }
+                this.sourceLost = true;
                 void this.stop();
             };
             videoTrack.addEventListener("ended", this.onTrackEnded);
@@ -841,7 +858,18 @@ class ClipRecorder {
             this.setState("idle");
 
             logger.error("Failed to start capture", e);
-            toast(`Could not start the clip buffer: ${errorMessage(e)}`, Toasts.Type.FAILURE);
+
+            // The raw error names nothing the person can act on, so it stays in
+            // the console and the toast says what to do instead.
+            const name = (e as DOMException)?.name;
+            const friendly = name === "NotAllowedError"
+                ? "Permission denied — allow screen/microphone access in Windows Settings > Privacy, then pick the source again"
+                : name === "NotFoundError"
+                    ? "No capture device found — check the device is plugged in"
+                    : name === "AbortError"
+                        ? "Capture was cancelled — pick the source again to start"
+                        : `Could not start the clip buffer: ${errorMessage(e)}`;
+            toast(friendly, Toasts.Type.FAILURE);
             return false;
         }
     }
@@ -865,6 +893,7 @@ class ClipRecorder {
         if (!displayTracks.length && !mixer.system.muted) {
             this.systemStream = await captureSystemAudio();
             if (this.systemStream) displayTracks = this.systemStream.getAudioTracks();
+            else toast("No system audio captured — the clip will have microphone only (or silence)", Toasts.Type.MESSAGE);
         }
 
         if (!displayTracks.length && !includeMic && !mixer.extras.length) return undefined;
@@ -891,8 +920,13 @@ class ClipRecorder {
                 // Discord's input volume slider is not part of the track, so it
                 // is folded into the channel's own level rather than lost.
                 if (this.mic) this.connectChannel(MIC_CHANNEL, this.mic.node, gainOf(mixer.mic), this.mic.volume);
+                else {
+                    logger.warn("Microphone unavailable, recording without it");
+                    toast("Microphone unavailable — recording without your voice", Toasts.Type.FAILURE);
+                }
             } catch (e) {
                 logger.warn("Microphone unavailable, recording without it", e);
+                toast("Microphone unavailable — recording without your voice", Toasts.Type.FAILURE);
             }
         }
 
@@ -1421,6 +1455,7 @@ class ClipRecorder {
 
                 rememberRelayOnly(mime);
                 logger.info(`The ${mime} encoder took the capture through a canvas`);
+                toast(`Switched encoder (${extensionFor(mime).toUpperCase()} → ${extensionFor(mime).toUpperCase()} via canvas) — footage and markers before the switch were lost, recording continues`, Toasts.Type.MESSAGE);
                 return;
             }
         }
@@ -1450,9 +1485,20 @@ class ClipRecorder {
         video.playsInline = true;
 
         try {
-            await video.play();
+            /*
+             * play() answers once the element actually starts, and a capture
+             * that never feeds it a frame keeps that promise open: start()
+             * would sit in "starting" forever with no toast and no way out.
+             * Bounded like the game watcher in ./gameVideo.
+             */
+            await Promise.race([
+                video.play(),
+                new Promise<void>((_, reject) => setTimeout(() => reject(new Error("That capture did not start in time")), 4000))
+            ]);
         } catch (e) {
             logger.warn("This client would not play the capture into a canvas", e);
+            video.pause();
+            video.srcObject = null;
             return null;
         }
 
@@ -1555,17 +1601,14 @@ class ClipRecorder {
         this.marks = [];
         this.markLabels.clear();
 
-        logger.info(`The buffer carried on as ${this.mimeType}`);
+        logger.info(`The buffer carried on as ${this.mimeType}${detail ? ` (${detail})` : ""}`);
 
-        // Falling from one MP4 candidate to the next is not news: the clip is
-        // still an MP4 and nothing the user asked for has changed. Losing the
-        // container is, and it is said once, here, rather than at every launch.
-        if (extensionFor(failed) !== extensionFor(this.mimeType)) {
-            toast(
-                `This client's ${extensionFor(failed).toUpperCase()} encoder failed${detail ? ` (${detail})` : ""} - the buffer carried on as ${extensionFor(this.mimeType).toUpperCase()}`,
-                Toasts.Type.MESSAGE
-            );
-        }
+        // Said every time, even MP4 to MP4: the container looks the same but
+        // the footage and the markers from before the switch are gone.
+        toast(
+            `Switched encoder (${extensionFor(failed).toUpperCase()} → ${extensionFor(this.mimeType).toUpperCase()}) — footage and markers before the switch were lost, recording continues`,
+            Toasts.Type.MESSAGE
+        );
     }
 
     stop() {
@@ -1579,7 +1622,12 @@ class ClipRecorder {
         this.cleanup();
         this.setState("idle");
         this.pickedByHand = false;
-        if (hadStarted) toast("Clip buffer stopped", Toasts.Type.MESSAGE);
+        if (hadStarted) {
+            toast(this.sourceLost
+                ? "Capture source was lost (screen/window closed or unplugged) — pick the source again to restart"
+                : "Clip buffer stopped", this.sourceLost ? Toasts.Type.FAILURE : Toasts.Type.MESSAGE);
+        }
+        this.sourceLost = false;
     }
 
     /**
@@ -1605,6 +1653,7 @@ class ClipRecorder {
             if (this.activeSource?.id.startsWith("screen:")) return;
 
             logger.info(`${game} started, moving the capture onto its screen`);
+            toast(`Clip source: ${game} (auto-switched) — the buffer restarted`, Toasts.Type.MESSAGE);
             this.pickedByHand = false;
 
             // Out of the store's own dispatch: the restart drops this listener.
@@ -1743,6 +1792,7 @@ class ClipRecorder {
         this.unwatchGame = null;
 
         this.stopMemoryWatch();
+        this.memoryWarned = false;
 
         // Detached before the stop, because stopping is what makes the encoder
         // hand over its last chunk. Dropping the reference is not enough: the
@@ -2046,9 +2096,11 @@ class ClipRecorder {
 
             /*
              * One read of the buffer, and everything after it works on those
-             * same bytes: the repair, the measurement of what it dropped, the
-             * call muxed back in, the write. A clip is hundreds of megabytes,
-             * and each of those steps used to copy the whole of it again.
+             * same bytes: the repair gives back the rebased bytes, the seconds
+             * it dropped and the clip's real length in one pass, and then the
+             * cap, the call muxed back in and the write all operate on that.
+             * A clip is hundreds of megabytes, and each of those steps used to
+             * copy the whole of it again.
              *
              * The repair is what the read is for. Cluster timecodes are
              * absolute, so the chunks that were kept still carry the time
@@ -2057,20 +2109,56 @@ class ClipRecorder {
              */
             let bytes: Uint8Array<ArrayBufferLike> = new Uint8Array(await raw.arrayBuffer());
             let cutOff = 0;
+            let realLength = 0;
 
             try {
-                const fixed = repairBytes(bytes, this.mimeType);
+                const repair = repairBytes(bytes, this.mimeType);
 
                 // The repair drops everything before the first keyframe, which
                 // on a WebM is up to a few seconds. The markers were measured
                 // from the start of the buffer, so they move by exactly what it
                 // took off - otherwise every one of them points seconds early.
-                if (fixed) {
-                    cutOff = droppedBytes(bytes, fixed, this.mimeType);
-                    bytes = fixed;
+                if (repair.bytes) {
+                    cutOff = repair.dropped;
+                    bytes = repair.bytes;
                 }
+
+                // The container's own length, from the same pass that repaired
+                // it, so the cap below does not walk the buffer again.
+                if (repair.length > 0) realLength = repair.length;
             } catch (e) {
                 logger.warn("Could not rebase the clip timeline, saving it as recorded", e);
+            }
+
+            /*
+             * The clip is cut back to the duration that was asked for.
+             *
+             * A chunk's `at` is when MediaRecorder handed it over, not how much
+             * footage it holds: on a busy main thread the recorder delivers each
+             * timeslice late, so a blob stamped "now" can be carrying two or
+             * three seconds of media, and a save that trusts the timestamps
+             * comes out longer than it was told to. The container knows how long
+             * it really is, so when it runs over, the front is trimmed the same
+             * lossless way `trimLastSaved` does and the surplus folds into the
+             * same `cutOff` the markers, the voice lanes and the chat already
+             * shift by.
+             */
+            const cap = picked
+                ? (end - start - TIMESLICE) / 1000
+                : (seconds ?? settings.store.clipLength);
+            if (cap > 0) {
+                const real = realLength || lengthBytes(bytes, this.mimeType);
+                const overrun = real - cap;
+                if (overrun > 0.5) {
+                    const cut = trimBytes(bytes, this.mimeType, overrun, real);
+                    if (cut) {
+                        const gone = real - lengthBytes(cut, this.mimeType);
+                        if (gone > 0) {
+                            bytes = cut;
+                            cutOff += gone;
+                        }
+                    }
+                }
             }
 
             const { markers: offsets, labels: offsetLabels } = shiftLabeled(markers, markerLabels, cutOff);
@@ -2099,20 +2187,29 @@ class ClipRecorder {
             // front, so this is the instant the saved footage really begins.
             const tracks = await this.saveVoices(saved, start + cutOff * 1000, end);
 
+            // Somebody spoke during the clip (the activity lanes say so) while a
+            // per-person buffer was running, but no per-person file made it to
+            // disk: say what was lost, not just that something was saved. When
+            // no per-person buffer runs at all (native desktop client), an empty
+            // result is normal and not a failure.
+            const voicesFailed = voiceBuffers.active && lanes.length > 0 && !tracks.length;
+
             // File the clip under whatever is running now: after the save, the
             // player may already have alt-tabbed away.
             await tagSavedClip(path, offsets, lanes.map(toMeta), tracks, voiceLevelsFrom(readMixer()), chat, offsetLabels);
 
             // Best effort and off the critical path: the library falls back to a
             // placeholder for a clip that has no picture.
-            void writeThumbnail(blob, saved);
+            void writeThumbnail(blob, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
             if (settings.store.notifications) {
                 showNotification({
                     title: "Clip saved",
-                    body: `${length}s - ${formatBytes(blob.size)}\n${path}`,
+                    body: `${length}s - ${formatBytes(blob.size)}${voicesFailed ? " (mixed sound only — individual voices failed)" : ""}\n${path}`,
                     onClick: () => copy(path)
                 });
+            } else if (voicesFailed) {
+                toast("Clip saved (mixed sound only — individual voices failed)", Toasts.Type.MESSAGE);
             } else {
                 toast(`Clip saved (${length}s, ${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             }
@@ -2464,10 +2561,11 @@ class ClipRecorder {
         const name = `${timestampName()}.mp4`;
         const path = await Native.reserveClipPath(settings.store.saveDirectory, name);
 
-        // The engine holds the same window we do, so asking for more than the
-        // buffer is worth is asking for footage nobody kept.
-        const wanted = Math.min(want || settings.store.clipLength, settings.store.clipLength);
-        const reported = await saveNativeClip(path, wanted, { application: "Clipper" });
+        try {
+            // The engine holds the same window we do, so asking for more than the
+            // buffer is worth is asking for footage nobody kept.
+            const wanted = Math.min(want || settings.store.clipLength, settings.store.clipLength);
+            const reported = await saveNativeClip(path, wanted, { application: "Clipper" });
 
         // The engine answers in milliseconds, but older builds answered in
         // seconds and the buffer is capped well under 600s either way, so the
@@ -2607,6 +2705,12 @@ class ClipRecorder {
         // from here on; the reservation has done its job.
         void Native.releaseClipPath(path).catch(() => void 0);
         return true;
+        } finally {
+            // A throw anywhere in the engine's work - the write, the read,
+            // the muxing, the tagging - must not leak the reservation for the
+            // rest of the session. Releasing twice is a no-op.
+            void Native.releaseClipPath(path).catch(() => void 0);
+        }
     }
 
     /**
@@ -2701,7 +2805,7 @@ class ClipRecorder {
             const chat = shiftChat(last.chat ?? [], gone);
 
             await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
-            void writeThumbnail(cut, saved);
+            void writeThumbnail(cut, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
             // Only once the replacement is safely on disk. The untrimmed
             // original goes to the folder trash like any other delete, so a
@@ -3089,28 +3193,6 @@ async function writeClip(data: Uint8Array, name: string, blob: Blob): Promise<st
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     return name;
-}
-
-/**
- * Seconds the repair or the cut took off the front of a clip.
- *
- * Both lengths are read from the container, from its first timestamp to its
- * last, so what changed between them is exactly the footage that was dropped.
- */
-function droppedBytes(before: Uint8Array, after: Uint8Array, mimeType: string): number {
-    try {
-        return Math.max(0, lengthBytes(before, mimeType) - lengthBytes(after, mimeType));
-    } catch (e) {
-        logger.warn("Could not measure what the repair dropped, markers may be early", e);
-        return 0;
-    }
-}
-
-/** Moves markers back by what was cut off the front, dropping those cut away. */
-function shift(markers: number[], by: number): number[] {
-    if (!by) return markers;
-
-    return markers.map(m => m - by).filter(m => m >= 0);
 }
 
 /** Same, carrying each marker's label along so the two never desync. */

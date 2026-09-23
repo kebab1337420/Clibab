@@ -194,7 +194,7 @@ The always-on-top window, and the two files that decide what it draws.
 | `profiles.ts` | 130 | Capture settings remembered per game. |
 | `library.ts` | 408 | Clip metadata and categories. |
 | `send.ts` | 160 | Sending a clip to the channel that is open. |
-| `share.ts` | 60 | Uploading a clip for a share link and copying it. |
+| `linkShare.ts` | 122 | Uploading a clip to 0x0.st for a share link and copying it. |
 | `updater.ts` | 269 | Checking for a new version and installing it. |
 | `utils.ts` | 371 | The shared helpers that had no better home. |
 | `toasts.ts` | 32 | The one line that shows a toast, which five files each had a copy of. |

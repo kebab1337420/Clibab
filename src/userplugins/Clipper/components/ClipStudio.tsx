@@ -74,7 +74,7 @@ import {
 import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
-import { shareClipLink } from "../share";
+import { shareClipLink } from "../linkShare";
 import { Container, extensionFor, pickMimeType, settings } from "../settings";
 import {
     type AngleLayout,
@@ -3021,7 +3021,8 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
         try {
             const path = await saveFrame(video, frameName(source.name, video.currentTime));
-            toast("Frame saved next to the clip", Toasts.Type.SUCCESS);
+            const saved = path.split(/[\\/]/).pop() || "clip";
+            toast(`Frame saved: ${saved}`, Toasts.Type.SUCCESS);
             logger.info("Saved a frame", path);
         } catch (e) {
             logger.warn("Could not save the frame", e);
@@ -5476,7 +5477,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
     keyRef.current = (e: KeyboardEvent) => {
         const target = e.target as HTMLElement | null;
-        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
 
         if (e.key === "Escape") {
             if (busy) return;
@@ -5643,17 +5644,18 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
             const first = sources.find(s => s.id === project.segments[0]?.sourceId);
             const path = await writeClipCopy(blob, renderName(first?.name ?? "timeline", blob.type));
+            const saved = path.split(/[\\/]/).pop() || "clip";
 
             toast(
                 lossless
-                    ? `Cut without re-encoding (${formatBytes(blob.size)})`
-                    : `Montage saved (${formatBytes(blob.size)})`,
+                    ? `Cut without re-encoding: ${saved} (${formatBytes(blob.size)})`
+                    : `Montage saved: ${saved} (${formatBytes(blob.size)})`,
                 Toasts.Type.SUCCESS
             );
             logger.info("Rendered a montage", path);
 
-            await writeThumbnail(blob, path.split(/[\\/]/).pop() || "");
-            void refreshClips();
+            await writeThumbnail(blob, saved);
+            void refreshClips(saved);
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
 
@@ -5727,10 +5729,11 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
             );
 
             const path = await writeClipCopy(blob, name.replace(/\.[^.]+$/, ".mp4"));
-            toast(`Converted to MP4 (${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
+            const saved = path.split(/[\\/]/).pop() || "clip";
+            toast(`Converted to MP4: ${saved} (${formatBytes(blob.size)})`, Toasts.Type.SUCCESS);
             logger.info("Converted a clip", path);
 
-            await writeThumbnail(blob, path.split(/[\\/]/).pop() || "");
+            await writeThumbnail(blob, saved);
 
             await refreshClips();
         } catch (e) {
@@ -5749,7 +5752,10 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
     /** Puts the clip in the message box of the channel behind the studio. */
     const onSend = async (name: string) => {
-        if (await sendClipFitted(name)) onClose();
+        if (await sendClipFitted(name)) {
+            onClose();
+            toast("Attached in Discord - press Enter in the message box to send it", Toasts.Type.MESSAGE);
+        }
     };
 
     /** Uploads the clip and copies a share link, so Discord's size limit never applies. */
@@ -6439,7 +6445,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
                         <div className="vc-clipper-studio-foot">
                             <button className="vc-clipper-primary" disabled={busy || !project.segments.length} onClick={() => void onExport()}>
-                                {rendering ? `Rendering ${Math.round(progress * 100)}%` : `Render ${formatTime(total)}`}
+                                {rendering ? `Rendering ${Math.round(progress * 100)}%` : `Save ${formatTime(total)}`}
                             </button>
 
                             {rendering && (

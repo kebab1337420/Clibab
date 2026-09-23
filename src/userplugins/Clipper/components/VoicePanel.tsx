@@ -99,6 +99,8 @@ function Person({ person, level, meter, compact, onChange }: {
                 step={5}
                 value={Math.round(level.gain * 100)}
                 disabled={disabled}
+                aria-label={`${person.name} clip level`}
+                title={disabled ? "Your own voice is the microphone channel" : "Clip level for this person (100% = unchanged)"}
                 style={{ flex: 1, minWidth: 70, "--vc-fill": `${Math.round(level.gain * 100 / 3)}%` } as React.CSSProperties}
                 onChange={e => onChange({ ...level, gain: clampGain(Number(e.currentTarget.value) / 100) })}
             />

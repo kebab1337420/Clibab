@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { lengthMp4, probeAudioTracks, rebaseMp4, trimMp4 } from "../src/userplugins/Clipper/mp4.ts";
+import { lengthMp4, probeAudioTracks, repairMp4, trimMp4 } from "../src/userplugins/Clipper/mp4.ts";
 import { ascii, box, concat, decodeTimes, file, fragment, trak, wideTrak, zeros } from "./mp4box.ts";
 
 /** The one video track every timing test measures against. */
@@ -72,7 +72,7 @@ test("rebaseMp4 leaves a file that already starts at zero alone", () => {
     ]);
 
     // Null is the caller's signal to keep the original bytes, not an error.
-    assert.equal(rebaseMp4(data), null);
+    assert.equal(repairMp4(data).bytes, null);
 });
 
 test("rebaseMp4 pulls a buffer's times back to zero", () => {
@@ -82,7 +82,7 @@ test("rebaseMp4 pulls a buffer's times back to zero", () => {
         fragment([{ id: 1, decodeTime: 602_000 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     assert.notEqual(out, null);
     assert.deepEqual(decodeTimes(out), [0, 1000, 2000]);
@@ -97,7 +97,7 @@ test("rebaseMp4 rebases a 64 bit decode time in place, at its own width", () => 
         fragment([{ id: 1, decodeTime: 5_000_090_000, wide: true }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     assert.deepEqual(decodeTimes(out), [0, 90000]);
     assert.equal(out.length, data.length);
@@ -111,7 +111,7 @@ test("rebaseMp4 drops the leading fragments before the first keyframe", () => {
         fragment([{ id: 1, decodeTime: 1500 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     // The delta frame at the head has nothing to decode against, so it goes and
     // the keyframe behind it becomes the clip's zero.
@@ -127,7 +127,7 @@ test("rebaseMp4 keeps a blocky opening rather than throwing away most of the cli
         fragment([{ id: 1, decodeTime: 601_500 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     // Three quarters of the footage to reach a keyframe is past
     // MAX_KEYFRAME_SKIP: the user asked for the footage, not for a clean
@@ -146,7 +146,7 @@ test("rebaseMp4 keeps only the run after a gap in the recording", () => {
         fragment([{ id: 1, decodeTime: 21_000 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     assert.equal(fragments(out), 2);
     assert.deepEqual(decodeTimes(out), [0, 1000]);
@@ -160,7 +160,7 @@ test("rebaseMp4 gives every track its own zero", () => {
         fragment([{ id: 1, decodeTime: 601_000 }, { id: 2, decodeTime: 28_848_000 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     assert.deepEqual(decodeTimes(out), [0, 0, 1000, 48000]);
 });
@@ -174,14 +174,14 @@ test("rebaseMp4 zeroes a track that only appears part way in", () => {
         fragment([{ id: 1, decodeTime: 602_000 }, { id: 2, decodeTime: 602_000 }])
     ]);
 
-    const out = rebaseMp4(data)!;
+    const out = repairMp4(data).bytes!;
 
     assert.deepEqual(decodeTimes(out), [0, 1000, 0, 2000, 1000]);
 });
 
 test("rebaseMp4 refuses what is not a fragmented MP4", () => {
-    assert.equal(rebaseMp4(GARBAGE), null);
-    assert.equal(rebaseMp4(file([VIDEO], [])), null);
+    assert.equal(repairMp4(GARBAGE).bytes, null);
+    assert.equal(repairMp4(file([VIDEO], [])).bytes, null);
 });
 
 test("trimMp4 keeps the fragments a range covers", () => {

@@ -18,6 +18,7 @@
  * when the file it was showing is no longer the right one.
  */
 
+import { getCurrentChannel } from "@utils/discord";
 import type { PluginNative } from "@utils/types";
 
 import { deleteClip, readClipBytes, typeOfClip, trashClip, writeClipBytes } from "./clips";
@@ -25,7 +26,7 @@ import { dropMeta, readMeta, setMeta } from "./library";
 import { logger, recorder } from "./recorder";
 import { trimBytes } from "./repair";
 import { sendClipRange } from "./send";
-import { shareClipLink } from "./share";
+import { shareClipLink } from "./linkShare";
 import type { StudioAction } from "./studioOverlay";
 import { errorMessage } from "./utils";
 
@@ -103,9 +104,12 @@ async function send(action: StudioAction): Promise<Outcome> {
 
     // Deliberately not stealing the focus: whoever is playing decides when to
     // go and press send, and the upload waits in the box until they do.
-    return sent
-        ? { ok: true, message: "Attached in Discord - alt-tab to send it", close: false }
-        : { ok: false, message: "Could not attach it - open a channel first", close: false };
+    if (sent) return { ok: true, message: "Attached in Discord - alt-tab to send it", close: false };
+
+    // Only the missing channel is named here: any other failure already said
+    // why in the client, so claiming "open a channel first" for it would lie.
+    if (!getCurrentChannel()) return { ok: false, message: "Could not attach it - open a channel first", close: false };
+    return { ok: false, message: "Could not attach it", close: false };
 }
 
 /** Uploads the whole clip and copies a share link, whatever Discord's size limit says. */

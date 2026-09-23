@@ -22,10 +22,10 @@
 import { Toasts, useEffect, useState } from "@webpack/common";
 
 import { CLIPS_AVAILABLE, loadClipUrl } from "../clips";
+import { shareClipLink } from "../linkShare";
 import { recorder, type SavedClip } from "../recorder";
 import { sendClipFitted, sendClipGif } from "../send";
 import { settings } from "../settings";
-import { shareClipLink } from "../share";
 import { toast } from "../toasts";
 import { chaptersOf, formatBytes, TRIM_CUTS } from "../utils";
 
@@ -109,6 +109,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                     autoPlay
                     loop
                     muted
+                    title="Click for sound"
                     onClick={e => {
                         // Click to hear it, click again to shut it up.
                         const video = e.currentTarget;
@@ -138,6 +139,13 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                     onClick={act(() => sendClipGif(clip.name, { onProgress: setStep }))}
                 >
                     GIF
+                </button>
+                <button
+                    disabled={busy}
+                    title="Upload the whole clip and copy a link that plays in chat"
+                    onClick={act(() => shareClipLink(clip.name, setStep))}
+                >
+                    Link
                 </button>
                 {trim && (
                     <button disabled={busy} onClick={act(() => recorder.trimLastSaved(trim), true)}>

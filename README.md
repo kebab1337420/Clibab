@@ -218,10 +218,11 @@ to `%APPDATA%\Vencord\clipper\dist`, patches Discord to load it (the real
 `app.asar` is kept as `_app.asar`, which is exactly what the Vencord installer
 does), and points Vesktop / Equibop at the same folder.
 
-Releases also include `ClipperInstaller.exe`, a graphical installer that
-downloads the selected release and offers an **Install SteamVR integration**
-option. SteamVR remains opt-in; leave the option unchecked for a standard
-Clipper install.
+Releases also include `ClipperSetup.exe`, a small NSIS wizard that
+downloads the newest release, verifies it, and offers an **SteamVR
+integration** checkbox. SteamVR remains opt-in; leave the box unchecked for
+a standard Clipper install. It also registers an uninstaller (Apps &
+features), which the old batch install never had.
 
 Start Discord, then enable **Clipper** in Vencord → Plugins.
 

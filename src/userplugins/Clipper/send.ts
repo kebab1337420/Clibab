@@ -21,11 +21,12 @@
 import { getCurrentChannel } from "@utils/discord";
 import { DraftType, Toasts, UploadHandler } from "@webpack/common";
 
-import { CLIPS_AVAILABLE, loadClipFile, readClipBytes, typeOfClip } from "./clips";
+import { CLIPS_AVAILABLE, loadClipFile, loadClipUrl, probeRange, readClipBytes, typeOfClip } from "./clips";
 import { clipToGif, type GifRequest, saveGif } from "./gifExport";
 import { readMeta } from "./library";
 import { logger } from "./recorder";
 import { trimBytes } from "./repair";
+import { extensionFor } from "./settings";
 import { shrinkVideo } from "./shrink";
 import { toast } from "./toasts";
 import { formatBytes } from "./utils";
@@ -36,7 +37,9 @@ import { voiceLevelsTouched } from "./voice";
  *
  * Nitro raises it, and the client knows the real number, but reading it out of
  * the store is fragile and being wrong the safe way costs nothing: the check
- * only decides whether to warn, the upload is attempted either way.
+ * only decides whether to warn, the upload is attempted either way. Nothing
+ * here reads the account's plan (no premiumType use anywhere in src), so this
+ * stays at the free level and the warning names the way out instead.
  */
 const FREE_LIMIT = 10 * 1024 * 1024;
 
@@ -48,10 +51,11 @@ function attach(file: File): boolean {
     }
 
     if (file.size > FREE_LIMIT) {
-        toast(`That clip is ${formatBytes(file.size)}; Discord may refuse it`, Toasts.Type.MESSAGE);
+        toast(`That clip is ${formatBytes(file.size)} - Discord may refuse files over 10MB. Shrink it, make a GIF, or send anyway (Nitro raises the limit).`, Toasts.Type.MESSAGE);
     }
 
     UploadHandler.promptToUpload([file], channel, DraftType.ChannelMessage);
+    toast("Attached in Discord - press Enter in the message box to send it", Toasts.Type.MESSAGE);
     return true;
 }
 
@@ -107,8 +111,9 @@ export async function sendClipRange(name: string, from: number, to: number): Pro
         const cut = trimBytes(data, type, from, to);
 
         // Nothing back: the range covers the clip, or this container is not one
-        // the parser knows. Either way the whole file is the right answer.
-        if (!cut) return attachAndWarn(new File([data as BlobPart], name, { type }), name);
+        // the parser knows. Either way the whole file is the right answer, fitted
+        // to the limit the same way a whole-clip send would be.
+        if (!cut) return sendClipFitted(name);
 
         const stem = name.replace(/\.[^.]+$/, "");
         const extension = name.split(".").pop() || "webm";
@@ -116,7 +121,7 @@ export async function sendClipRange(name: string, from: number, to: number): Pro
         return attachAndWarn(new File([cut as BlobPart], `${stem}-cut.${extension}`, { type }), name);
     } catch (e) {
         logger.error("Could not attach the selection", e);
-        toast("Could not read that clip", Toasts.Type.FAILURE);
+        toast("Could not read that clip (file moved or deleted?).", Toasts.Type.FAILURE);
         return false;
     }
 }
@@ -144,10 +149,11 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
         try {
             const result = await shrinkVideo(url, { limit: FREE_LIMIT, onProgress });
             const stem = name.replace(/\.(webm|mp4)$/i, "");
-            const ext = result.mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+            const ext = extensionFor(result.mimeType);
 
             if (!result.fits) {
-                toast(`Smallest this clip goes is ${formatBytes(result.blob.size)}`, Toasts.Type.MESSAGE);
+                toast(`Smallest this clip goes is ${formatBytes(result.blob.size)} - still over the limit. Try a shorter range or GIF.`, Toasts.Type.FAILURE);
+                return false;
             }
 
             return attachAndWarn(new File([result.blob], `${stem}-small.${ext}`, { type: result.mimeType }), name);
@@ -156,8 +162,56 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
         }
     } catch (e) {
         logger.error("Could not fit the clip", e);
-        toast("Could not re-encode that clip", Toasts.Type.FAILURE);
+        toast("Could not re-encode that clip - try a shorter range or MP4 instead of WebM.", Toasts.Type.FAILURE);
         return false;
+    }
+}
+
+/**
+ * Start and end of a clip in seconds, or null when it cannot be read.
+ *
+ * Only what the GIF clamp decision needs: the export keeps 15s at most, and
+ * whether the request (or the whole clip, when nothing was asked for) runs
+ * longer has to be known before it starts.
+ */
+async function clipRange(name: string): Promise<{ start: number; end: number; } | null> {
+    let url = "";
+
+    try {
+        url = await loadClipUrl(name);
+
+        const video = document.createElement("video");
+        video.preload = "auto";
+        video.muted = true;
+        video.src = url;
+
+        await new Promise<void>(resolve => {
+            if (video.readyState >= 1) return resolve();
+
+            let done = false;
+            const settle = () => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                resolve();
+            };
+
+            const timer = setTimeout(settle, 10_000);
+            video.addEventListener("loadedmetadata", settle, { once: true });
+            video.addEventListener("error", settle, { once: true });
+        });
+
+        const range = await probeRange(video);
+
+        video.removeAttribute("src");
+        video.load();
+
+        return range;
+    } catch (e) {
+        logger.warn("Could not measure that clip", e);
+        return null;
+    } finally {
+        if (url) URL.revokeObjectURL(url);
     }
 }
 
@@ -174,18 +228,34 @@ export async function sendClipGif(name: string, request: GifRequest = {}): Promi
     }
 
     try {
-        const result = await clipToGif(name, { limit: FREE_LIMIT, ...request });
+        // Whether the export will clamp: it keeps 15s at most, from the end
+        // when nothing was asked for, so a longer window loses footage silently
+        // unless it is said out loud.
+        const full = await clipRange(name);
+        let clamped = false;
+        if (full) {
+            const stop = Math.min(full.end, request.to ?? full.end);
+            const start = Math.max(full.start, request.from ?? stop - 15);
+            clamped = stop - start > 15;
+        }
+
+        const result = await clipToGif(name, {
+            limit: FREE_LIMIT,
+            ...request,
+            onProgress: request.onProgress ?? (step => toast(step, Toasts.Type.MESSAGE))
+        });
         const saved = await saveGif(name, result.blob);
 
+        if (clamped) toast("Only the last 15s were kept for the GIF", Toasts.Type.MESSAGE);
         toast(
-            `GIF ready: ${result.width}px, ${result.fps}fps, ${formatBytes(result.blob.size)}`,
+            `GIF ready: ${saved} (${formatBytes(result.blob.size)}) - attached below, press Enter to send`,
             result.fits ? Toasts.Type.SUCCESS : Toasts.Type.MESSAGE
         );
 
         return attachAndWarn(new File([result.blob], saved, { type: typeOfClip(saved) }), name);
     } catch (e) {
         logger.error("Could not make a GIF", e);
-        toast("Could not make a GIF of that clip", Toasts.Type.FAILURE);
+        toast("Could not make a GIF - try a shorter moment (15s max).", Toasts.Type.FAILURE);
         return false;
     }
 }

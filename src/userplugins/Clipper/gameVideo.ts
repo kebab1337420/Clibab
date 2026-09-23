@@ -43,6 +43,9 @@ const logger = new Logger("Clipper");
 /** How often a frame is looked at. */
 const TICK_MS = 166;
 
+/** How long the first play() is given to start before giving up on the capture. */
+const PLAY_TIMEOUT_MS = 4000;
+
 /** The size everything is measured at. */
 const WIDTH = 64;
 const HEIGHT = 36;
@@ -167,7 +170,17 @@ class GameVideoWatcher {
             video.muted = true;
             video.playsInline = true;
 
-            await video.play();
+            /*
+             * play() answers once the element actually starts, and a capture
+             * that never feeds it a frame keeps that promise open - the attach
+             * would sit in `starting` forever and the game watcher would never
+             * send another sample. Bounded like the load in ./gifExport: if a
+             * track is this slow, it is not going to start.
+             */
+            await Promise.race([
+                video.play(),
+                new Promise<void>((_, reject) => setTimeout(() => reject(new Error("That capture did not start in time")), PLAY_TIMEOUT_MS))
+            ]);
 
             // Stopped while it was starting.
             if (!this.timer) {

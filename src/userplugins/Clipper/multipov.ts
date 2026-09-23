@@ -132,7 +132,7 @@ function short(name: string): string {
  * So it says what it is - a request - and leaves the claiming to the clips.
  */
 function requestText(seconds: number): string {
-    return `🎬 **Clip that.** Asking everyone in the call running Clipper to save the last ${seconds} seconds. \`multi-pov ${seconds}s\``;
+    return `🎬 **Clip that.** Asking everyone in the call running Clipper to save the last ${seconds} seconds. \`multi-pov ${seconds}s\`\nNo Clipper? You can ignore this.`;
 }
 
 function myId(): string {
@@ -175,8 +175,8 @@ export async function requestPov(): Promise<void> {
     // message the take-down cannot keep up with.
     if (Date.now() - lastAsked < ASK_COOLDOWN) {
         toast(mine
-            ? "Saved another clip - the call was already asked"
-            : "The call was already asked", Toasts.Type.MESSAGE);
+            ? "Already asked the call recently - only this clip was saved locally"
+            : "Already asked the call recently", Toasts.Type.MESSAGE);
         return;
     }
 

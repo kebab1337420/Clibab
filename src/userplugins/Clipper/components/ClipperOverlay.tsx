@@ -21,6 +21,7 @@ import { React, Toasts, useEffect, useMemo, useRef, useState } from "@webpack/co
 
 import { CLIPS_AVAILABLE } from "../clips";
 import { hideClipPlayback, notifySaved } from "../gameOverlay";
+import { shareClipLink } from "../linkShare";
 import { requestPov } from "../multipov";
 import type { CaptureSource } from "../native";
 import { listCaptureSources, recorder, RecorderState, type SavedClip, setPickerOpener, setStudioOpener } from "../recorder";
@@ -28,7 +29,6 @@ import { sendClipFitted, sendClipGif } from "../send";
 import { Container, settings } from "../settings";
 import { deleteProfile, hasProfile, matchesProfile, saveProfile } from "../profiles";
 import { runningGame } from "../game";
-import { shareClipLink } from "../share";
 import { toast } from "../toasts";
 import { formatBytes, formatTime, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
@@ -1027,6 +1027,12 @@ function ActionMenu({ recording, onClose, onStudio }: {
         return () => clearInterval(id);
     }, [recording]);
 
+    // Keyboard users land on the first action, not outside the menu.
+    const menuRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    }, []);
+
     const item = (label: string, action: () => void, disabled = false, className?: string, title?: string) => (
         <button
             className={className}
@@ -1046,8 +1052,8 @@ function ActionMenu({ recording, onClose, onStudio }: {
     const cuts = TRIM_CUTS.filter(n => n < settings.store.clipLength);
 
     return (
-        <div className="vc-clipper-menu">
-            {item(recording ? "Stop the clip buffer" : "Start the clip buffer", () => void recorder.toggle())}
+        <div className="vc-clipper-menu" ref={menuRef}>
+            {item(recording ? "Stop recording" : "Start recording", () => void recorder.toggle())}
 
             {/*
               * The whole buffer and the short cuts on one line.
@@ -1070,7 +1076,7 @@ function ActionMenu({ recording, onClose, onStudio }: {
             <div className="vc-clipper-menu-row">
                 {item(
                     recorder.markCount ? `Marker (${recorder.markCount})` : "Marker",
-                    () => recorder.mark(),
+                    () => { recorder.mark(); toast(`Marker ${recorder.markCount} saved`, Toasts.Type.SUCCESS); },
                     !recording,
                     undefined,
                     "Drop a marker on this moment"
@@ -1167,8 +1173,13 @@ export function ClipperOverlay() {
         if (!menu) return;
 
         const close = () => setMenu(false);
+        const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
         window.addEventListener("click", close);
-        return () => window.removeEventListener("click", close);
+        window.addEventListener("keydown", onKey);
+        return () => {
+            window.removeEventListener("click", close);
+            window.removeEventListener("keydown", onKey);
+        };
     }, [menu]);
 
     const { panelButton, sourceName, studioMode } = settings.use(["panelButton", "sourceName", "studioMode"]);

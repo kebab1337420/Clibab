@@ -17,17 +17,18 @@
  * and it takes as long as a memory copy rather than as long as the clip.
  */
 
-import { lengthMp4, rebaseMp4, trimMp4 } from "./mp4";
-import { lengthWebm, rebaseWebm, trimWebm } from "./webm";
+import { lengthMp4, repairMp4, trimMp4 } from "./mp4";
+import { lengthWebm, repairWebm, trimWebm } from "./webm";
 
 interface Parser {
-    rebase(data: Uint8Array): Uint8Array | null;
+    /** Rebases the clip to start at zero, in one pass over the buffer. */
+    repair(data: Uint8Array): { bytes: Uint8Array | null; dropped: number; length: number };
     trim(data: Uint8Array, fromMs: number, toMs: number): Uint8Array | null;
     length(data: Uint8Array): number;
 }
 
-const WEBM: Parser = { rebase: rebaseWebm, trim: trimWebm, length: lengthWebm };
-const MP4: Parser = { rebase: rebaseMp4, trim: trimMp4, length: lengthMp4 };
+const WEBM: Parser = { repair: repairWebm, trim: trimWebm, length: lengthWebm };
+const MP4: Parser = { repair: repairMp4, trim: trimMp4, length: lengthMp4 };
 
 function parserFor(mimeType: string): Parser | null {
     // Audio-only WebM too: the per-person voice buffers are assembled exactly
@@ -40,15 +41,18 @@ function parserFor(mimeType: string): Parser | null {
 }
 
 /**
- * The same repair, on bytes that are already in hand.
+ * The same repair, on bytes that are already in hand. One pass over the buffer
+ * returns the rebased bytes, the seconds the repair took off the front and the
+ * resulting clip's real length, so the caller never has to walk the bytes
+ * again to report or trim them.
  *
- * Null when there was nothing to rebase, so a caller holding the original can
- * keep it rather than being handed a copy of what it already has.
+ * `bytes` is null when there was nothing to rebase, so a caller holding the
+ * original can keep it rather than being handed a copy of what it already has.
  */
-export function repairBytes(data: Uint8Array, mimeType: string): Uint8Array | null {
+export function repairBytes(data: Uint8Array, mimeType: string): { bytes: Uint8Array | null; dropped: number; length: number } {
     const parser = parserFor(mimeType);
 
-    return parser ? parser.rebase(data) : null;
+    return parser ? parser.repair(data) : { bytes: null, dropped: 0, length: 0 };
 }
 
 /**

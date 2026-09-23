@@ -29,6 +29,23 @@ const Native = VencordNative.pluginHelpers.Clipper as PluginNative<typeof import
 /** False in a browser / web build, where there is no clip folder to read. */
 export const CLIPS_AVAILABLE = IS_DISCORD_DESKTOP || IS_VESKTOP;
 
+/**
+ * The clip folder could not be read.
+ *
+ * Thrown rather than answered with an empty list: an unreadable folder and an
+ * empty one look the same as `[]`, and only one of them means "no clip saved
+ * yet". Carries the folder so the UI can name it.
+ */
+export class FolderReadError extends Error {
+    readonly dir: string;
+
+    constructor(dir: string) {
+        super(`Could not read the clip folder (${dir})`);
+        this.name = "FolderReadError";
+        this.dir = dir;
+    }
+}
+
 export async function listClips(): Promise<StoredClip[]> {
     if (!CLIPS_AVAILABLE) return [];
 
@@ -36,7 +53,7 @@ export async function listClips(): Promise<StoredClip[]> {
         return await Native.listClips(settings.store.saveDirectory);
     } catch (e) {
         logger.warn("Could not list clips", e);
-        return [];
+        throw new FolderReadError(settings.store.saveDirectory);
     }
 }
 

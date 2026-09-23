@@ -30,7 +30,7 @@ for (const [label, data] of HOSTILE) {
 test("repair dispatch refuses what it does not know", () => {
     const data = new Uint8Array([1, 2, 3]);
 
-    assert.equal(repairBytes(data, "video/avi"), null);
+    assert.deepEqual(repairBytes(data, "video/avi"), { bytes: null, dropped: 0, length: 0 });
     assert.equal(trimBytes(data, "video/avi", 0, 10), null);
     assert.equal(lengthBytes(data, "video/avi"), 0);
 });

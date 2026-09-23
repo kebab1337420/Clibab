@@ -1032,6 +1032,14 @@ try {
 
         # OutputAssembly writes the file but leaves the type unloaded, so a
         # brand-new copy needs the same load as a reused one below.
+
+        # The cache only ever needs the current build: nothing else can ever
+        # be loaded again, because the name is a hash of the source itself.
+        # Old copies from previous plugin versions would otherwise sit in
+        # %TEMP% for ever, one per update.
+        Get-ChildItem -LiteralPath $cacheDir -Filter 'bridge-*.dll' |
+            Where-Object { $_.FullName -ne $cacheFile } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
     Add-Type -LiteralPath $cacheFile
