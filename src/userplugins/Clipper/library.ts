@@ -357,7 +357,11 @@ export async function setMeta(name: string, meta: Partial<ClipMeta>): Promise<vo
     const doc = await load();
     const current = doc.clips[name] ?? { game: "" };
 
-    doc.clips[name] = { ...current, ...meta, taggedAt: Date.now() };
+    // Sanitized like a file read: meta arrives from the hand-editable trash
+    // index (restoreClip) as well as from the UI, and unvalidated game /
+    // markers / chat would sit in the live cache and on disk until the next
+    // reload re-parses.
+    doc.clips[name] = { ...(entryOf({ ...current, ...meta }) ?? { game: "" }), taggedAt: Date.now() };
     await flush();
 }
 

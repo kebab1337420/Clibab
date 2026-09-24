@@ -491,6 +491,15 @@ export function cutRange(project: Project, from: number, to: number): Project {
     const segments: Segment[] = [];
     let elapsed = 0;
 
+    // Every segment leaving this function owns its extras: the editor
+    // mutates effects, moves and angles in place further down the line, so
+    // sharing them with the input project would edit the source too.
+    const cloneExtras = (s: Segment) => ({
+        effects: { ...s.effects },
+        ...(s.moves ? { moves: s.moves.map(m => ({ ...m })) } : {}),
+        ...(s.angles ? { angles: s.angles.map(a => ({ ...a })) } : {})
+    });
+
     for (const item of project.segments) {
         const length = segmentLength(item);
         const head = elapsed;
@@ -498,7 +507,8 @@ export function cutRange(project: Project, from: number, to: number): Project {
         elapsed = tail;
 
         if (tail <= start + EPSILON || head >= end - EPSILON) {
-            segments.push({ ...item });
+            // Untouched by the cut, but still a copy, for the same reason.
+            segments.push({ ...item, ...cloneExtras(item) });
             continue;
         }
 
@@ -508,14 +518,6 @@ export function cutRange(project: Project, from: number, to: number): Project {
         // of the hole have to be scaled back up before they mean anything to the
         // file the segment is cut out of.
         const speed = rate(item.speed);
-
-        // The cut pieces own their moves and angles: the render reframing one
-        // side must never reframe the segment they were cut out of.
-        const cloneExtras = (s: Segment) => ({
-            effects: { ...s.effects },
-            ...(s.moves ? { moves: s.moves.map(m => ({ ...m })) } : {}),
-            ...(s.angles ? { angles: s.angles.map(a => ({ ...a })) } : {})
-        });
 
         const before: Segment | null = start > head
             ? { ...item, to: item.from + (start - head) * speed, ...cloneExtras(item) }

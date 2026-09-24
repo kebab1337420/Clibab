@@ -627,7 +627,9 @@ export class MicInput {
         const store = MediaEngineStore as any;
         const onSettings = () => void this.resync();
         const onSpeaking = (event: any) => {
-            if (event?.userId && event.userId === UserStore.getCurrentUser()?.id && event.speakingFlags) {
+            // Voice bit only, like voice.ts and voiceTaps.ts: the screenshare
+            // and priority bits would pin the gate open on somebody else's noise.
+            if (event?.userId && event.userId === UserStore.getCurrentUser()?.id && (Number(event.speakingFlags ?? 0) & 1) !== 0) {
                 this.speakingUntil = Date.now() + SPEAKING_MS;
             }
         };

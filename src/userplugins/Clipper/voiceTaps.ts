@@ -443,7 +443,9 @@ export function installVoiceTaps(): void {
         logger.warn("Could not follow who is speaking", e);
     }
 
-    ticker = setInterval(tick, SAMPLE_MS);
+    // The ticker starts with the first tap (see register), not here: on a
+    // client with no WebRTC taps installed() is still true, and a 5 Hz wakeup
+    // forever for nothing is exactly what idle() was written to stop.
     logger.info("Voice taps installed");
 }
 
