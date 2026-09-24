@@ -34,7 +34,7 @@ import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
 import { toast } from "./toasts";
-import { captureFrameRate, captureHeight, captureVideoBitrate, clipRetentionSeconds, errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
+import { captureFrameRate, captureHeight, captureVideoBitrate, clipRetentionSeconds, errorMessage, formatBytes, isLinux, TIMESLICE, timestampName } from "./utils";
 import { shiftTracks, toMeta, voiceActivity, voiceChannelId, type VoiceFileMeta, voiceParticipants, type VoiceTrack } from "./voice";
 import { voiceBuffers } from "./voiceRecord";
 
@@ -3082,9 +3082,24 @@ async function acquireStream(fps: number, resolution: number, follow: boolean): 
 
     if (IS_VESKTOP) {
         try {
-            return { stream: await getDesktopStream(source.id, fps, resolution), source };
+            const stream = await getDesktopStream(source.id, fps, resolution);
+
+            // On Linux the silent constraints come back without a sound track:
+            // Chromium does loopback only on Windows. Vesktop's own picker
+            // carries the desktop sound there, so a video-only legacy stream
+            // is a partial failure and falls through to it - one dialog with
+            // sound beats a silent recording nobody asked for.
+            if (isLinux() && !stream.getAudioTracks().length) {
+                stream.getTracks().forEach(t => t.stop());
+                throw new Error("Legacy capture has no audio on Linux");
+            }
+
+            return { stream, source };
         } catch (e) {
             logger.warn("Desktop constraints failed, falling back to Vesktop's own picker", e);
+            if (isLinux()) {
+                toast("Pick the source again in Vesktop's dialog - it carries the desktop sound the silent capture cannot", Toasts.Type.MESSAGE, 8000);
+            }
             return { stream: await navigator.mediaDevices.getDisplayMedia({ video, audio: true }), source: null };
         }
     }

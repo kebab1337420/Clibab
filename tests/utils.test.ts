@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as utils from "../src/userplugins/Clipper/utils.ts";
-import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, keybindMatches, parseKeybind, toAccelerator } from "../src/userplugins/Clipper/utils.ts";
+import { CAPTURE_PRESETS, chaptersOf, findDuplicates, clipRetentionSeconds as retention, formatKeybind, isLinux, keybindMatches, parseKeybind, toAccelerator } from "../src/userplugins/Clipper/utils.ts";
 
 test("capture presets stay within sane bounds", () => {
     assert.ok(CAPTURE_PRESETS.length >= 2);
@@ -97,6 +97,33 @@ test("valid shortcuts still parse and match their modifiers", () => {
     assert.equal(toAccelerator("ctrl+shift+Digit1"), "Control+Shift+1");
     assert.equal(toAccelerator(""), "");
     assert.equal(toAccelerator("ctrl+Foo"), "");
+});
+
+test("linux detection reads chromium first, legacy platform second", () => {
+    // Node's global navigator is a getter-only accessor: plain assignment
+    // silently does nothing, so the stub goes through defineProperty.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const stub = (value: unknown) =>
+        Object.defineProperty(globalThis, "navigator", { value, configurable: true });
+    const restore = () => {
+        if (descriptor) Object.defineProperty(globalThis, "navigator", descriptor);
+    };
+
+    try {
+        stub({ userAgentData: { platform: "Linux" }, platform: "Win32" });
+        assert.equal(isLinux(), true);
+
+        stub({ userAgentData: { platform: "Windows" }, platform: "Linux x86_64" });
+        assert.equal(isLinux(), false);
+
+        stub({ platform: "Linux armv8l" });
+        assert.equal(isLinux(), true);
+
+        stub({ platform: "Win32" });
+        assert.equal(isLinux(), false);
+    } finally {
+        restore();
+    }
 });
 
 test("duplicates are same-game saves seconds apart", () => {

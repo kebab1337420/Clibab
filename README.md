@@ -311,8 +311,12 @@ What differs there:
   mixer. The people in a voice call are the exception, because they are also
   recorded one track per person: they get a channel each, applied when the clip
   is put back together rather than while the buffer runs.
-- **System audio is Windows-only** on this capture path. On Linux the clip has
-  the microphone (enable **Include mic**) but no desktop audio.
+- **System audio is Windows-only** on the silent capture paths. On Linux the
+  legacy constraints come back without a sound track, so under Vesktop the
+  plugin falls back to Vesktop's own picker dialog (one extra pick, and that
+  one carries the desktop sound). On a plain Linux Discord client there is no
+  loopback handle at all: the clip has the microphone (enable **Include mic**)
+  but no desktop audio, and the buffer says so when it starts.
 - **Wayland ignores application-registered hotkeys**, so the keybinds only fire
   while Discord is focused. Bind a compositor shortcut, or use the chat bar
   button.
@@ -464,7 +468,10 @@ anything. Run them with `.\scripts\test.ps1`.
   script compiling C# against the .NET Framework, and a SteamVR recent enough to
   have `IVRInput`; an older one says so in the settings row instead of failing
   silently.
-- **Linux system audio.** Loopback capture through `getDisplayMedia` exists only
-  on Windows, so clips recorded on Linux carry no desktop audio.
+- **Linux system audio.** Loopback capture through Chromium exists only
+  on Windows. Under Vesktop on Linux the plugin notices the silent stream
+  came back without sound and asks Vesktop's own picker instead, which does
+  carry the desktop audio. On a plain Linux Discord client there is no such
+  fallback, so clips recorded there carry no desktop audio (microphone only).
 - Encoding is software-side (Chromium's MediaRecorder), so a high bitrate at
   120 FPS costs noticeably more CPU than a native GPU encoder would.
