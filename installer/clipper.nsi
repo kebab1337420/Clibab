@@ -56,6 +56,9 @@ VIAddVersionKey "LegalCopyright" "Clipper contributors"
 Section "Clipper for Discord (required)" SecClipper
   SectionIn RO
 
+  ; Recheck: the client may have been started while the wizard sat open.
+  Call CloseClientsCheck
+
   ; The worker plus the bundle it installs. Everything runs from the plugins
   ; dir so nothing of it survives the install (it is wiped with the temp
   ; folder when the wizard exits).
@@ -109,6 +112,23 @@ Section "SteamVR integration" SecSteamVR
   ; (not a dialog checkbox) so silent installs get the standard behavior.
 SectionEnd
 
+; A running client cannot be patched: install-prebuilt.ps1 skips it and the
+; whole install then fails after the bundle was already copied - or, with an
+; older worker, "succeeded" while leaving the old stub in place. Catch it up
+; front with a Retry loop instead of a post-mortem.
+Function CloseClientsCheck
+  clients_retry:
+  ; findstr exit code rides $0: 0 = a client process is running, 1 = none.
+  ; Literal match (/L): the dot in "Discord.exe" must not become a wildcard.
+  nsExec::ExecToStack 'cmd /d /c "tasklist | findstr /I /L Discord.exe DiscordPTB.exe DiscordCanary.exe DiscordDevelopment.exe Vesktop.exe Equibop.exe"'
+  Pop $0
+  Pop $1
+  ${If} $0 == "0"
+    MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "Discord (or Vesktop) is still running. The installer cannot patch a running client: fully quit it first (right-click its tray icon > Quit Discord), then press Retry." IDRETRY clients_retry
+    Abort
+  ${EndIf}
+FunctionEnd
+
 ; Tracks the SteamVR checkbox. A section's index define only exists after
 ; its declaration is parsed, so the checkbox cannot be read from inside the
 ; Clipper section above - both live here, after every section.
@@ -118,6 +138,9 @@ Function .onInit
   ; needs is extracted there.
   InitPluginsDir
   StrCpy $SteamVRChoice 0
+  ; No point picking options when the patch is doomed: fail before the
+  ; wizard pages, not after the bundle was copied.
+  Call CloseClientsCheck
 FunctionEnd
 
 Function .onSelChange
