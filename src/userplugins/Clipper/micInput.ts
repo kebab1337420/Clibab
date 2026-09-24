@@ -862,6 +862,7 @@ export class MicInput {
             this.gate.disconnect();
             this.compressor.disconnect();
             this.makeup.disconnect();
+            this.tap.disconnect();
             if (this.refSource && this.reference) this.refSource.disconnect(this.reference);
         } catch { /* the context is already closed */ }
 

@@ -10,7 +10,7 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
 ## Features
 
 - Rolling in-memory buffer, configurable from 10s to 300s
-- Four keybinds — save, start/stop, drop a marker, clip everyone's angle — all
+- Five keybinds — save, start/stop, drop a marker, clip everyone's angle, clip the call's end — all
   rebindable from the settings panel and registered system-wide, so they fire
   from inside a game. The picker takes combinations: it shows the modifiers as
   they are held, and it hands the system-wide binds back to the OS while it
@@ -157,7 +157,7 @@ kind of my first time making anything (vibecoded obv) but just dl the source cod
   enough that leaving it alone would spend it all on macroblocks.
 - **Share a link instead of the file.** The studio's *Link* button uploads the
   clip to a file host (no account, nothing to configure) and copies the link,
-  so even a clip Discord would refuse to attach can be posted. Up to 200MB.
+  so even a clip Discord would refuse to attach can be posted. Up to 512MB.
 - **GIF export.** The last seconds of a clip become a looping GIF small enough
   to post, written next to the clips and attached to the message box. The
   encoder is the plugin's own, with frame differencing and a median-cut palette,
@@ -372,7 +372,7 @@ firing it only while Discord is focused.
 
 ## Files
 
-Seventy-four modules, so the full list lives in [`docs/modules.md`](docs/modules.md)
+Seventy-eight modules, so the full list lives in [`docs/modules.md`](docs/modules.md)
 with a line about each and a short guide to which one a given problem starts
 from. The shape of it:
 

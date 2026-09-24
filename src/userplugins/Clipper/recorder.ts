@@ -1452,6 +1452,8 @@ class ClipRecorder {
                 // The footage they pointed at was written by the dead encoder.
                 this.marks = [];
                 this.markLabels.clear();
+                voiceActivity.reset();
+                chatLog.reset();
 
                 rememberRelayOnly(mime);
                 logger.info(`The ${mime} encoder took the capture through a canvas`);
@@ -1491,10 +1493,20 @@ class ClipRecorder {
              * would sit in "starting" forever with no toast and no way out.
              * Bounded like the game watcher in ./gameVideo.
              */
-            await Promise.race([
-                video.play(),
-                new Promise<void>((_, reject) => setTimeout(() => reject(new Error("That capture did not start in time")), 4000))
-            ]);
+            // The timer is cleared either way: on success it would otherwise
+            // pin the video and canvas closures for four seconds, and a late
+            // play() rejection must never surface unhandled.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+                await Promise.race([
+                    video.play().catch(() => void 0),
+                    new Promise<void>((_, reject) => {
+                        timer = setTimeout(() => reject(new Error("That capture did not start in time")), 4000);
+                    })
+                ]);
+            } finally {
+                if (timer !== undefined) clearTimeout(timer);
+            }
         } catch (e) {
             logger.warn("This client would not play the capture into a canvas", e);
             video.pause();
@@ -1600,6 +1612,8 @@ class ClipRecorder {
         // The footage they pointed at was written by the encoder that just died.
         this.marks = [];
         this.markLabels.clear();
+        voiceActivity.reset();
+        chatLog.reset();
 
         logger.info(`The buffer carried on as ${this.mimeType}${detail ? ` (${detail})` : ""}`);
 
@@ -2072,7 +2086,15 @@ class ClipRecorder {
             const parts: BlobPart[] = [this.header as Blob];
             for (const c of kept) {
                 if (c.blob) parts.push(c.blob);
-                else if (c.file) parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                else if (c.file) {
+                    // One orphan spill file must not cost the clip: the RAM
+                    // around it still saves, with a gap where the chunk was.
+                    try {
+                        parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                    } catch (e) {
+                        logger.warn("Skipped an unreadable spill chunk in the save", e);
+                    }
+                }
                 else throw new Error("Clip chunk is neither in memory nor spilled to disk");
             }
             const raw = new Blob(parts, { type: this.mimeType });
@@ -2659,7 +2681,7 @@ class ClipRecorder {
 
         const end = Date.now();
         const start = end - Math.round(seconds * 1000);
-        const keptMarks = this.marks.map(m => ({ at: m, offset: (m - start) / 1000 })).filter(p => p.offset >= 0);
+        const keptMarks = this.marks.map(m => ({ at: m, offset: (m - start) / 1000 })).filter(p => p.offset >= 0 && p.offset <= seconds);
         const markers = keptMarks.map(p => p.offset);
         const markerLabels = keptMarks.map(p => this.markLabels.get(p.at) ?? "");
         const voices = voiceActivity.slice(start, end);
@@ -2668,7 +2690,7 @@ class ClipRecorder {
         this.lastSaved = { name: saved, path, size: blob.size, mimeType: "video/mp4", markers, markerLabels, voices, chat };
 
         await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
-        void writeThumbnail(blob, saved);
+        void writeThumbnail(blob, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
         /*
          * How many audio tracks came out, said out loud.
@@ -2702,8 +2724,7 @@ class ClipRecorder {
         }
 
         // The clip is on disk under this name now, so `freePath` guards it
-        // from here on; the reservation has done its job.
-        void Native.releaseClipPath(path).catch(() => void 0);
+        // from here on; the reservation is released by the finally below.
         return true;
         } finally {
             // A throw anywhere in the engine's work - the write, the read,

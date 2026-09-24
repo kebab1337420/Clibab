@@ -13,10 +13,11 @@
 
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
 import { IconComponent } from "@utils/types";
-import { React, useEffect, useState } from "@webpack/common";
+import { React, Toasts, useEffect, useState } from "@webpack/common";
 
-import { recorder, RecorderState } from "../recorder";
+import { logger, recorder, RecorderState } from "../recorder";
 import { settings } from "../settings";
+import { toast } from "../toasts";
 import { formatKeybind } from "../utils";
 
 export const ClipperIcon: IconComponent = ({ height = 20, width = 20, className, recording = false }) => (
@@ -50,11 +51,19 @@ export const ClipperChatButton: ChatBarButtonFactory = ({ isMainChat }) => {
             ? "Saving clip…"
             : "Start the clip buffer - click again to save";
 
+    // Rejections surface as toasts, never as unhandled promise noise: a
+    // save that fails still leaves the buffer running underneath.
+    const act = (work: Promise<unknown>) =>
+        void work.catch(e => {
+            logger.warn("Clip button action failed", e);
+            toast(`Clipper: ${e instanceof Error ? e.message : String(e)}`, Toasts.Type.FAILURE);
+        });
+
     return (
         <ChatBarButton
             tooltip={tooltip}
-            onClick={() => void (state === "recording" ? recorder.save() : recorder.start())}
-            onContextMenu={() => void recorder.toggle()}
+            onClick={() => act(state === "recording" ? recorder.save() : recorder.start())}
+            onContextMenu={() => act(recorder.toggle())}
         >
             <ClipperIcon recording={active} />
         </ChatBarButton>

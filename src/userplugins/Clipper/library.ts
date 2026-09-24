@@ -199,11 +199,20 @@ function entryOf(value: unknown): ClipMeta | null {
             .slice(0, 200)
         : [];
 
+    // Labels ride parallel to markers: a label without its marker (or the
+    // reverse) desyncs the chapters, so both are trimmed to the shorter.
+    const markerLabels = Array.isArray(raw.markerLabels)
+        ? raw.markerLabels.filter((l): l is string => typeof l === "string").map(l => l.slice(0, 120))
+        : [];
+    const kept = Math.min(markers.length, markerLabels.length);
+
     return {
         game: typeof raw.game === "string" ? raw.game.trim().slice(0, 60) : "",
         ...(tags.length ? { tags } : {}),
         ...(typeof raw.taggedAt === "number" && Number.isFinite(raw.taggedAt) ? { taggedAt: raw.taggedAt } : {}),
         ...(markers.length ? { markers } : {}),
+        ...(kept ? { markerLabels: markerLabels.slice(0, kept) } : {}),
+        ...(raw.pinned === true ? { pinned: true } : {}),
         ...(voices.length ? { voices } : {}),
         ...(tracks.length ? { tracks } : {}),
         ...(Object.keys(levels).length ? { levels } : {}),
@@ -293,7 +302,10 @@ function flush(): Promise<void> {
 
     if (!draining) {
         draining = true;
-        writeTail = writeTail.then(drain);
+        // drain() swallows its own errors, but a rejection here would poison
+        // the tail and silently disable every later library write: belt and
+        // suspenders, the chain heals itself either way.
+        writeTail = writeTail.then(drain, drain);
     }
 
     return writeTail;

@@ -275,6 +275,21 @@ class VoiceActivityBuffer {
         return this.running;
     }
 
+    /**
+     * Drops the buffered windows without stopping the follow.
+     *
+     * The encoder swap in the recorder throws away the footage (and the
+     * markers) but keeps recording: voice lanes and names from the discarded
+     * footage must go with them, or the next clip mixes two eras of call.
+     * Subscriptions and the ticker keep running; only the data goes.
+     */
+    reset(): void {
+        this.levels.clear();
+        this.names.clear();
+        this.avatars.clear();
+        this.speaking.clear();
+    }
+
     /** Starts following the call. `keepSeconds` matches the video buffer. */
     start(keepSeconds: number): void {
         this.keepMs = Math.max(30, keepSeconds + 10) * 1000;

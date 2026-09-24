@@ -39,6 +39,34 @@ function Find-ReleaseRoot([string] $extractDir) {
     return $null
 }
 
+function Test-OneFile([string] $file, $size, [string] $sha256, [string] $label) {
+    if ($null -eq $size -or $size -lt 0 -or -not $sha256) {
+        throw "The bundle lists no size and hash for $label."
+    }
+    if (-not (Test-Path $file)) {
+        throw "The bundle names $label and does not carry it."
+    }
+
+    $info = Get-Item $file
+    if ($info.Length -ne $size) {
+        throw "$label is $($info.Length) bytes, the bundle says $size."
+    }
+
+    # .NET directly, not Get-FileHash: under a bare launch (the wizard's
+    # nsExec, no console) module autoload can resolve the Utility module
+    # from PowerShell 7's folder, whose binary cmdlets do not load in 5.1.
+    $stream = [IO.File]::OpenRead($file)
+    try {
+        $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+    } finally {
+        $stream.Close()
+    }
+    $got = ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    if ($got -ne $sha256.ToLowerInvariant()) {
+        throw "$label does not match its published hash."
+    }
+}
+
 function Test-Bundle([string] $repoRoot) {
     # Checks the extracted bundle against the hashes it ships with, failing
     # rather than running an unmatched one. The manifest lives next to the
@@ -51,7 +79,8 @@ function Test-Bundle([string] $repoRoot) {
     }
 
     try {
-        $files = (Get-Content $manifest -Raw | ConvertFrom-Json).files
+        $manifestJson = Get-Content $manifest -Raw | ConvertFrom-Json
+        $files = $manifestJson.files
     } catch {
         throw "The bundle's file list could not be read, so there is nothing to check it against."
     }
@@ -65,35 +94,25 @@ function Test-Bundle([string] $repoRoot) {
             throw "The bundle lists a file named $name, which is refused."
         }
 
-        $size = $entry.Value.size
-        $sha256 = $entry.Value.sha256
-        if ($null -eq $size -or $size -lt 0 -or -not $sha256) {
-            throw "The bundle lists no size and hash for $name."
+        Test-OneFile (Join-Path $repoRoot "prebuilt\dist\$name") $entry.Value.size $entry.Value.sha256 $name
+    }
+
+    # The scripts and bats the install runs: verifying the bundle but running
+    # unchecked scripts would check the wrong half. A missing `root`
+    # section fails closed.
+    $root = $manifestJson.root
+    if (-not $root) {
+        throw "The bundle names no install scripts, refusing to install it unchecked."
+    }
+
+    foreach ($entry in $root.PSObject.Properties) {
+        # Manifest keys use forward slashes; the check stays flat like dist.
+        $name = $entry.Name -replace "/", "\"
+        if ($name -ne (Split-Path $name -Leaf) -and ($name.Split("\").Length -ne 2 -or $name.StartsWith('.'))) {
+            throw "The bundle lists a script named $($entry.Name), which is refused."
         }
 
-        $file = Join-Path $repoRoot "prebuilt\dist\$name"
-        if (-not (Test-Path $file)) {
-            throw "The bundle names $name and does not carry it."
-        }
-
-        $info = Get-Item $file
-        if ($info.Length -ne $size) {
-            throw "$name is $($info.Length) bytes, the bundle says $size."
-        }
-
-        # .NET directly, not Get-FileHash: under a bare launch (the wizard's
-        # nsExec, no console) module autoload can resolve the Utility module
-        # from PowerShell 7's folder, whose binary cmdlets do not load in 5.1.
-        $stream = [IO.File]::OpenRead($file)
-        try {
-            $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
-        } finally {
-            $stream.Close()
-        }
-        $got = ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
-        if ($got -ne $sha256.ToLowerInvariant()) {
-            throw "$name does not match its published hash."
-        }
+        Test-OneFile (Join-Path $repoRoot $name) $entry.Value.size $entry.Value.sha256 $entry.Name
     }
 }
 
@@ -116,19 +135,26 @@ function Invoke-Prebuilt([string] $repoRoot) {
 
 function Invoke-Batch([string] $file, [string] $workingDirectory) {
     # stdin comes from NUL: install scripts end in `pause`, and there is no
-    # console to press a key on under the wizard.
-    $process = Start-Process "cmd.exe" -ArgumentList "/d", "/c", "`"$file`" < NUL" `
-        -WorkingDirectory $workingDirectory -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput "$env:TEMP\clipper-install-out.txt" `
-        -RedirectStandardError "$env:TEMP\clipper-install-err.txt"
-    $output = Get-Content "$env:TEMP\clipper-install-out.txt" -Raw -ErrorAction SilentlyContinue
-    $errorText = Get-Content "$env:TEMP\clipper-install-err.txt" -Raw -ErrorAction SilentlyContinue
-    Remove-Item "$env:TEMP\clipper-install-out.txt", "$env:TEMP\clipper-install-err.txt" `
-        -Force -ErrorAction SilentlyContinue
-    if ($output) { Write-Host $output }
-    if ($process.ExitCode -ne 0) {
-        $message = if ([string]::IsNullOrWhiteSpace($errorText)) { $output } else { $errorText }
-        throw $message.Trim()
+    # console to press a key on under the wizard. Outputs ride PID-unique
+    # temp files: two installs at once must never share them, and a planted
+    # file must never capture another install's output.
+    $tag = "$PID-$([Guid]::NewGuid().ToString('N'))"
+    $outFile = Join-Path ([IO.Path]::GetTempPath()) "clipper-install-out-$tag.txt"
+    $errFile = Join-Path ([IO.Path]::GetTempPath()) "clipper-install-err-$tag.txt"
+    try {
+        $process = Start-Process "cmd.exe" -ArgumentList "/d", "/c", "`"$file`" < NUL" `
+            -WorkingDirectory $workingDirectory -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile
+        $output = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
+        $errorText = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
+        if ($output) { Write-Host $output }
+        if ($process.ExitCode -ne 0) {
+            $message = if ([string]::IsNullOrWhiteSpace($errorText)) { $output } else { $errorText }
+            throw $message.Trim()
+        }
+    } finally {
+        Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
 }
 

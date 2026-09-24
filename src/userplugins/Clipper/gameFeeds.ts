@@ -500,7 +500,7 @@ interface LeagueEvent {
 }
 
 /** What one League event is worth, or null when it is not about you. */
-function readLeagueEvent(event: LeagueEvent, me: string): GameEvent | null {
+export function readLeagueEvent(event: LeagueEvent, me: string): GameEvent | null {
     const name = event.EventName ?? "";
     const killer = riotName(event.KillerName ?? "");
 

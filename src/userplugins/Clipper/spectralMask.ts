@@ -472,7 +472,16 @@ export async function createMaskNode(ctx: BaseAudioContext): Promise<MaskHandle>
         if (moduleUrl) URL.revokeObjectURL(moduleUrl);
 
         moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
-        await ctx.audioWorklet.addModule(moduleUrl);
+        try {
+            await ctx.audioWorklet.addModule(moduleUrl);
+        } catch (e) {
+            // A rejected module must not leak its URL nor poison the cache:
+            // without this every retry mints another blob URL that nothing
+            // ever revokes.
+            URL.revokeObjectURL(moduleUrl);
+            moduleUrl = null;
+            throw e;
+        }
         moduleFor = ctx;
     }
 
@@ -495,6 +504,12 @@ export async function createMaskNode(ctx: BaseAudioContext): Promise<MaskHandle>
             node.port.postMessage({ type: "frame", muted, others });
         },
         disconnect() {
+            // The port first: a worklet whose node is disconnected but whose
+            // port stays open keeps its thread and its profile listeners.
+            try {
+                node.port.onmessage = null;
+                node.port.close();
+            } catch { /* already gone with the context */ }
             try {
                 node.disconnect();
             } catch {

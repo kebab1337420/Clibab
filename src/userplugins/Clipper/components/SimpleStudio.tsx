@@ -48,7 +48,6 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { settings } from "../settings";
 import { formatBytes, chaptersOf, formatTime } from "../utils";
 
 /** Clamp a trim point to the file's own range. */
@@ -100,10 +99,22 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
         else URL.revokeObjectURL(url);
     };
 
+    /** Blob URLs held by the thumbs dict (not the ledger): revoked with it. */
+    const thumbsRef = useRef<Record<string, string>>({});
+    const setThumbsTracked = (updater: (prev: Record<string, string>) => Record<string, string>) => {
+        setThumbs(prev => {
+            const next = updater(prev);
+            thumbsRef.current = next;
+            return next;
+        });
+    };
+
     useEffect(() => () => {
         aliveRef.current = false;
         for (const url of urlLedger.current) URL.revokeObjectURL(url);
         urlLedger.current.clear();
+        for (const url of Object.values(thumbsRef.current)) URL.revokeObjectURL(url);
+        thumbsRef.current = {};
     }, []);
 
     /** Reloads the clip list and every thumbnail that does not exist yet. */
@@ -144,14 +155,18 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
         }
 
         const loaded = fresh.filter((entry): entry is readonly [string, string] => !!entry);
+        const loadedMap = Object.fromEntries(loaded);
+        const names = new Set(next.map(clip => clip.name));
 
-        setThumbs(prev => {
-            for (const [name, url] of loaded) {
-                const old = prev[name];
-                if (old) URL.revokeObjectURL(old);
-            }
-            return { ...prev, ...Object.fromEntries(loaded) };
-        });
+        // Replaced below, or their clip left the folder: revoke now, while
+        // the ref still names them.
+        for (const [name, url] of Object.entries(thumbsRef.current)) {
+            if (!names.has(name) || loadedMap[name]) URL.revokeObjectURL(url);
+        }
+        const kept = Object.fromEntries(
+            Object.entries(thumbsRef.current).filter(([name]) => names.has(name) && !loadedMap[name])
+        );
+        setThumbsTracked(() => ({ ...kept, ...loadedMap }));
     };
 
     useEffect(() => {

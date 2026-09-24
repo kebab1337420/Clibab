@@ -27,7 +27,7 @@ import { type AudioClip, type AudioSource, type DuckCurve, type Ending, schedule
 import type { ChatLine } from "./chat";
 import { buildMixBus, logger } from "./recorder";
 import { pickMimeType, settings } from "./settings";
-import { seekVideo } from "./utils";
+import { seekVideo, captureVideoBitrate } from "./utils";
 import { maskActors, speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
 import { createVoiceBand, type VoiceBand } from "./voiceBand";
 import { createMaskNode, dropMaskModule, learnRenderProfiles, planMask, type MaskHandle } from "./spectralMask";
@@ -498,7 +498,7 @@ export function cutRange(project: Project, from: number, to: number): Project {
         elapsed = tail;
 
         if (tail <= start + EPSILON || head >= end - EPSILON) {
-            segments.push(item);
+            segments.push({ ...item });
             continue;
         }
 
@@ -509,12 +509,20 @@ export function cutRange(project: Project, from: number, to: number): Project {
         // file the segment is cut out of.
         const speed = rate(item.speed);
 
+        // The cut pieces own their moves and angles: the render reframing one
+        // side must never reframe the segment they were cut out of.
+        const cloneExtras = (s: Segment) => ({
+            effects: { ...s.effects },
+            ...(s.moves ? { moves: s.moves.map(m => ({ ...m })) } : {}),
+            ...(s.angles ? { angles: s.angles.map(a => ({ ...a })) } : {})
+        });
+
         const before: Segment | null = start > head
-            ? { ...item, to: item.from + (start - head) * speed, effects: { ...item.effects } }
+            ? { ...item, to: item.from + (start - head) * speed, ...cloneExtras(item) }
             : null;
 
         const after: Segment | null = end < tail
-            ? { ...item, id: before ? newId() : item.id, from: item.from + (end - head) * speed, effects: { ...item.effects } }
+            ? { ...item, id: before ? newId() : item.id, from: item.from + (end - head) * speed, ...cloneExtras(item) }
             : null;
 
         if (before && segmentLength(before) >= 0.05) segments.push(before);
@@ -866,7 +874,14 @@ export function snapToBeats(project: Project, clip: AudioClip, beats: number[], 
 
     if (!grid.length) return { project, moved: 0 };
 
-    const segments = project.segments.map(segment => ({ ...segment }));
+    // Shallow copies share effects/moves/angles with the input project: the
+    // seam shifts below mutate `to`, so each segment carries its own extras.
+    const segments = project.segments.map(segment => ({
+        ...segment,
+        effects: { ...segment.effects },
+        ...(segment.moves ? { moves: segment.moves.map(m => ({ ...m })) } : {}),
+        ...(segment.angles ? { angles: segment.angles.map(a => ({ ...a })) } : {})
+    }));
     const shifts: { at: number; delta: number; }[] = [];
 
     let elapsed = 0;
@@ -2440,6 +2455,10 @@ async function loadSources(project: Project, sources: StudioSource[], ctx: Audio
                 band.output.connect(gain);
                 gain.connect(dest);
             } catch (e) {
+                // A half-wired source must not linger on the graph: the nodes
+                // were just created, so dropping them here loses nothing.
+                try { band.disconnect(); } catch { /* already gone */ }
+                try { gain.disconnect(); } catch { /* already gone */ }
                 logger.warn("Could not route the audio of a timeline source", e);
             }
 
@@ -2449,7 +2468,13 @@ async function loadSources(project: Project, sources: StudioSource[], ctx: Audio
         // Every element built so far holds a decoder until it is collected, and
         // the caller only knows to close the audio context: a source that fails
         // to load halfway through must not leave the earlier ones behind.
-        for (const { video } of loaded.values()) release(video);
+        // Bands and gains go too - a node left connected pins its whole
+        // upstream chain on a context that may well survive the render.
+        for (const { video, gain, band } of loaded.values()) {
+            release(video);
+            try { band.disconnect(); } catch { /* already gone */ }
+            try { gain.disconnect(); } catch { /* already gone */ }
+        }
         throw e;
     }
 
@@ -2592,9 +2617,17 @@ export async function renderProject(project: Project, sources: StudioSource[], o
 
                         // The notch stays where it is; the mask sits behind it
                         // and takes over exactly the frames it is told to.
+                        // Wired output->mask->gain in that order: if the second
+                        // connect throws, the first is rewound so the source
+                        // is never left silent on a dangling edge.
                         entry.band.output.disconnect();
-                        entry.band.output.connect(mask.node);
-                        mask.node.connect(entry.gain);
+                        try {
+                            entry.band.output.connect(mask.node);
+                            mask.node.connect(entry.gain);
+                        } catch (connectError) {
+                            try { entry.band.output.connect(entry.gain); } catch { /* gone with the context */ }
+                            throw connectError;
+                        }
 
                         masks.set(id, mask);
                     } catch (e) {
@@ -2632,7 +2665,7 @@ export async function renderProject(project: Project, sources: StudioSource[], o
 
     const recorder = new MediaRecorder(stream, {
         mimeType,
-        videoBitsPerSecond: settings.store.videoBitrate * 1_000_000,
+        videoBitsPerSecond: captureVideoBitrate(settings.store.videoBitrate),
         audioBitsPerSecond: settings.store.audioBitrate * 1000
     });
 
@@ -3081,7 +3114,7 @@ export async function renderProject(project: Project, sources: StudioSource[], o
  * close enough to warn about a montage that will not fit anywhere.
  */
 export function estimatedSize(project: Project): number {
-    const video = settings.store.videoBitrate * 1_000_000;
+    const video = captureVideoBitrate(settings.store.videoBitrate);
 
     // A montage with the footage muted and a music bed over it still has an
     // audio track, and the render's own rule for keeping one is exactly this.

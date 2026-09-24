@@ -203,14 +203,15 @@ async function clipRange(name: string): Promise<{ start: number; end: number; } 
 
         const range = await probeRange(video);
 
-        video.removeAttribute("src");
-        video.load();
-
         return range;
     } catch (e) {
         logger.warn("Could not measure that clip", e);
         return null;
     } finally {
+        // Cleared on every path: an error above used to leave the decoder
+        // parked on a revoked blob URL with its listeners attached.
+        video.removeAttribute("src");
+        video.load();
         if (url) URL.revokeObjectURL(url);
     }
 }

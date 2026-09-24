@@ -143,7 +143,7 @@ const onSpeaking = (event: any) => {
     const userId = event?.userId;
     if (typeof userId !== "string") return;
 
-    if (Number(event?.speakingFlags ?? 0)) speaking.add(userId);
+    if ((Number(event?.speakingFlags ?? 0) & 1) !== 0) speaking.add(userId);
     else speaking.delete(userId);
 };
 
@@ -165,6 +165,10 @@ function register(track: MediaStreamTrack) {
 
     const id = `tap-${++counter}`;
 
+    // Declared outside the try: a synchronous throw after the element exists
+    // must still pause and detach it, or it plays a stream nothing samples.
+    let keepAlive: HTMLAudioElement | null = null;
+
     try {
         const context = audioContext();
 
@@ -174,16 +178,17 @@ function register(track: MediaStreamTrack) {
 
         const own = new MediaStream([track]);
 
-        const keepAlive = new Audio();
-        keepAlive.srcObject = own;
-        keepAlive.volume = 0;
-        keepAlive.autoplay = true;
-        keepAlive.play().catch(() => void 0);
-
         const source = context.createMediaStreamSource(own);
         const analyser = context.createAnalyser();
         analyser.fftSize = 512;
         source.connect(analyser);
+
+        // Attached last: everything above can throw, and an element left
+        // playing a stream nothing samples is never torn down.
+        keepAlive = new Audio();
+        keepAlive.srcObject = own;
+        keepAlive.volume = 0;
+        keepAlive.autoplay = true;
 
         const entry: Tracked = {
             tap: { id, stream: own, track },
@@ -198,8 +203,16 @@ function register(track: MediaStreamTrack) {
         tracked.set(id, entry);
         track.addEventListener("ended", () => drop(id));
 
+        // Started once tracked: a play() rejection leaves a registered entry
+        // whose drop() pauses and detaches, instead of a stray element.
+        keepAlive.play().catch(() => void 0);
+
         logger.info(`Voice tap opened (${id}), ${tracked.size} open in total`);
     } catch (e) {
+        if (keepAlive) {
+            try { keepAlive.pause(); } catch { /* never started */ }
+            keepAlive.srcObject = null;
+        }
         logger.warn("Could not open a voice tap", e);
     }
 }

@@ -131,6 +131,16 @@ class ChatBuffer {
         return this.running;
     }
 
+    /**
+     * Drops the buffered lines without stopping the follow.
+     *
+     * Same encoder-swap case as the voice lanes: the footage is gone, so
+     * chat from before the switch must not land on the next clip.
+     */
+    reset(): void {
+        this.lines = [];
+    }
+
     /** Follows the chat of the channel being recorded. `keepSeconds` is the buffer. */
     start(keepSeconds: number): void {
         if (this.running) return;

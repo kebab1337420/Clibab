@@ -16,7 +16,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMa
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
 import { tmpdir } from "os";
-import { basename, extname, isAbsolute, join } from "path";
+import { basename, extname, isAbsolute, join, normalize } from "path";
 
 import { closeFeeds, type FeedStatus, type GameEvent, startFeeds, status as feedStatus, waitForFeedEvent } from "./gameFeeds";
 import { canOverlay, hideOverlay, type OverlayCorner, type OverlayLook, showOverlay, showToast } from "./overlayWindow";
@@ -57,9 +57,20 @@ const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
-    const target = trimmed && isAbsolute(trimmed)
+    const raw = trimmed && isAbsolute(trimmed)
         ? trimmed
         : join(app.getPath("videos"), "DiscordClips");
+
+    // Normalized before any comparison: `C:\Windows\..\Clips` never matches
+    // a raw-string prefix check but lands in the same place (normalize
+    // resolves `..` lexically, so nothing to check there afterwards).
+    // Device paths (`\\?\`, `\\.\`) bypass every string prefix and Win32
+    // normalization alike: refused outright.
+    const target = normalize(raw);
+    const upper = target.toUpperCase();
+    if (upper.startsWith("\\\\?\\") || upper.startsWith("\\\\.\\")) {
+        throw new Error("That folder is not a place for clips");
+    }
 
     // The folder comes from the renderer, so it is never trusted with a
     // system location: clips have no business inside the OS, its program
@@ -67,7 +78,7 @@ function resolveDirectory(dir: string): string {
     // a custom folder the user typed - is theirs to keep.
     const needle = target.toLowerCase().replace(/[\\/]+$/, "");
     for (const root of forbiddenClipRoots()) {
-        const base = root.toLowerCase().replace(/[\\/]+$/, "");
+        const base = normalize(root).toLowerCase().replace(/[\\/]+$/, "");
         if (needle === base || needle.startsWith(`${base}\\`) || needle.startsWith(`${base}/`)) {
             throw new Error("That folder is not a place for clips");
         }
@@ -151,9 +162,13 @@ function freePath(dir: string, name: string): string {
     const ext = extname(name);
     const stem = name.slice(0, name.length - ext.length);
 
+    // Reserved-but-unwritten names count as taken: the native engine holds
+    // its file between reserve and write, and existsSync cannot see it.
+    // Without this two saves in the same second land on the same path and
+    // the second clobbers the first.
     let path = join(dir, name);
     let i = 2;
-    while (existsSync(path) && i < 1000) path = join(dir, `${stem} (${i++})${ext}`);
+    while ((existsSync(path) || reservedClipPaths.has(path)) && i < 1000) path = join(dir, `${stem} (${i++})${ext}`);
 
     // Every suffix up to " (999)" is taken: returning the colliding name would
     // silently overwrite it on the next write, so fail loudly instead.
@@ -649,7 +664,17 @@ export function restoreClip(_: IpcMainInvokeEvent, dir: string, stored: string):
         throw new Error("That clip is no longer in the trash");
     }
 
-    const name = freePath(target, entry.name).split(/[\\/]/).pop() || entry.name;
+    // The name comes out of a hand-editable index file: a `../` in there
+    // must not walk the restore out of the folder. clipName() flattens
+    // separators and refuses anything that is not a clip-like file name.
+    const restored = clipName(entry.name);
+    if (!restored) {
+        delete index[file];
+        writeTrashIndex(trash, index);
+        throw new Error("That trash entry names nothing restorable");
+    }
+
+    const name = freePath(target, restored).split(/[\\/]/).pop() || restored;
     renameSync(join(trash, file), join(target, name));
 
     const thumb = thumbNameFor(file);
@@ -947,6 +972,35 @@ export function writeLibrary(_: IpcMainInvokeEvent, dir: string, json: string): 
     renameSync(temp, path);
 }
 
+/**
+ * Absolute paths the user chose in an OS dialog this session.
+ *
+ * The import readers below deliberately leave the clip folder, so a bare
+ * "absolute path + right extension" check would let any caller read any
+ * matching file on disk. Every path a picker returns is registered here;
+ * the readers only serve registered paths. Session-scoped and tiny (a few
+ * dozen strings at most); a restart re-arms it through the dialogs.
+ */
+const pickedImportPaths = new Set<string>();
+
+function rememberPicked(paths: string[]): string[] {
+    for (const p of paths) {
+        if (typeof p === "string" && isAbsolute(p)) pickedImportPaths.add(normalize(p));
+    }
+
+    return paths;
+}
+
+function requirePicked(path: string, what: string): string {
+    // Normalized the same way as registration, so `..\` spellings of a
+    // picked file do not fail the check and non-picked files cannot pass it.
+    if (!isAbsolute(path) || !pickedImportPaths.has(normalize(path))) {
+        throw new Error(`That ${what} was not picked for import`);
+    }
+
+    return path;
+}
+
 /** Native picker for videos to drop on the studio timeline. */
 export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
     const result = await dialog.showOpenDialog({
@@ -955,7 +1009,7 @@ export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         filters: [{ name: "Video", extensions: ["mp4", "webm", "mkv", "mov", "m4v"] }]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -969,7 +1023,8 @@ export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
 const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 
 export function readVideoFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(mp4|webm|mkv|mov|m4v)$/i.test(path)) {
+    requirePicked(path, "video");
+    if (!/\.(mp4|webm|mkv|mov|m4v)$/i.test(path)) {
         throw new Error("Not a video file");
     }
 
@@ -1000,7 +1055,7 @@ export async function pickAudioFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         filters: [{ name: "Audio", extensions: ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac", "webm"] }]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -1013,7 +1068,8 @@ export async function pickAudioFiles(_: IpcMainInvokeEvent): Promise<string[]> {
 const MAX_SOUND_BYTES = 64 * 1024 * 1024;
 
 export function readAudioFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(mp3|wav|ogg|opus|m4a|aac|flac|webm)$/i.test(path)) {
+    requirePicked(path, "audio file");
+    if (!/\.(mp3|wav|ogg|opus|m4a|aac|flac|webm)$/i.test(path)) {
         throw new Error("Not an audio file");
     }
 
@@ -1050,7 +1106,7 @@ export async function pickImageFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         ]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -1066,7 +1122,8 @@ const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
 const MAX_OVERLAY_VIDEO_BYTES = 64 * 1024 * 1024;
 
 export function readImageFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(png|jpe?g|webp|gif|avif|bmp|mp4|webm)$/i.test(path)) {
+    requirePicked(path, "picture or clip");
+    if (!/\.(png|jpe?g|webp|gif|avif|bmp|mp4|webm)$/i.test(path)) {
         throw new Error("Not a picture or a clip");
     }
 

@@ -14,5 +14,9 @@ release/
 .vs/
 *.user
 
+# .NET build outputs (the installer is NSIS now; the C# project is gone)
+installer/obj/
+installer/bin/
+
 # ...except the shipped bundle, which is the whole point of the prebuilt install
 !prebuilt/dist/

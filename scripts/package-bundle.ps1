@@ -89,6 +89,5 @@ $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Write-Host "Bundle asset packaged: $zip ($size)"
 Write-Host "sha256: $sha"
 Write-Host ""
-Write-Host "Upload it as a release asset named $asset. The exe installer downloads"
-Write-Host "this asset instead of the repo's source archive; it falls back to the"
-Write-Host "source archive only when the asset is absent."
+Write-Host "Upload it as a release asset named $asset. The NSIS setup embeds"
+Write-Host "this asset at build time (scripts\build-installer.ps1)."

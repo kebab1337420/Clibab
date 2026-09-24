@@ -153,6 +153,14 @@ Section "Uninstall"
   Pop $2
   DetailPrint $2
 
+  ; A failed unpatch must not report success: the stubs still point at a
+  ; bundle that is about to be deleted, which leaves Discord unlaunchable.
+  ; Keep the uninstaller and its registry so the user can try again.
+  ${If} $1 != "0"
+    MessageBox MB_ICONSTOP "Uninstall failed: $2 - Discord may still be patched. Close Discord completely and run the uninstaller again."
+    Abort
+  ${EndIf}
+
   Delete "$INSTDIR\uninstall.ps1"
   Delete "$INSTDIR\VRinstaller.bat"
   Delete "$INSTDIR\Uninstall.exe"

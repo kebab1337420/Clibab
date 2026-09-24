@@ -26,7 +26,7 @@ import type { UpdateInfo } from "./native";
 import { recorder } from "./recorder";
 import { settings } from "./settings";
 import { toast as showToast } from "./toasts";
-import { errorMessage } from "./utils";
+import { clipRetentionSeconds, errorMessage } from "./utils";
 
 const Native = VencordNative.pluginHelpers.Clipper as PluginNative<typeof import("./native")>;
 const logger = new Logger("Clipper");
@@ -246,7 +246,7 @@ export async function installUpdate(info: UpdateInfo, quiet = false): Promise<bo
 function offerRestart(info: UpdateInfo): void {
     Alerts.show({
         title: `Clipper ${info.version} is ready`,
-        body: `Fully quit Discord (right-click the Discord icon in the Windows tray > Quit Discord), then start it again — Ctrl+R is not enough. Your unsaved recording (the last ${settings.store.clipLength} seconds you haven't saved yet) is lost on restart, so save the clip first if there is one worth keeping.`,
+        body: `Fully quit Discord (right-click the Discord icon in the Windows tray > Quit Discord), then start it again — Ctrl+R is not enough. Your unsaved recording (the last ${clipRetentionSeconds(settings.store.clipLength)} seconds you haven't saved yet) is lost on restart, so save the clip first if there is one worth keeping.`,
         confirmText: "Restart now",
         cancelText: "Later",
         onConfirm: () => {
@@ -315,7 +315,7 @@ export async function checkAtLaunch(): Promise<void> {
     else {
         showNotification({
             title: `Clipper updated to ${info.version}`,
-            body: `It loads on the next Discord restart. Your unsaved recording (the last ${settings.store.clipLength} seconds you haven't saved yet) is lost on restart, so save the clip first if there is one worth keeping.`
+            body: `It loads on the next Discord restart. Your unsaved recording (the last ${clipRetentionSeconds(settings.store.clipLength)} seconds you haven't saved yet) is lost on restart, so save the clip first if there is one worth keeping.`
         });
     }
 }
@@ -355,7 +355,7 @@ export function restartClient(): void {
     if (recorder.isRecording) {
         Alerts.show({
             title: "Restart Discord?",
-            body: `Restarting throws away your unsaved recording (the last ${settings.store.clipLength} seconds you haven't saved yet). Save the clip first if there is one worth keeping.`,
+            body: `Restarting throws away your unsaved recording (the last ${clipRetentionSeconds(settings.store.clipLength)} seconds you haven't saved yet). Save the clip first if there is one worth keeping.`,
             confirmText: "Restart anyway",
             cancelText: "Cancel",
             onConfirm: () => {
