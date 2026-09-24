@@ -143,6 +143,7 @@ export interface Ending {
  */
 interface Scheduled {
     node: AudioBufferSourceNode;
+    gain: GainNode;
     stopped: boolean;
 }
 
@@ -277,7 +278,7 @@ export function scheduleClips(
 
             node.start(when, Math.max(0, offset), duration);
 
-            const entry: Scheduled = { node, stopped: false };
+            const entry: Scheduled = { node, gain, stopped: false };
             node.onended = () => { entry.stopped = true; };
             running.push(entry);
         } catch (e) {
@@ -295,6 +296,11 @@ export function scheduleClips(
             } catch {
                 // Already finished between the check and the call; nothing to do.
             }
+            // Gains outlive a stop otherwise: every scrub reschedules, and a
+            // gain left on the destination pins its chain for the session.
+            try {
+                entry.gain.disconnect();
+            } catch { /* already gone with the context */ }
         }
 
         // The stages outlive the sources they were built for: the preview

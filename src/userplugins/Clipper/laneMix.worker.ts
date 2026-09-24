@@ -158,7 +158,12 @@ async function readyWorker(): Promise<Worker | null> {
 
     if (answered && worker) return worker;
 
-    loseWorker();
+    // A ping timeout is transient (a hiccup, not a refusal): terminate the
+    // half-born worker but stay retryable, so one slow start does not pin
+    // every later slider to the main thread for the session. A worker that
+    // faults on its own still goes through onerror -> loseWorker -> null.
+    worker?.terminate();
+    worker = undefined;
     return null;
 }
 

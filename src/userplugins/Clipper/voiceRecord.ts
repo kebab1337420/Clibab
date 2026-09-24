@@ -140,6 +140,21 @@ class VoiceBuffers {
         for (const id of [...this.lanes.keys()]) this.close(id);
     }
 
+    /**
+     * Drops the buffered per-person audio without stopping the recorders.
+     *
+     * The encoder swap throws away the footage but keeps recording: lanes
+     * full of pre-swap audio would harvest misaligned with the post-swap
+     * picture and markers. Clearing the header makes the next chunk the new
+     * one, so the following harvest starts clean on still-running recorders.
+     */
+    reset(): void {
+        for (const lane of this.lanes.values()) {
+            lane.header = null;
+            lane.chunks = [];
+        }
+    }
+
     /** Opens what is missing, closes what has died. */
     private sweep(): void {
         if (!this.running) return;

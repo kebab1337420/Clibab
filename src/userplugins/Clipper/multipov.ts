@@ -46,6 +46,7 @@ import { notifyOverlay } from "./gameOverlay";
 import { logger, recorder } from "./recorder";
 import { settings } from "./settings";
 import { toast as showToast } from "./toasts";
+import { clipRetentionSeconds } from "./utils";
 import { nameOf, voiceParticipants } from "./voice";
 
 /**
@@ -304,7 +305,7 @@ function onMessage({ message, optimistic }: { message?: IncomingMessage; optimis
 
         lastHonoured = now;
 
-        const seconds = Math.min(Number(match[1]) || 30, Math.round(settings.store.clipLength));
+        const seconds = Math.min(Number(match[1]) || 30, Math.round(clipRetentionSeconds(settings.store.clipLength)));
 
         /*
          * Ending where the request was sent rather than where it arrived.

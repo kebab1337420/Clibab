@@ -1,6 +1,6 @@
 # The module map
 
-Seventy-four files, about thirty-five thousand lines. The root `README.md` says what
+Seventy-eight files, about thirty-five thousand lines. The root `README.md` says what
 the plugin does for the person using it; this says where each part of it lives,
 so that a change can start from the right file instead of from a search.
 
@@ -9,10 +9,12 @@ figures at the time of writing and will drift.
 
 ## The shape of it
 
-A Vencord plugin is split across two processes. `native.ts` is the only file
+A Vencord plugin is split across two processes. `native.ts` is the file
 that runs in the main process, and every value it exports becomes an IPC
 handler the renderer can call — that is the whole of the plugin's access to the
-disc, to `ffmpeg` and to the operating system's keyboard. Everything else runs
+disc, to `ffmpeg` and to the operating system's keyboard. (`gameFeeds.ts`
+also runs in main: it hosts the CS2 listener socket and polls League, which
+a page can do neither of.) Everything else runs
 in the renderer, inside Discord's own page, and reaches the file system only
 through those handlers.
 
@@ -32,9 +34,9 @@ window that shows the same controls over a full-screen game.
 
 | File | Lines | What it is |
 | --- | --- | --- |
-| `index.tsx` | 296 | The plugin definition: what starts, what stops, and where the overlay root is mounted. |
-| `native.ts` | 1452 | The main process half. Path safety, size caps and every file, `ffmpeg` and keybind operation the renderer asks for. |
-| `settings.tsx` | 459 | The settings the user sees, and their defaults. |
+| `index.tsx` | 339 | The plugin definition: what starts, what stops, and where the overlay root is mounted. |
+| `native.ts` | 2159 | The main process half. Path safety, size caps and every file, `ffmpeg` and keybind operation the renderer asks for. |
+| `settings.tsx` | 529 | The settings the user sees, and their defaults. |
 
 ## Capture
 
@@ -195,8 +197,8 @@ The always-on-top window, and the two files that decide what it draws.
 | `library.ts` | 408 | Clip metadata and categories. |
 | `send.ts` | 160 | Sending a clip to the channel that is open. |
 | `linkShare.ts` | 122 | Uploading a clip to 0x0.st for a share link and copying it. |
-| `updater.ts` | 269 | Checking for a new version and installing it. |
-| `utils.ts` | 371 | The shared helpers that had no better home. |
+| `updater.ts` | 372 | Checking for a new version and installing it. |
+| `utils.ts` | 508 | The shared helpers that had no better home. |
 | `toasts.ts` | 32 | The one line that shows a toast, which five files each had a copy of. |
 
 ## Where to start
@@ -231,9 +233,11 @@ The always-on-top window, and the two files that decide what it draws.
 ## Tests
 
 `tests/` at the repository root, run with `.\scripts\test.ps1`. They cover
-`boxes.ts` and `mp4.ts` — the readers that fail without saying anything — and
-build their MP4s from the specification rather than from a captured file, so a
-reader is never tested against its own assumptions. Everything else in the
+the pure logic that runs without Discord: the byte readers (`boxes.ts`,
+`mp4.ts`, `webm.ts`) — built from the specification rather than from a
+captured file, so a reader is never tested against its own assumptions —
+plus the voice/mixer math, the repair dispatch, keybind and level helpers,
+and the League feed mapping. Everything else in the
 plugin needs a browser, a canvas or Discord's own modules and is not reachable
 from a bare Node process.
 

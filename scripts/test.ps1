@@ -1,9 +1,10 @@
 # Runs the plugin's unit tests.
 #
-# The tests cover the pure byte-level readers - `boxes.ts` and `mp4.ts` - which
-# are the part of the plugin whose bugs produce no message at all, only an
-# unreadable file. Everything else in the plugin needs a browser, a canvas or
-# Discord's own modules and is not reachable from here.
+# The tests cover the pure logic that can run without Discord: the byte-level
+# readers (`boxes.ts`, `mp4.ts`, `webm.ts`), the voice/mixer math, the repair
+# dispatch, keybind/level helpers and the League feed mapping. Everything else
+# in the plugin needs a browser, a canvas or Discord's own modules and is not
+# reachable from here.
 #
 # Node runs the TypeScript directly: nothing here imports from Vencord, so no
 # build step and no test framework are involved. Node 22.6 or newer is needed

@@ -34,7 +34,7 @@ import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
 import { toast } from "./toasts";
-import { captureFrameRate, captureHeight, captureVideoBitrate, clipRetentionSeconds, errorMessage, formatBytes, TIMESLICE, timestampName } from "./utils";
+import { captureFrameRate, captureHeight, captureVideoBitrate, clipRetentionSeconds, errorMessage, formatBytes, isLinux, TIMESLICE, timestampName } from "./utils";
 import { shiftTracks, toMeta, voiceActivity, voiceChannelId, type VoiceFileMeta, voiceParticipants, type VoiceTrack } from "./voice";
 import { voiceBuffers } from "./voiceRecord";
 
@@ -468,6 +468,8 @@ class ClipRecorder {
     private chunks: TimedChunk[] = [];
     private spillRunning = false;
     private spillFailed = false;
+    /** Consecutive failing spill ticks before giving up for this buffer. */
+    private spillFailures = 0;
 
     /**
      * Moments marked by the user, as epoch ms.
@@ -579,7 +581,7 @@ class ClipRecorder {
 
         // A chunk handed over at T covers the timeslice that ends at T.
         const span = (Date.now() - oldest.at + TIMESLICE) / 1000;
-        return Math.min(span, settings.store.clipLength);
+        return Math.min(span, clipRetentionSeconds(settings.store.clipLength));
     }
 
     get bufferedBytes() {
@@ -660,7 +662,7 @@ class ClipRecorder {
         this.autoSaveAfter = now + AUTO_SAVE_MS;
 
         toast(`Saving a clip: ${reason}`, Toasts.Type.MESSAGE);
-        void this.save(Math.min(AUTO_SAVE_SECONDS, settings.store.clipLength));
+        void this.save(Math.min(AUTO_SAVE_SECONDS, clipRetentionSeconds(settings.store.clipLength)));
     }
 
     /**
@@ -816,11 +818,13 @@ class ClipRecorder {
             // The call is followed on the same window as the footage: a clip is
             // saved after the fact, so who was talking has to have been kept all
             // along or the tracks stop where the save began.
-            voiceActivity.start(settings.store.clipLength);
+            // Sanitized once for the three windows below and the toast.
+            const keepSeconds = clipRetentionSeconds(settings.store.clipLength);
+            voiceActivity.start(keepSeconds);
 
             // And what the call was typing, which is half of why a moment was
             // funny and is not in the picture at all.
-            chatLog.start(settings.store.clipLength);
+            chatLog.start(keepSeconds);
 
             // And the call itself, one buffer per person, on the same window.
             // Best effort: a client with no reachable per-person audio simply
@@ -833,7 +837,7 @@ class ClipRecorder {
             if (this.mic && me?.id) voiceBuffers.attach(this.mic.track, me.id, me.globalName || me.username || "You");
 
             this.setState("recording");
-            toast(`Clip buffer running - last ${settings.store.clipLength}s kept`, Toasts.Type.SUCCESS);
+            toast(`Clip buffer running - last ${keepSeconds}s kept`, Toasts.Type.SUCCESS);
 
             // Remember the call the buffer is now serving, so a leaving event
             // can tell it was a call that ended rather than a buffer started
@@ -1255,11 +1259,28 @@ class ClipRecorder {
                 const oldest = this.chunks[0];
                 if (!oldest.blob || oldest.file) break;
 
-                const id = `spill-${oldest.at}-${Math.random().toString(16).slice(2)}`;
-                const data = new Uint8Array(await oldest.blob.arrayBuffer());
-                await Native.spillWrite(id, data);
-                oldest.blob = null;
-                oldest.file = id;
+                // Per chunk, not per buffer: one failing write (a locked file,
+                // a full disk that frees up) must not latch spilling off for
+                // the rest of the recording while memory grows to the cap.
+                try {
+                    const id = `spill-${oldest.at}-${Math.random().toString(16).slice(2)}`;
+                    const data = new Uint8Array(await oldest.blob.arrayBuffer());
+                    await Native.spillWrite(id, data);
+                    oldest.blob = null;
+                    oldest.file = id;
+                    this.spillFailures = 0;
+                } catch (e) {
+                    // A permanently full disk would warn every second: latch
+                    // after a few consecutive failures, cleared by any success
+                    // or by cleanup at stop.
+                    if (++this.spillFailures >= 5) {
+                        this.spillFailed = true;
+                        logger.warn("Spilling keeps failing, staying in memory for the rest of the buffer", e);
+                    } else {
+                        logger.warn("Could not spill one buffer chunk to disk, keeping it in memory", e);
+                    }
+                    break;
+                }
             }
         } catch (e) {
             logger.warn("Could not spill the oldest buffer chunks to disk, staying in memory", e);
@@ -1452,6 +1473,9 @@ class ClipRecorder {
                 // The footage they pointed at was written by the dead encoder.
                 this.marks = [];
                 this.markLabels.clear();
+                voiceActivity.reset();
+                chatLog.reset();
+                voiceBuffers.reset();
 
                 rememberRelayOnly(mime);
                 logger.info(`The ${mime} encoder took the capture through a canvas`);
@@ -1491,10 +1515,20 @@ class ClipRecorder {
              * would sit in "starting" forever with no toast and no way out.
              * Bounded like the game watcher in ./gameVideo.
              */
-            await Promise.race([
-                video.play(),
-                new Promise<void>((_, reject) => setTimeout(() => reject(new Error("That capture did not start in time")), 4000))
-            ]);
+            // The timer is cleared either way: on success it would otherwise
+            // pin the video and canvas closures for four seconds, and a late
+            // play() rejection must never surface unhandled.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+                await Promise.race([
+                    video.play().catch(() => void 0),
+                    new Promise<void>((_, reject) => {
+                        timer = setTimeout(() => reject(new Error("That capture did not start in time")), 4000);
+                    })
+                ]);
+            } finally {
+                if (timer !== undefined) clearTimeout(timer);
+            }
         } catch (e) {
             logger.warn("This client would not play the capture into a canvas", e);
             video.pause();
@@ -1600,6 +1634,9 @@ class ClipRecorder {
         // The footage they pointed at was written by the encoder that just died.
         this.marks = [];
         this.markLabels.clear();
+        voiceActivity.reset();
+        chatLog.reset();
+        voiceBuffers.reset();
 
         logger.info(`The buffer carried on as ${this.mimeType}${detail ? ` (${detail})` : ""}`);
 
@@ -1850,6 +1887,7 @@ class ClipRecorder {
         this.nativeAudio = null;
         this.spillRunning = false;
         this.spillFailed = false;
+        this.spillFailures = 0;
         void Native.spillClear().catch(() => {});
         this.markLabels.clear();
 
@@ -2072,7 +2110,15 @@ class ClipRecorder {
             const parts: BlobPart[] = [this.header as Blob];
             for (const c of kept) {
                 if (c.blob) parts.push(c.blob);
-                else if (c.file) parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                else if (c.file) {
+                    // One orphan spill file must not cost the clip: the RAM
+                    // around it still saves, with a gap where the chunk was.
+                    try {
+                        parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                    } catch (e) {
+                        logger.warn("Skipped an unreadable spill chunk in the save", e);
+                    }
+                }
                 else throw new Error("Clip chunk is neither in memory nor spilled to disk");
             }
             const raw = new Blob(parts, { type: this.mimeType });
@@ -2145,7 +2191,7 @@ class ClipRecorder {
              */
             const cap = picked
                 ? (end - start - TIMESLICE) / 1000
-                : (seconds ?? settings.store.clipLength);
+                : (seconds ?? clipRetentionSeconds(settings.store.clipLength));
             if (cap > 0) {
                 const real = realLength || lengthBytes(bytes, this.mimeType);
                 const overrun = real - cap;
@@ -2309,7 +2355,11 @@ class ClipRecorder {
 
         const token = ++this.nativeArmToken;
 
-        const { clipLength, resolution, fps } = settings.store;
+        // Sanitized like fps and resolution below: the setting is free-form
+        // custom input, and a corrupt 1e12/NaN/"60" would ask the engine for
+        // an absurd buffer.
+        const { resolution, fps } = settings.store;
+        const clipLength = clipRetentionSeconds(settings.store.clipLength);
 
         // What is being recorded, which is the picked window until a game moves
         // the capture onto a screen. The engine only takes windows, so following
@@ -2564,7 +2614,7 @@ class ClipRecorder {
         try {
             // The engine holds the same window we do, so asking for more than the
             // buffer is worth is asking for footage nobody kept.
-            const wanted = Math.min(want || settings.store.clipLength, settings.store.clipLength);
+            const wanted = Math.min(want || clipRetentionSeconds(settings.store.clipLength), clipRetentionSeconds(settings.store.clipLength));
             const reported = await saveNativeClip(path, wanted, { application: "Clipper" });
 
         // The engine answers in milliseconds, but older builds answered in
@@ -2659,7 +2709,7 @@ class ClipRecorder {
 
         const end = Date.now();
         const start = end - Math.round(seconds * 1000);
-        const keptMarks = this.marks.map(m => ({ at: m, offset: (m - start) / 1000 })).filter(p => p.offset >= 0);
+        const keptMarks = this.marks.map(m => ({ at: m, offset: (m - start) / 1000 })).filter(p => p.offset >= 0 && p.offset <= seconds);
         const markers = keptMarks.map(p => p.offset);
         const markerLabels = keptMarks.map(p => this.markLabels.get(p.at) ?? "");
         const voices = voiceActivity.slice(start, end);
@@ -2668,7 +2718,7 @@ class ClipRecorder {
         this.lastSaved = { name: saved, path, size: blob.size, mimeType: "video/mp4", markers, markerLabels, voices, chat };
 
         await tagSavedClip(path, markers, voices.map(toMeta), undefined, voiceLevelsFrom(readMixer()), chat, markerLabels);
-        void writeThumbnail(blob, saved);
+        void writeThumbnail(blob, saved).catch(e => logger.warn("Could not write the clip thumbnail", e));
 
         /*
          * How many audio tracks came out, said out loud.
@@ -2702,8 +2752,7 @@ class ClipRecorder {
         }
 
         // The clip is on disk under this name now, so `freePath` guards it
-        // from here on; the reservation has done its job.
-        void Native.releaseClipPath(path).catch(() => void 0);
+        // from here on; the reservation is released by the finally below.
         return true;
         } finally {
             // A throw anywhere in the engine's work - the write, the read,
@@ -3021,6 +3070,28 @@ async function gameScreen(sources: CaptureSource[], allowed: boolean): Promise<C
 }
 
 /**
+ * Whether this client runs on Linux, navigator first and main process second.
+ *
+ * The Vesktop audio fallback keys off this, and a hardened user agent says
+ * nothing usable - so the main process (which knows its own platform) is
+ * asked once and the answer is kept: the OS does not change mid-session.
+ */
+let nativeLinux: boolean | null = null;
+
+async function isLinuxClient(): Promise<boolean> {
+    if (isLinux()) return true;
+    if (nativeLinux !== null) return nativeLinux;
+
+    try {
+        nativeLinux = (await Native.getPlatformInfo()).platform === "linux";
+    } catch {
+        nativeLinux = false;
+    }
+
+    return nativeLinux;
+}
+
+/**
  * Grabs a screen / window stream.
  *
  * Preferred path: a display-media request handler is installed in the main
@@ -3061,9 +3132,26 @@ async function acquireStream(fps: number, resolution: number, follow: boolean): 
 
     if (IS_VESKTOP) {
         try {
-            return { stream: await getDesktopStream(source.id, fps, resolution), source };
+            const stream = await getDesktopStream(source.id, fps, resolution);
+
+            // On Linux the silent constraints come back without a sound track:
+            // Chromium does loopback only on Windows. Vesktop's own picker
+            // carries the desktop sound there, so a video-only legacy stream
+            // is a partial failure and falls through to it - one dialog with
+            // sound beats a silent recording nobody asked for. The platform
+            // comes from the navigator, or from the main process when the UA
+            // is hardened into saying nothing.
+            if (await isLinuxClient() && !stream.getAudioTracks().length) {
+                stream.getTracks().forEach(t => t.stop());
+                throw new Error("Legacy capture has no audio on Linux");
+            }
+
+            return { stream, source };
         } catch (e) {
             logger.warn("Desktop constraints failed, falling back to Vesktop's own picker", e);
+            if (await isLinuxClient()) {
+                toast("Pick the source again in Vesktop's dialog - it carries the desktop sound the silent capture cannot", Toasts.Type.MESSAGE, 8000);
+            }
             return { stream: await navigator.mediaDevices.getDisplayMedia({ video, audio: true }), source: null };
         }
     }

@@ -23,6 +23,9 @@
 
 import type { VoiceTrack } from "./voice";
 import { VOICE_HZ } from "./voice";
+import { Logger } from "@utils/Logger";
+
+const logger = new Logger("Clipper", "#f0b132");
 
 /** STFT frame, in samples. Bins follow as frame/2 + 1. */
 export const MASK_FRAME = 1024;
@@ -472,7 +475,16 @@ export async function createMaskNode(ctx: BaseAudioContext): Promise<MaskHandle>
         if (moduleUrl) URL.revokeObjectURL(moduleUrl);
 
         moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
-        await ctx.audioWorklet.addModule(moduleUrl);
+        try {
+            await ctx.audioWorklet.addModule(moduleUrl);
+        } catch (e) {
+            // A rejected module must not leak its URL nor poison the cache:
+            // without this every retry mints another blob URL that nothing
+            // ever revokes.
+            URL.revokeObjectURL(moduleUrl);
+            moduleUrl = null;
+            throw e;
+        }
         moduleFor = ctx;
     }
 
@@ -495,6 +507,12 @@ export async function createMaskNode(ctx: BaseAudioContext): Promise<MaskHandle>
             node.port.postMessage({ type: "frame", muted, others });
         },
         disconnect() {
+            // The port first: a worklet whose node is disconnected but whose
+            // port stays open keeps its thread and its profile listeners.
+            try {
+                node.port.onmessage = null;
+                node.port.close();
+            } catch { /* already gone with the context */ }
             try {
                 node.disconnect();
             } catch {
@@ -545,22 +563,29 @@ export async function learnRenderProfiles(
 
         let cached = profileCache.get(source.id);
         if (!cached || cached.rate !== ctx.sampleRate) {
-            const data = await (await fetch(source.url)).arrayBuffer();
-            const decoded = await ctx.decodeAudioData(data);
-            const learned = learnProfiles(
-                mixMono(decoded),
-                decoded.sampleRate,
-                source.voices.map(voice => ({ userId: voice.id, levels: voice.levels })),
-                VOICE_HZ
-            );
+            // One unreadable file must not disable the mask for every other
+            // source: skip it and keep what was learned so far.
+            try {
+                const data = await (await fetch(source.url)).arrayBuffer();
+                const decoded = await ctx.decodeAudioData(data);
+                const learned = learnProfiles(
+                    mixMono(decoded),
+                    decoded.sampleRate,
+                    source.voices.map(voice => ({ userId: voice.id, levels: voice.levels })),
+                    VOICE_HZ
+                );
 
-            cached = { rate: decoded.sampleRate, profiles: learned };
-            profileCache.set(source.id, cached);
+                cached = { rate: decoded.sampleRate, profiles: learned };
+                profileCache.set(source.id, cached);
 
-            while (profileCache.size > 8) {
-                const oldest = profileCache.keys().next();
-                if (oldest.done) break;
-                profileCache.delete(oldest.value);
+                while (profileCache.size > 8) {
+                    const oldest = profileCache.keys().next();
+                    if (oldest.done) break;
+                    profileCache.delete(oldest.value);
+                }
+            } catch (e) {
+                logger.warn(`Could not learn a voice print from ${source.id}, muting the usual way for it`, e);
+                continue;
             }
         }
 

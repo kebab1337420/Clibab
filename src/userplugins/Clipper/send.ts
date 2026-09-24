@@ -176,17 +176,21 @@ export async function sendClipFitted(name: string, onProgress?: Progress): Promi
  */
 async function clipRange(name: string): Promise<{ start: number; end: number; } | null> {
     let url = "";
+    // Declared outside the try: the finally below detaches the element, and
+    // a loadClipUrl throw before the assignment must not turn into a
+    // ReferenceError that masks the null return.
+    let video: HTMLVideoElement | null = null;
 
     try {
         url = await loadClipUrl(name);
 
-        const video = document.createElement("video");
+        video = document.createElement("video");
         video.preload = "auto";
         video.muted = true;
         video.src = url;
 
         await new Promise<void>(resolve => {
-            if (video.readyState >= 1) return resolve();
+            if (video!.readyState >= 1) return resolve();
 
             let done = false;
             const settle = () => {
@@ -197,20 +201,21 @@ async function clipRange(name: string): Promise<{ start: number; end: number; } 
             };
 
             const timer = setTimeout(settle, 10_000);
-            video.addEventListener("loadedmetadata", settle, { once: true });
-            video.addEventListener("error", settle, { once: true });
+            video!.addEventListener("loadedmetadata", settle, { once: true });
+            video!.addEventListener("error", settle, { once: true });
         });
 
         const range = await probeRange(video);
-
-        video.removeAttribute("src");
-        video.load();
 
         return range;
     } catch (e) {
         logger.warn("Could not measure that clip", e);
         return null;
     } finally {
+        // Cleared on every path: an error above used to leave the decoder
+        // parked on a revoked blob URL with its listeners attached.
+        video?.removeAttribute("src");
+        video?.load();
         if (url) URL.revokeObjectURL(url);
     }
 }

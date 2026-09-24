@@ -123,8 +123,22 @@ export async function syncGlobalKeybinds(): Promise<void> {
         }
     }
 
+    // Unbound actions register as "": the OS would refuse them with a
+    // misleading "already taken", so they never leave the client. A duplicate
+    // accelerator across two actions leaves the second dead silent (the OS
+    // keeps the first), so that shouts too.
+    const active = Object.fromEntries(Object.entries(binds).filter(([, v]) => !!v)) as Record<string, string>;
+    const seen = new Set<string>();
+    for (const [action, accelerator] of Object.entries(active)) {
+        if (seen.has(accelerator)) {
+            logger.warn(`"${accelerator}" is bound twice - the second action (${action}) never fires system-wide`);
+            toast(`Clipper: "${accelerator}" is bound to two actions, only the first fires system-wide`, Toasts.Type.FAILURE);
+        }
+        seen.add(accelerator);
+    }
+
     try {
-        const failed = await Native.registerShortcuts(binds);
+        const failed = await Native.registerShortcuts(active);
 
         if (failed.length) {
             logger.warn("Global keybinds refused by the system", failed);

@@ -16,7 +16,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMa
 import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
 import { tmpdir } from "os";
-import { basename, extname, isAbsolute, join } from "path";
+import { basename, extname, isAbsolute, join, normalize } from "path";
 
 import { closeFeeds, type FeedStatus, type GameEvent, startFeeds, status as feedStatus, waitForFeedEvent } from "./gameFeeds";
 import { canOverlay, hideOverlay, type OverlayCorner, type OverlayLook, showOverlay, showToast } from "./overlayWindow";
@@ -57,9 +57,25 @@ const IS_VESKTOP_APP = /vesktop|equibop/i.test(app.getName());
 
 function resolveDirectory(dir: string): string {
     const trimmed = dir?.trim();
-    const target = trimmed && isAbsolute(trimmed)
+    const raw = trimmed && isAbsolute(trimmed)
         ? trimmed
         : join(app.getPath("videos"), "DiscordClips");
+
+    // Normalized before any comparison: `C:\Windows\..\Clips` never matches
+    // a raw-string prefix check but lands in the same place (normalize
+    // resolves `..` lexically, so nothing to check there afterwards).
+    // Device paths (`\\?\`, `\\.\`) bypass every string prefix and Win32
+    // normalization alike: refused outright. So are trailing dots and
+    // spaces per segment (`C:\Windows.` is that folder to Windows, another
+    // string to a prefix check).
+    const target = normalize(raw);
+    const upper = target.toUpperCase();
+    if (upper.startsWith("\\\\?\\") || upper.startsWith("\\\\.\\")) {
+        throw new Error("That folder is not a place for clips");
+    }
+    if (/(^|[\\/])[. ]+([\\/]|$)/.test(target.replace(/[\\/]+$/, ""))) {
+        throw new Error("That folder is not a place for clips");
+    }
 
     // The folder comes from the renderer, so it is never trusted with a
     // system location: clips have no business inside the OS, its program
@@ -67,7 +83,7 @@ function resolveDirectory(dir: string): string {
     // a custom folder the user typed - is theirs to keep.
     const needle = target.toLowerCase().replace(/[\\/]+$/, "");
     for (const root of forbiddenClipRoots()) {
-        const base = root.toLowerCase().replace(/[\\/]+$/, "");
+        const base = normalize(root).toLowerCase().replace(/[\\/]+$/, "");
         if (needle === base || needle.startsWith(`${base}\\`) || needle.startsWith(`${base}/`)) {
             throw new Error("That folder is not a place for clips");
         }
@@ -151,13 +167,18 @@ function freePath(dir: string, name: string): string {
     const ext = extname(name);
     const stem = name.slice(0, name.length - ext.length);
 
+    // Reserved-but-unwritten names count as taken: the native engine holds
+    // its file between reserve and write, and existsSync cannot see it.
+    // Without this two saves in the same second land on the same path and
+    // the second clobbers the first.
     let path = join(dir, name);
     let i = 2;
-    while (existsSync(path) && i < 1000) path = join(dir, `${stem} (${i++})${ext}`);
+    while ((existsSync(path) || reservedClipPaths.has(importKey(path))) && i < 1000) path = join(dir, `${stem} (${i++})${ext}`);
 
-    // Every suffix up to " (999)" is taken: returning the colliding name would
-    // silently overwrite it on the next write, so fail loudly instead.
-    if (existsSync(path)) throw new Error(`No free name left for ${name}; rename or clear the folder`);
+    // Every suffix up to " (999)" is taken, or the last one is only
+    // reserved: returning a colliding or reserved name would silently
+    // overwrite it on the next write, so fail loudly instead.
+    if (existsSync(path) || reservedClipPaths.has(importKey(path))) throw new Error(`No free name left for ${name}; rename or clear the folder`);
 
     return path;
 }
@@ -243,9 +264,11 @@ export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string
     const target = resolveDirectory(dir);
     mkdirSync(target, { recursive: true });
 
+    // The set holds folded keys (case-insensitive on Windows): the raw path
+    // goes back to the caller, the folded one guards it.
     const first = freePath(target, safeClipName(name));
-    if (!reservedClipPaths.has(first)) {
-        reservedClipPaths.add(first);
+    if (!reservedClipPaths.has(importKey(first))) {
+        reservedClipPaths.add(importKey(first));
         return first;
     }
 
@@ -254,9 +277,9 @@ export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string
 
     let i = 1;
     let next = `${stem}-${i}${ext}`;
-    while (reservedClipPaths.has(next) || existsSync(next)) next = `${stem}-${++i}${ext}`;
+    while (reservedClipPaths.has(importKey(next)) || existsSync(next)) next = `${stem}-${++i}${ext}`;
 
-    reservedClipPaths.add(next);
+    reservedClipPaths.add(importKey(next));
     return next;
 }
 
@@ -272,11 +295,13 @@ export function reserveClipPath(_: IpcMainInvokeEvent, dir: string, name: string
 export function releaseClipPath(_: IpcMainInvokeEvent, path: string): void {
     // Only reservations this plugin hands out: absolute paths to clip-like
     // files. Deleting anything else from the set is either a no-op or frees
-    // a name somebody else's save is still holding.
+    // a name somebody else's save is still holding. Normalized like the
+    // reservation itself, or an alternate spelling leaks a stale entry and
+    // later saves spuriously take a `-1` suffix.
     if (typeof path !== "string" || !isAbsolute(path)) return;
     if (!clipName(basename(path) ?? "")) return;
 
-    reservedClipPaths.delete(path);
+    reservedClipPaths.delete(importKey(path));
 }
 
 /*
@@ -649,7 +674,17 @@ export function restoreClip(_: IpcMainInvokeEvent, dir: string, stored: string):
         throw new Error("That clip is no longer in the trash");
     }
 
-    const name = freePath(target, entry.name).split(/[\\/]/).pop() || entry.name;
+    // The name comes out of a hand-editable index file: a `../` in there
+    // must not walk the restore out of the folder. clipName() flattens
+    // separators and refuses anything that is not a clip-like file name.
+    const restored = clipName(entry.name);
+    if (!restored) {
+        delete index[file];
+        writeTrashIndex(trash, index);
+        throw new Error("That trash entry names nothing restorable");
+    }
+
+    const name = freePath(target, restored).split(/[\\/]/).pop() || restored;
     renameSync(join(trash, file), join(target, name));
 
     const thumb = thumbNameFor(file);
@@ -947,6 +982,76 @@ export function writeLibrary(_: IpcMainInvokeEvent, dir: string, json: string): 
     renameSync(temp, path);
 }
 
+/**
+ * Absolute paths the user chose in an OS dialog.
+ *
+ * The import readers below deliberately leave the clip folder, so a bare
+ * "absolute path + right extension" check would let any caller read any
+ * matching file on disk. Every path a picker returns is registered here;
+ * the readers only serve registered paths.
+ *
+ * Persisted to the client's user data (capped): the clip sound, the shelf
+ * and saved projects keep absolute paths across restarts, and those paths
+ * were dialog-confirmed by the user on this machine - forgetting them
+ * every launch would break every persisted reference. A hand-edited file
+ * is the local user's own doing, same as their settings file.
+ */
+const IMPORTS_FILE = "clipper-imports.json";
+const MAX_IMPORT_PATHS = 200;
+const pickedImportPaths = new Set<string>();
+
+function importKey(path: string): string {
+    const normal = normalize(path);
+    // Windows paths compare case-insensitively: `C:\X\A.mp4` picked must
+    // match `c:\x\a.mp4` read back, or the same file fails closed.
+    return process.platform === "win32" ? normal.toLowerCase() : normal;
+}
+
+function persistImports(): void {
+    try {
+        writeFileSync(join(app.getPath("userData"), IMPORTS_FILE), JSON.stringify([...pickedImportPaths].slice(-MAX_IMPORT_PATHS)), "utf8");
+    } catch {
+        // Best effort: a missing file only means re-picking after a restart.
+    }
+}
+
+try {
+    const raw = readFileSync(join(app.getPath("userData"), IMPORTS_FILE), "utf8");
+    const saved = JSON.parse(raw);
+    if (Array.isArray(saved)) {
+        for (const p of saved.slice(-MAX_IMPORT_PATHS)) {
+            if (typeof p === "string" && isAbsolute(p)) pickedImportPaths.add(importKey(p));
+        }
+    }
+} catch {
+    // First run, or a hand-broken file: start empty.
+}
+
+function rememberPicked(paths: string[]): string[] {
+    let changed = false;
+    for (const p of paths) {
+        if (typeof p !== "string" || !isAbsolute(p)) continue;
+        const key = importKey(p);
+        if (!pickedImportPaths.has(key)) {
+            pickedImportPaths.add(key);
+            changed = true;
+        }
+    }
+    if (changed) persistImports();
+
+    return paths;
+}
+
+function requirePicked(path: string, what: string): string {
+    // Keyed the same way as registration, so `..\` spellings of a picked
+    // file do not fail the check and non-picked files cannot pass it.
+    if (typeof path !== "string" || !isAbsolute(path) || !pickedImportPaths.has(importKey(path))) {
+        throw new Error(`That ${what} was not picked for import`);
+    }
+
+    return path;
+}
+
 /** Native picker for videos to drop on the studio timeline. */
 export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
     const result = await dialog.showOpenDialog({
@@ -955,7 +1060,7 @@ export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         filters: [{ name: "Video", extensions: ["mp4", "webm", "mkv", "mov", "m4v"] }]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -969,7 +1074,8 @@ export async function pickVideoFiles(_: IpcMainInvokeEvent): Promise<string[]> {
 const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 
 export function readVideoFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(mp4|webm|mkv|mov|m4v)$/i.test(path)) {
+    requirePicked(path, "video");
+    if (!/\.(mp4|webm|mkv|mov|m4v)$/i.test(path)) {
         throw new Error("Not a video file");
     }
 
@@ -1000,7 +1106,7 @@ export async function pickAudioFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         filters: [{ name: "Audio", extensions: ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac", "webm"] }]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -1013,7 +1119,8 @@ export async function pickAudioFiles(_: IpcMainInvokeEvent): Promise<string[]> {
 const MAX_SOUND_BYTES = 64 * 1024 * 1024;
 
 export function readAudioFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(mp3|wav|ogg|opus|m4a|aac|flac|webm)$/i.test(path)) {
+    requirePicked(path, "audio file");
+    if (!/\.(mp3|wav|ogg|opus|m4a|aac|flac|webm)$/i.test(path)) {
         throw new Error("Not an audio file");
     }
 
@@ -1050,7 +1157,7 @@ export async function pickImageFiles(_: IpcMainInvokeEvent): Promise<string[]> {
         ]
     });
 
-    return result.canceled ? [] : result.filePaths;
+    return result.canceled ? [] : rememberPicked(result.filePaths);
 }
 
 /**
@@ -1066,7 +1173,8 @@ const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
 const MAX_OVERLAY_VIDEO_BYTES = 64 * 1024 * 1024;
 
 export function readImageFile(_: IpcMainInvokeEvent, path: string): Uint8Array {
-    if (!isAbsolute(path) || !/\.(png|jpe?g|webp|gif|avif|bmp|mp4|webm)$/i.test(path)) {
+    requirePicked(path, "picture or clip");
+    if (!/\.(png|jpe?g|webp|gif|avif|bmp|mp4|webm)$/i.test(path)) {
         throw new Error("Not a picture or a clip");
     }
 
@@ -1103,9 +1211,18 @@ export function getClipDirectory(_: IpcMainInvokeEvent, dir: string): string {
 
 /** Native folder picker. Returns the chosen path, or an empty string on cancel. */
 export async function pickClipDirectory(_: IpcMainInvokeEvent, current: string): Promise<string> {
+    // A forbidden or hand-edited current folder must not kill the dialog:
+    // the button is there exactly for the user stuck with such a folder.
+    let start: string;
+    try {
+        start = resolveDirectory(current);
+    } catch {
+        start = join(app.getPath("videos"), "DiscordClips");
+    }
+
     const result = await dialog.showOpenDialog({
         title: "Where should clips be saved?",
-        defaultPath: resolveDirectory(current),
+        defaultPath: start,
         properties: ["openDirectory", "createDirectory"]
     });
 

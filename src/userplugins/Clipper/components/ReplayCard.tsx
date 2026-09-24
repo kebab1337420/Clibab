@@ -19,7 +19,7 @@
  * on it.
  */
 
-import { Toasts, useEffect, useState } from "@webpack/common";
+import { Toasts, useEffect, useRef, useState } from "@webpack/common";
 
 import { CLIPS_AVAILABLE, loadClipUrl } from "../clips";
 import { shareClipLink } from "../linkShare";
@@ -44,6 +44,22 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
     const [busy, setBusy] = useState(false);
     const [step, setStep] = useState("");
     const [confirmDelete, setConfirmDelete] = useState(false);
+    const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // The "Sure?" arm resets itself, and never after unmount: the card
+    // dismisses itself on a timer, so a stray fire would set state gone.
+    useEffect(() => () => {
+        if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    }, []);
+
+    const armDelete = () => {
+        setConfirmDelete(true);
+        if (confirmTimer.current) clearTimeout(confirmTimer.current);
+        confirmTimer.current = setTimeout(() => {
+            confirmTimer.current = null;
+            setConfirmDelete(false);
+        }, 4000);
+    };
 
     useEffect(() => {
         // Loaded off disk for the card alone: the save lets go of the
@@ -128,13 +144,6 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                 <button disabled={busy} onClick={act(() => sendClipFitted(clip.name, setStep))}>Send</button>
                 <button
                     disabled={busy}
-                    title="Upload it and copy a share link instead of the file"
-                    onClick={act(() => shareClipLink(clip.name))}
-                >
-                    Link
-                </button>
-                <button
-                    disabled={busy}
                     title="The last few seconds, as a looping GIF small enough to post"
                     onClick={act(() => sendClipGif(clip.name, { onProgress: setStep }))}
                 >
@@ -142,7 +151,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                 </button>
                 <button
                     disabled={busy}
-                    title="Upload the whole clip and copy a link that plays in chat"
+                    title="Upload the whole clip to 0x0.st and copy a link that plays in chat"
                     onClick={act(() => shareClipLink(clip.name, setStep))}
                 >
                     Link
@@ -182,11 +191,14 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                         if (busy) return;
 
                         if (!confirmDelete) {
-                            setConfirmDelete(true);
-                            setTimeout(() => setConfirmDelete(false), 4000);
+                            armDelete();
                             return;
                         }
 
+                        if (confirmTimer.current) {
+                            clearTimeout(confirmTimer.current);
+                            confirmTimer.current = null;
+                        }
                         setConfirmDelete(false);
                         void act(() => recorder.discardLastSaved())();
                     }}

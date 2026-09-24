@@ -22,7 +22,7 @@ import { ClipperOverlay } from "./components/ClipperOverlay";
 import { encoderSummary, probeEncoders } from "./encoders";
 import { gameAudioReport } from "./gameAudio";
 import { gameEventReport, stopGameEvents, syncGameEvents } from "./gameEvents";
-import { hideGameOverlay } from "./gameOverlay";
+import { hideGameOverlay, toggleGameOverlay, watchLastClip } from "./gameOverlay";
 import { gameVideo } from "./gameVideo";
 import { runShortcut, startGlobalKeybinds, stopGlobalKeybinds, syncGlobalKeybinds } from "./globalKeybinds";
 import { micReport } from "./micInput";
@@ -61,7 +61,10 @@ function onKeyDown(e: KeyboardEvent) {
         if (!keybindMatches(bind, e)) continue;
 
         // A bare key must not fire while the user is writing a message.
-        const parsed = parseKeybind(bind)!;
+        // Parsed after the match: a corrupt bind matches nothing, so a null
+        // here would mean the matcher lied - skip rather than throw.
+        const parsed = parseKeybind(bind);
+        if (!parsed) continue;
         const bare = !parsed.ctrl && !parsed.shift && !parsed.alt && !parsed.meta;
         if (bare && isTypingTarget()) continue;
 
@@ -297,7 +300,7 @@ export default definePlugin({
         if (!extraStore.welcomedShown) {
             extraStore.welcomedShown = true;
             toast(
-                `Clipper is on. Pick a source from the chat-bar button to start recording (Alt+F10 drops a marker).${settings.store.autoStart ? "" : " The recording buffer stays off until you start it."}`,
+                `Clipper is on. Pick a source from the chat-bar button to start recording (Ctrl+Alt+F11 drops a marker).${settings.store.autoStart ? "" : " The recording buffer stays off until you start it."}`,
                 Toasts.Type.MESSAGE,
                 8000
             );

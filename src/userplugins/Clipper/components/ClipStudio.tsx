@@ -3866,7 +3866,15 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                 };
 
                 opened.push(item);
-                picks.push({ sourceId: item.id, from: range.start, to: range.end, markers: meta[clip.name]!.markers! });
+                // A clip that lost its tags between the filter above and this
+                // read is skipped, not crashed on: one stale entry must not
+                // fail the whole montage.
+                const markers = meta[clip.name]?.markers ?? [];
+                if (!markers.length) {
+                    drop(source.url);
+                    continue;
+                }
+                picks.push({ sourceId: item.id, from: range.start, to: range.end, markers });
             }
         } catch (e) {
             opened.forEach(item => drop(item.url));

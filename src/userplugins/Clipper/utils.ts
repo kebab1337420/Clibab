@@ -232,6 +232,29 @@ export function isTypingTarget(): boolean {
     return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
 }
 
+/**
+ * True on a Linux client.
+ *
+ * userAgentData is Chromium-only and exact; navigator.platform covers the
+ * rest ("Linux x86_64", "Linux armv8l"...). Needed because loopback audio
+ * through Chromium exists only on Windows: on Linux the silent capture
+ * paths come back without a sound track, and the plugin must notice.
+ */
+export function isLinux(): boolean {
+    try {
+        const branded = (navigator as Navigator & { userAgentData?: { platform?: string; }; }).userAgentData?.platform;
+        if (typeof branded === "string" && branded) return branded.toLowerCase().includes("linux");
+    } catch {
+        // Non-Chromium client: fall through to the legacy platform string.
+    }
+
+    try {
+        return navigator.platform.toLowerCase().startsWith("linux");
+    } catch {
+        return false;
+    }
+}
+
 /** A position on a timeline, e.g. "1:07.5". */
 export function formatTime(seconds: number): string {
     // NaN and Infinity make no sensible position; a zero time is the honest
