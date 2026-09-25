@@ -13,7 +13,7 @@
 
 import { createHash, randomBytes } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
-import { accessSync, closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { accessSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { get as httpsGet } from "https";
 import { tmpdir } from "os";
 import { basename, extname, isAbsolute, join, normalize } from "path";
@@ -2033,7 +2033,8 @@ interface ManifestEntry {
 }
 
 /**
- * The file list a build left behind, or null for a release published without one.
+ * The file list a build left behind, plus the raw manifest text, or null for
+ * a release published without one.
  *
  * Only a 404 answers null. Everything else - a rate limit, a proxy's error page,
  * a body that is not the JSON it should be - throws, because this list is what
@@ -2041,8 +2042,12 @@ interface ManifestEntry {
  * manifest" would fall back to the unchecked path and install a bundle nothing
  * was compared against, and the moment that happens is exactly the moment
  * something is interfering with the fetch.
+ *
+ * The raw text rides along so a verified install can leave a hash-checked
+ * recovery copy behind (see writeRecoverySnapshot): it is the same
+ * prebuilt/build-info.json install.bat --repair checks the cache against.
  */
-async function fetchManifest(tag: string): Promise<Record<string, ManifestEntry> | null> {
+async function fetchManifest(tag: string): Promise<{ files: Record<string, ManifestEntry>; text: string; } | null> {
     const { status, body } = await httpGet(`https://raw.githubusercontent.com/${UPDATE_REPO}/${tag}/prebuilt/build-info.json`);
     if (status === 404) return null;
     if (status !== 200) throw new Error(`The release's file list answered ${status}, so there is nothing to check the bundle against`);
@@ -2056,7 +2061,7 @@ async function fetchManifest(tag: string): Promise<Record<string, ManifestEntry>
 
     if (!files || typeof files !== "object") throw new Error("The release's file list names no files");
 
-    return files as Record<string, ManifestEntry>;
+    return { files: files as Record<string, ManifestEntry>, text: body.toString("utf8") };
 }
 
 /**
@@ -2083,7 +2088,7 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, install
     if (!bundleInstalled(dir)) throw new Error(`No installed bundle at ${dir}`);
     if (!canWrite(dir)) throw new Error(`${dir} is read-only`);
 
-    const manifest = await fetchManifest(tag);
+    const fetched = await fetchManifest(tag);
 
     /*
      * No file list, no integrity check: the manifest is what carries the sizes
@@ -2091,8 +2096,10 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, install
      * exactly the moment a tampered or mislabeled release gets in. A release
      * published without one is skipped, not forgiven.
      */
-    if (!manifest) throw new Error(`The release under ${tag} carries no file list; refusing to install it unchecked`);
+    if (!fetched) throw new Error(`The release under ${tag} carries no file list; refusing to install it unchecked`);
 
+    const manifest = fetched.files;
+    const manifestText = fetched.text;
     const names = Object.keys(manifest);
 
     // Unpredictable, and never shared: a fixed staging name lets anything
@@ -2199,9 +2206,50 @@ export async function downloadUpdate(_: IpcMainInvokeEvent, tag: string, install
             throw new Error(`The update could not be put in place (${(e as Error).message}). The bundle that was there has been put back.`);
         }
 
+        // The swap above only ran after every byte matched the manifest, so
+        // what is live now is known good: leave a copy for install.bat
+        // --repair, which prefers it over a re-download. Best effort only -
+        // the update is installed either way.
+        try {
+            writeRecoverySnapshot(dir, tag, written, manifestText);
+        } catch {
+            // A cache miss just means repair falls back to prebuilt\dist or
+            // the release; never fail an installed update over it.
+        }
+
         return written;
     } finally {
         rmSync(staging, { recursive: true, force: true });
+    }
+}
+
+/**
+ * Copies a just-installed bundle beside the live folder, for repair.
+ *
+ * The snapshot lands in `<installDir>/.recovery-<version>/`, a sibling of the
+ * loaded dist folder and never inside it: writing it into dist would put
+ * repair data where the client loads (and where Vencord's own updater walks).
+ * The raw build-info.json rides along so repair can hash-check every file it
+ * restores, same as an install. Only one version is kept: snapshots are whole
+ * bundles each, and an older one is exactly what a repair must not restore.
+ */
+function writeRecoverySnapshot(dir: string, tag: string, names: string[], manifestText: string): void {
+    const version = tag.replace(/^v/i, "");
+    if (!/^[\w.-]{1,40}$/.test(version)) return;
+
+    const parent = join(dir, "..");
+    const recovery = join(parent, `.recovery-${version}`);
+    mkdirSync(recovery, { recursive: true });
+
+    for (const name of names) {
+        if (name !== basename(name) || name.startsWith(".")) continue;
+        copyFileSync(join(dir, name), join(recovery, name));
+    }
+    writeFileSync(join(recovery, "build-info.json"), manifestText);
+
+    for (const entry of readdirSync(parent)) {
+        if (entry === `.recovery-${version}` || !entry.startsWith(".recovery-")) continue;
+        rmSync(join(parent, entry), { recursive: true, force: true });
     }
 }
 

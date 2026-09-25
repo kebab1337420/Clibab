@@ -62,9 +62,9 @@ test("invalid clip durations retain a finite default buffer", () => {
         assert.deepEqual([1000, 50_000, 80_000, 99_000].filter(at => at >= cutoff), [80_000, 99_000]);
     }
     assert.equal(retention(1), 5);
-    assert.equal(retention(300), 300);
+    assert.equal(retention(300), 150);
     assert.equal(retention(60.5), 60.5);
-    assert.equal(retention(1e9), 600);
+    assert.equal(retention(1e9), 150);
 });
 
 const event = {

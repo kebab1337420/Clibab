@@ -19,6 +19,7 @@
  */
 
 import { settings } from "./settings";
+import { MAX_CLIP_SECONDS } from "./utils";
 
 export interface GameProfile {
     fps: number;
@@ -111,7 +112,7 @@ export function applyProfile(game: string): boolean {
     settings.store.fps = profile.fps;
     settings.store.resolution = profile.resolution;
     settings.store.videoBitrate = profile.bitrate;
-    settings.store.clipLength = profile.length;
+    settings.store.clipLength = Math.min(profile.length, MAX_CLIP_SECONDS);
 
     return true;
 }

@@ -6,6 +6,7 @@ REM  Clipper - Vencord user plugin installer
 REM
 REM  Usage:
 REM    install.bat                    prebuilt install (no tools needed)
+REM    install.bat --repair           re-verify the bundle and stubs, fixing wipes
 REM    install.bat --uninstall        undo it
 REM    install.bat --source [path]    build from a Vencord checkout instead
 REM
@@ -26,6 +27,8 @@ set "VENCORD_DIR="
 if /i "%~1"=="--source" (
     set "MODE=source"
     set "VENCORD_DIR=%~2"
+) else if /i "%~1"=="--repair" (
+    set "MODE=repair"
 ) else if /i "%~1"=="--uninstall" (
     set "MODE=uninstall"
 ) else if not "%~1"=="" (
@@ -39,6 +42,7 @@ echo === Clipper installer ===
 echo.
 
 if "%MODE%"=="uninstall" goto :uninstall
+if "%MODE%"=="repair" goto :repair
 if "%MODE%"=="source" goto :source
 
 REM ============================================================
@@ -62,6 +66,21 @@ echo Start Discord (or Vesktop), then enable "Clipper" in Settings ^> Vencord ^>
 echo Default keybinds:  Ctrl+Alt+F9 start/stop buffer, Ctrl+Alt+F10 save clip.
 echo.
 echo Undo with:  install.bat --uninstall
+echo.
+pause
+exit /b 0
+
+REM ============================================================
+REM  Repair (re-verifies the bundle and the client stubs in place)
+REM ============================================================
+:repair
+echo Verifying the Clipper bundle and client stubs...
+echo Fully quit Discord and Vesktop first (check the tray).
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-prebuilt.ps1" -Repair
+if errorlevel 1 goto :fail
+echo.
+echo Repaired. Start Discord again, then check Settings ^> Vencord ^> Plugins.
 echo.
 pause
 exit /b 0

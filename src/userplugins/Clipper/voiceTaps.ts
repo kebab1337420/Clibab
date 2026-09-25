@@ -105,6 +105,9 @@ const speaking = new Set<string>();
 /** userId -> rolling 0/1 speaking history, aligned with every tap's energy. */
 const speech = new Map<string, number[]>();
 
+/** Which connection each tap came from, so tearing the call down drops its taps. */
+const pcTaps = new WeakMap<RTCPeerConnection, Set<string>>();
+
 let ctx: AudioContext | null = null;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let counter = 0;
@@ -155,7 +158,7 @@ const onSpeaking = (event: any) => {
  * silence in Chromium, and does. Playing it at zero volume keeps the pipeline
  * pulling without adding a second copy of the call to the speakers.
  */
-function register(track: MediaStreamTrack) {
+function register(track: MediaStreamTrack, owner?: RTCPeerConnection) {
     // A peer connection opened while the patch was up keeps its listener after
     // an uninstall, and a track that lands on it afterwards must not open a tap
     // the uninstall already looked away from: nothing would ever tear it down.
@@ -201,6 +204,11 @@ function register(track: MediaStreamTrack) {
         };
 
         tracked.set(id, entry);
+        if (owner) {
+            const owned = pcTaps.get(owner) ?? new Set<string>();
+            owned.add(id);
+            pcTaps.set(owner, owned);
+        }
         track.addEventListener("ended", () => drop(id));
 
         // Started once tracked: a play() rejection leaves a registered entry
@@ -235,6 +243,21 @@ function drop(id: string): void {
 }
 
 /**
+ * Drops every tap opened on one connection.
+ *
+ * Called when the connection reports `closed` or `failed`: the renderer is
+ * tearing the RTC machinery down, and a tap whose WebAudio graph still anchors a
+ * track the native side is freeing is exactly the shape of the renderer crash
+ * this module used to cause on desktop. Detach before the teardown proceeds.
+ */
+function dropFor(owner: RTCPeerConnection): void {
+    const ids = pcTaps.get(owner);
+    if (!ids) return;
+    pcTaps.delete(owner);
+    for (const id of ids) drop(id);
+}
+
+/**
  * Powers the tap layer down when nothing is left to sample.
  *
  * An AudioContext holds an audio thread and a device handle whether anything
@@ -253,7 +276,14 @@ function idle(): void {
 
 /** Loudness of one tap right now, as a plain RMS over the latest frame. */
 function loudness(entry: Tracked): number {
-    entry.analyser.getFloatTimeDomainData(entry.frame);
+    // getFloatTimeDomainData throws once the analyser is detached underneath us
+    // (the connection was dropped mid-tick). A closed tap reads as silence and
+    // the next sweep drops it rather than killing the tick.
+    try {
+        entry.analyser.getFloatTimeDomainData(entry.frame);
+    } catch {
+        return 0;
+    }
 
     let sum = 0;
     for (let i = 0; i < entry.frame.length; i++) sum += entry.frame[i] * entry.frame[i];
@@ -360,8 +390,17 @@ function tick() {
     // session, so an idle call should not walk even that much.
     if (!tracked.size) return;
 
-    for (const entry of tracked.values()) {
+    for (const [id, entry] of tracked) {
         if (entry.dead) continue;
+
+        // The ended event can be missed when the connection is torn down hard;
+        // the track's own state is the ground truth and sweeping it here keeps
+        // a dead tap from being sampled for ever.
+        if (entry.tap.track.readyState === "ended") {
+            drop(id);
+            continue;
+        }
+
         push(entry.energy, loudness(entry));
     }
 
@@ -385,12 +424,27 @@ function tick() {
 /**
  * Wraps `RTCPeerConnection` so every connection the client opens is watched.
  *
+ * On official Discord desktop this wrapper is deliberately never installed.
+ * Desktop voice runs through the native `discord_voice` module, so the renderer
+ * connections that still exist (the secure-call DAVE/MLS connections) carry no
+ * per-person MediaStream for us to tap — zero taps ever open there. Wrapping
+ * them anyway interposes this constructor on Discord's own connection machinery
+ * for nothing, and the construction/negotiation of exactly such a connection is
+ * what the renderer crash on this codebase coincided with (EXCEPTION_BREAKPOINT
+ * on every voice call). So the swap happens only where WebRTC is the real call
+ * transport (Vesktop, browsers); on desktop we say so and do nothing.
+ *
  * Transparent on purpose: the wrapper hands back a real connection and keeps the
  * prototype, so nothing Discord does with it can tell the difference. Anything
  * thrown while observing is swallowed, because breaking the constructor breaks
  * voice for the whole client.
  */
 function patch() {
+    if (IS_DISCORD_DESKTOP) {
+        logger.info("Official Discord desktop: per-person audio is not reachable (native voice module, nothing to tap)");
+        return;
+    }
+
     const native = window.RTCPeerConnection;
     if (typeof native !== "function") {
         logger.info("No WebRTC on this client: per-person audio is not reachable");
@@ -405,10 +459,13 @@ function patch() {
         try {
             pc.addEventListener("track", (event: RTCTrackEvent) => {
                 try {
-                    if (event.track?.kind === "audio") register(event.track);
+                    if (event.track?.kind === "audio") register(event.track, pc);
                 } catch (e) {
                     logger.warn("Could not handle an incoming track", e);
                 }
+            });
+            pc.addEventListener("connectionstatechange", () => {
+                if (pc.connectionState === "closed" || pc.connectionState === "failed") dropFor(pc);
             });
         } catch (e) {
             logger.warn("Could not observe a peer connection", e);
