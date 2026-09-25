@@ -35,9 +35,14 @@ export function captureHeight(value: unknown): number {
     return Math.round(value);
 }
 
+// Hard cap: buffers longer than this tank game FPS (continuous capture,
+// memory, disk spill). Everything clip-length related flows through
+// clipRetentionSeconds, so this one number is the whole policy.
+export const MAX_CLIP_SECONDS = 150;
+
 export function clipRetentionSeconds(value: unknown): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 30;
-    return Math.min(600, Math.max(5, value));
+    return Math.min(MAX_CLIP_SECONDS, Math.max(5, value));
 }
 
 export interface Keybind {

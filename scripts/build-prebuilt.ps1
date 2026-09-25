@@ -74,6 +74,21 @@ if (-not (Test-Path (Join-Path $dist "patcher.js"))) {
     exit 1
 }
 
+# ---- standalone guard --------------------------------------------------------
+# A --standalone bundle carries Vencord's http updater, which downloads and
+# rebuilds the dist folder in place: the first official Vencord update would
+# wipe Clipper out of clipper\dist and leave stock Vencord behind. The plain
+# (non-standalone) build instead uses the git updater, which fails safe in a
+# folder without git - which clipper\dist is - so Vencord's own updater stays
+# ON without ever touching the bundle. Whatever produced a standalone dist,
+# refuse to ship it.
+$standaloneHeader = (Get-Content (Join-Path $dist "patcher.js") -TotalCount 4) -join "`n"
+if ($standaloneHeader -notmatch "// Standalone: false") {
+    Write-Host "[ERROR] $dist looks like a --standalone build (no '// Standalone: false' in patcher.js)."
+    Write-Host "        The standalone http updater would wipe clipper\dist in place - ship the plain build instead."
+    exit 1
+}
+
 if (Test-Path $prebuilt) { Remove-Item $prebuilt -Recurse -Force }
 New-Item -ItemType Directory -Force $prebuilt | Out-Null
 

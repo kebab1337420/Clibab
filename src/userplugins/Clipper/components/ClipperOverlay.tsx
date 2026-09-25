@@ -30,7 +30,7 @@ import { Container, settings } from "../settings";
 import { deleteProfile, hasProfile, matchesProfile, saveProfile } from "../profiles";
 import { runningGame } from "../game";
 import { toast } from "../toasts";
-import { formatBytes, formatTime, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
+import { formatBytes, formatTime, MAX_CLIP_SECONDS, TRIM_CUTS, CAPTURE_PRESETS, type CapturePreset } from "../utils";
 import { ClipStudio, STUDIO_CSS } from "./ClipStudio";
 import { ReplayCard } from "./ReplayCard";
 import { SimpleStudio } from "./SimpleStudio";
@@ -706,7 +706,7 @@ function CaptureOptions() {
         settings.store.fps = preset.fps;
         settings.store.resolution = preset.resolution;
         settings.store.videoBitrate = preset.bitrate;
-        settings.store.clipLength = preset.length;
+        settings.store.clipLength = Math.min(preset.length, MAX_CLIP_SECONDS);
         settings.store.container = preset.container as Container;
         restartIfLive();
         toast(`Preset ${preset.label}: ${preset.resolution}p${preset.fps} at ${preset.bitrate}Mbps for ${preset.length}s`, Toasts.Type.SUCCESS);
@@ -789,7 +789,7 @@ function CaptureOptions() {
                 <input
                     type="range"
                     min={10}
-                    max={300}
+                    max={150}
                     step={5}
                     value={clipLength}
                     onChange={e => (settings.store.clipLength = Number(e.currentTarget.value))}

@@ -32,7 +32,7 @@ import { adoptOrphans, logger, recorder } from "./recorder";
 import { settings } from "./settings";
 import { toast } from "./toasts";
 import { checkAtLaunch } from "./updater";
-import { isTypingTarget, keybindMatches, keybindsSuspended, parseKeybind } from "./utils";
+import { isTypingTarget, keybindMatches, keybindsSuspended, MAX_CLIP_SECONDS, parseKeybind } from "./utils";
 import { installVoiceTaps, probeVoiceTaps, uninstallVoiceTaps } from "./voiceTaps";
 import { stopVr, syncVr, vrReport } from "./vr";
 
@@ -272,6 +272,8 @@ export default definePlugin({
 
     start() {
         migrateReloadKeybinds();
+        // Legacy stored values (or old game profiles) could exceed the cap.
+        if (settings.store.clipLength > MAX_CLIP_SECONDS) settings.store.clipLength = MAX_CLIP_SECONDS;
         void adoptOrphans();
 
         // Before anything else opens a connection: a call already running when
