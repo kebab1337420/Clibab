@@ -77,9 +77,11 @@ const MEMORY_WATCH_MS = 60_000;
  *
  * Well under what a 64-bit process can address, and well over anything a client
  * that is merely busy reaches: the crashes this watches for arrive with one
- * process far out ahead of the rest.
+ * process far out ahead of the rest. At 1.4GB the renderer still has room to
+ * assemble a save's transient copies before the ~2-4GB kill zone, so the toast
+ * lands while acting on it is still possible.
  */
-const MEMORY_WARN_MB = 2_000;
+const MEMORY_WARN_MB = 1_400;
 
 /** How long an automatic highlight save waits before it may fire again. */
 const AUTO_SAVE_MS = 120_000;
@@ -100,22 +102,26 @@ const GAME_RESTART_COOLDOWN_MS = 10_000;
 /**
  * Largest rolling buffer held in memory, in bytes.
  *
- * Time alone lets a high bitrate hold gigabytes (50Mbps x 300s is ~1.9GB
- * in one-second blobs), and every save copies the whole of it several times
- * over. Past this the oldest chunks go even when their time has not come.
+ * The renderer dies long before the old targets: Chromium reloads a
+ * ~2-4GB renderer, and a save at 512MB assembles ~2.5-3GB of transient
+ * copies on top of the buffer itself. Time alone lets a high bitrate hold
+ * gigabytes (50Mbps x 300s is ~1.9GB in one-second blobs), so this is the
+ * last line: past it the oldest chunks go even when their time has not come.
+ * The spill keeps most of those in RAM from ever existing.
  */
-const MAX_BUFFER_BYTES = 512 * 1024 * 1024;
+const MAX_BUFFER_BYTES = 128 * 1024 * 1024;
 
 /**
  * Past this many buffered bytes the oldest chunks spill to disk instead of
  * staying in RAM.
  *
- * Half the byte cap on purpose: the buffer keeps rolling in memory underneath
- * while a save assembles several copies of it at once, so spilling early
- * leaves headroom for the save itself instead of arriving exactly when the
- * client is already at its limit.
+ * Far below the byte cap on purpose: the buffer keeps rolling in memory
+ * underneath while a save assembles several copies of it at once. Spilling
+ * early is what keeps a long sweet-long recording resident on disk instead
+ * of as RAM, so a save never has to copy hundreds of megabytes that were
+ * sat in memory the whole time it was recording.
  */
-const SPILL_AT_BYTES = 256 * 1024 * 1024;
+const SPILL_AT_BYTES = 64 * 1024 * 1024;
 
 /**
  * How far past the asked length a native clip may run before it is cut back.
@@ -129,9 +135,10 @@ const NATIVE_LENGTH_SLACK_S = 5;
 /**
  * The native clip engine keeps capture surfaces and encoder state outside the
  * JS heap. Recycle it before that native allocation can grow until Discord
- * reloads the renderer.
+ * reloads the renderer; on a low-memory client do it a third sooner than the
+ * renderer-side warning.
  */
-const NATIVE_RESET_MS = 30 * 60_000;
+const NATIVE_RESET_MS = 20 * 60_000;
 
 type Listener = (state: RecorderState) => void;
 
