@@ -47,7 +47,7 @@ function sane(profile: GameProfile): boolean {
 }
 
 /** The profile saved for this game, if any. */
-export function profileFor(game: string): GameProfile | null {
+function profileFor(game: string): GameProfile | null {
     if (!game.trim()) return null;
 
     const found = readAll()[key(game)];

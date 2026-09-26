@@ -53,6 +53,26 @@ export interface Keybind {
     meta: boolean;
 }
 
+/**
+ * Fetches a URL into bytes, with a timeout.
+ *
+ * A stalled read neither resolves nor rejects, so awaiting the raw fetch
+ * parks the caller forever - "Downloading…" that never ends. The abort turns
+ * a stall into an error the caller already handles.
+ */
+export async function fetchArrayBuffer(url: string, timeoutMs = 30_000): Promise<ArrayBuffer> {
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), timeoutMs);
+
+    try {
+        const response = await fetch(url, { signal: control.signal });
+        if (!response.ok) throw new Error(`That file came back ${response.status} instead of downloading`);
+        return await response.arrayBuffer();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 /** Serializes a keybind to a stable string, e.g. "ctrl+shift+KeyS". */
 export function serializeKeybind(kb: Keybind): string {
     const parts: string[] = [];
@@ -530,6 +550,12 @@ export function seekVideo(
 
         const timer = setTimeout(settle, timeout);
         video.addEventListener("seeked", settle);
-        video.currentTime = at;
+        try {
+            video.currentTime = at;
+        } catch {
+            // Detached element or empty source: the setter throws synchronously
+            // instead of seeking, so settle now rather than hanging to the timeout.
+            settle();
+        }
     });
 }

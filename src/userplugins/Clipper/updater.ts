@@ -74,6 +74,15 @@ const listeners = new Set<() => void>();
  */
 let flight: Promise<UpdateInfo | null> | null = null;
 
+/**
+ * Consecutive install failures whose message blamed the checksum.
+ *
+ * A poisoned cache fails the same way every time, so the second one in a row
+ * stops saying "retry" and points at a fresh checkout instead. Reset by any
+ * successful install.
+ */
+let hashFailures = 0;
+
 export function updateState(): UpdateState {
     return state;
 }
@@ -120,13 +129,21 @@ function extraStore(): ExtraStore {
  * Turns a raw failure into something to do about it.
  *
  * The native side throws technical errors (errno names, HTTP codes); those go
- * to the log, while the user gets the one action that helps.
+ * to the log, while the user gets the one action that helps. A hash or
+ * checksum failure twice in a row means the cached download is poisoned, not
+ * merely interrupted: retrying the same bytes loops forever, so the second
+ * failure points at a fresh checkout instead.
  */
-function friendlyUpdateError(raw: string): string {
+function friendlyUpdateError(raw: string, hashFailures = 0): string {
     const text = raw.toLowerCase();
     if (text.includes("eacces") || text.includes("eperm") || text.includes("access is denied") || text.includes("permission"))
         return "Clipper could not write the new files — re-run install.bat as admin, then try again.";
-    if (text.includes("404") || text.includes("not found") || text.includes("hash") || text.includes("checksum") || text.includes("mismatch"))
+    if (text.includes("hash") || text.includes("checksum") || text.includes("mismatch")) {
+        if (hashFailures > 1)
+            return "The download keeps failing its check — run install.bat --repair for a fresh copy instead of retrying.";
+        return "The download failed its check, retry in a moment.";
+    }
+    if (text.includes("404") || text.includes("not found"))
         return "The download failed, retry in a moment.";
     if (text.includes("403") || text.includes("rate") || text.includes("limit") || text.includes("busy"))
         return "GitHub is busy, retry in an hour.";
@@ -227,12 +244,16 @@ export async function installUpdate(info: UpdateInfo, quiet = false): Promise<bo
         // a restart is owed. Cleared once the new bundle is seen running.
         extraStore().pendingRestartVersion = info.version;
         change({ restartNeeded: true });
+        hashFailures = 0;
         offerRestart(info);
 
         return true;
     } catch (e) {
         logger.error("Could not install the update", e);
-        const reason = friendlyUpdateError(errorMessage(e));
+        const message = errorMessage(e);
+        const hashFailure = /hash|checksum|mismatch/i.test(message);
+        if (hashFailure) hashFailures += 1;
+        const reason = friendlyUpdateError(message, hashFailures);
         change({ error: reason });
         toast(`Could not install Clipper ${info.version}: ${reason}`, Toasts.Type.FAILURE);
 

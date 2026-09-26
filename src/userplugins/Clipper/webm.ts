@@ -342,9 +342,11 @@ function emit(data: Uint8Array, clusters: Cluster[], from: number, to: number): 
  * instant and lossless whatever the length of the clip.
  *
  * Returns null when the data is not a live WebM or when the range covers the
- * whole of it, in which case the caller keeps the original bytes.
+ * whole of it, in which case the caller keeps the original bytes. Otherwise
+ * the kept bytes plus their real length, measured in the same pass so the
+ * caller never walks the buffer again to weigh what came back.
  */
-export function trimWebm(data: Uint8Array, fromMs: number, toMs: number): Uint8Array | null {
+export function trimWebm(data: Uint8Array, fromMs: number, toMs: number): { bytes: Uint8Array; length: number } | null {
     const clusters = scanClusters(data);
     if (!clusters) return null;
 
@@ -364,7 +366,10 @@ export function trimWebm(data: Uint8Array, fromMs: number, toMs: number): Uint8A
 
     if (start === 0 && end === clusters.length - 1) return null;
 
-    return emit(data, clusters, start, end);
+    return {
+        bytes: emit(data, clusters, start, end),
+        length: Math.max(0, clusters[end].timecode - clusters[start].timecode) / 1000
+    };
 }
 
 /**
@@ -410,15 +415,4 @@ export function repairWebm(data: Uint8Array): { bytes: Uint8Array | null; droppe
         dropped: changed ? Math.max(0, (clusters[start].timecode - clusters[0].timecode) / 1000) : 0,
         length: Math.max(0, (clusters[clusters.length - 1].timecode - clusters[start].timecode) / 1000)
     };
-}
-
-/**
- * The rebased bytes, or null when there is nothing to fix.
- *
- * Kept for the callers that only need the bytes: the repair above answers
- * with the dropped seconds and the length as well, which is what the save
- * path walks the buffer once for.
- */
-export function rebaseWebm(data: Uint8Array): Uint8Array | null {
-    return repairWebm(data).bytes;
 }

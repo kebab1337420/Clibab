@@ -118,7 +118,7 @@ export async function sendClipRange(name: string, from: number, to: number): Pro
         const stem = name.replace(/\.[^.]+$/, "");
         const extension = name.split(".").pop() || "webm";
 
-        return attachAndWarn(new File([cut as BlobPart], `${stem}-cut.${extension}`, { type }), name);
+        return attachAndWarn(new File([cut.bytes as BlobPart], `${stem}-cut.${extension}`, { type }), name);
     } catch (e) {
         logger.error("Could not attach the selection", e);
         toast("Could not read that clip (file moved or deleted?).", Toasts.Type.FAILURE);

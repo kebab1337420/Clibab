@@ -59,7 +59,12 @@ foreach ($dir in $dataDirs) {
             Write-Host "      [!] $stateFile is not readable JSON, it will be replaced (backup kept)."
         }
 
-        Copy-Item $stateFile "$stateFile.bak" -Force
+        try {
+            Copy-Item $stateFile "$stateFile.bak" -Force
+        } catch {
+            Write-Host "      [!] Could not back up $stateFile, skipping it - $($_.Exception.Message)"
+            continue
+        }
     }
 
     if ($state["vencordDir"] -eq $dist) {

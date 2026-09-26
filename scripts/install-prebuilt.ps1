@@ -65,7 +65,10 @@ function New-AsarStub([string] $path, [string] $patcher, [string] $fallback = ""
         $jsonBytes = [Text.Encoding]::UTF8.GetBytes($json)
     }
 
-    $stream = [IO.File]::Create($path)
+    # Through a temp file plus rename: a crash mid-write must never leave a
+    # truncated stub behind, or the client will not boot.
+    $temp = "$path.new"
+    $stream = [IO.File]::Create($temp)
     try {
         $writer = [IO.BinaryWriter]::new($stream)
         $writer.Write([uint32] 4)
@@ -79,6 +82,8 @@ function New-AsarStub([string] $path, [string] $patcher, [string] $fallback = ""
     } finally {
         $stream.Dispose()
     }
+
+    Move-Item $temp $path -Force
 }
 
 # Reads the patcher path out of a stub asar, or $null when the file is a real asar.
@@ -514,7 +519,12 @@ foreach ($root in $discordRoots) {
         $patched++
     } catch {
         Write-Host "      [!] $name could not be patched - $($_.Exception.Message)"
-        if (-not (Test-Path $asar)) { Move-Item $original $asar -Force }
+        # Restore the untouched original whenever the stub is missing OR a
+        # truncated write: a half-written stub is a client that will not boot.
+        if ((-not (Test-Path $asar)) -or ((Get-Item $asar).Length -lt 4096)) {
+            if (Test-Path $asar) { Remove-Item $asar -Force }
+            Move-Item $original $asar -Force
+        }
         $skipped += $name
     }
 }

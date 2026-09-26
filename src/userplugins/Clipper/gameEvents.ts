@@ -137,7 +137,14 @@ async function pump(mine: number): Promise<void> {
         let event: GameEvent | null = null;
 
         try {
-            event = await Native.waitForGameEvent();
+            // The native park has no timeout of its own: without the race a
+            // stop during the park would dangle this loop past plugin stop,
+            // because the await below would never settle to notice. The timer
+            // only re-checks the generation; a late native answer is harmless.
+            event = await Promise.race([
+                Native.waitForGameEvent(),
+                new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000))
+            ]);
         } catch (e) {
             logger.warn("The game integration listener failed, retrying", e);
             await new Promise(r => setTimeout(r, 5000));

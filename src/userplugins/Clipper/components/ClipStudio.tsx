@@ -37,6 +37,7 @@ import {
 } from "../audio";
 import type { ChatLine } from "../chat";
 import {
+    emptyTrash,
     frameName,
     listClips,
     listTrash,
@@ -53,7 +54,6 @@ import {
     renameClip,
     renderName,
     restoreClip,
-    emptyTrash,
     revealClip,
     saveFrame,
     type StoredClip,
@@ -71,10 +71,10 @@ import {
     setMeta,
     UNCATEGORISED
 } from "../library";
+import { shareClipLink } from "../linkShare";
 import { logger, recorder } from "../recorder";
 import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
-import { shareClipLink } from "../linkShare";
 import { Container, extensionFor, pickMimeType, settings } from "../settings";
 import {
     type AngleLayout,
@@ -82,7 +82,6 @@ import {
     bestOf,
     type Caption,
     cutRange,
-    previewSilence,
     decodeImage,
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -103,6 +102,7 @@ import {
     overlayBox,
     overlaySounds,
     paintFrame,
+    previewSilence,
     type Project,
     projectEnding,
     projectLength,
@@ -122,8 +122,7 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { findDuplicates, formatBytes, formatTime, type ClipEntry } from "../utils";
-import { chaptersOf, formatBytes, formatTime } from "../utils";
+import { chaptersOf, type ClipEntry,fetchArrayBuffer, findDuplicates, formatBytes, formatTime } from "../utils";
 import { fromMeta, mutedFraction, VOICE_HZ, voiceDuckAt, voiceGainOf, voiceLevelsTouched, type VoiceTrack } from "../voice";
 import { createVoiceBand, type VoiceBand } from "../voiceBand";
 import { forgetVoiceMixes, type VoiceMix, voiceMixFor } from "../voiceMix";
@@ -1961,6 +1960,17 @@ function PlayheadScope({ video, live, transport, timeIn, timeRest, ruler, sounds
     useEffect(() => {
         let frame = 0;
 
+        /*
+         * The three head markers are queried once and then moved in place: the
+         * queries used to run on every animation frame. isConnected guards the
+         * cache because React can swap the timeline DOM under it; the lane row
+         * is re-queried whenever its count changes for the same reason.
+         */
+        let rulerHead: HTMLElement | null = null;
+        let soundHead: HTMLElement | null = null;
+        let laneHeads: NodeListOf<HTMLElement> | null = null;
+        let laneCount = -1;
+
         const tick = () => {
             frame = requestAnimationFrame(tick);
 
@@ -2003,19 +2013,24 @@ function PlayheadScope({ video, live, transport, timeIn, timeRest, ruler, sounds
              * moved in place rather than re-rendered. Exactly the same
              * percentage - and clamp - each component's own render applies.
              */
-            const rulerHead = ruler.current?.querySelector<HTMLElement>(".vc-clipper-ruler-head");
+            if (!rulerHead || !rulerHead.isConnected)
+                rulerHead = ruler.current?.querySelector<HTMLElement>(".vc-clipper-ruler-head") ?? null;
             if (rulerHead) {
                 const span = Math.max(0.5, total);
                 rulerHead.style.left = `${(Math.max(0, Math.min(span, inside)) / span) * 100}%`;
             }
 
-            const soundHead = sounds.current?.querySelector<HTMLElement>(".vc-clipper-sound-head");
+            if (!soundHead || !soundHead.isConnected)
+                soundHead = sounds.current?.querySelector<HTMLElement>(".vc-clipper-sound-head") ?? null;
             if (soundHead) {
                 const span = Math.max(1, total);
                 soundHead.style.left = `${(Math.max(0, Math.min(span, inside)) / span) * 100}%`;
             }
 
-            const laneHeads = lanes.current?.querySelectorAll<HTMLElement>(".vc-clipper-lane-head");
+            if (!laneHeads || laneCount !== tracks.length) {
+                laneHeads = lanes.current?.querySelectorAll<HTMLElement>(".vc-clipper-lane-head") ?? null;
+                laneCount = tracks.length;
+            }
             if (laneHeads?.length && laneHeads.length === tracks.length) {
                 for (let i = 0; i < laneHeads.length; i++) {
                     const span = Math.max(0.1, length || tracks[i].levels.length / VOICE_HZ);
@@ -2680,6 +2695,21 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
 
         return [...seen.values()];
     }, [voicedSources]);
+
+    /*
+     * The mute price per person, computed once and not once per render: the
+     * scan walks every level sample, and the panel re-renders on each slider
+     * tick - including the tick of the slider its own label sits next to.
+     * Only muted, non-separated people get a row that reads the number.
+     */
+    const mutePrices = useMemo(() => {
+        const prices = new Map<string, number>();
+        for (const person of people) {
+            if (voiceGainOf(project.voiceLevels, person.id) === 0 && !separated.has(person.id))
+                prices.set(person.id, mutedFraction(person));
+        }
+        return prices;
+    }, [people, project.voiceLevels, separated]);
 
     // One lookup table rather than a scan per timeline block; a long montage
     // redraws this list on every slider move.
@@ -3388,7 +3418,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         const held = audioOfRef.current.get(item.id);
         if (held) return held;
 
-        const bytes = await (await fetch(item.url)).arrayBuffer();
+        const bytes = await fetchArrayBuffer(item.url);
         const decoded = await audioContext().decodeAudioData(bytes);
 
         audioOfRef.current.set(item.id, decoded);
@@ -5627,7 +5657,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
         if (project.width && project.width !== (from.width || (await probeFile(from.url)).width)) return null;
 
         const type = typeOfClip(from.name);
-        const whole = new Uint8Array(await (await fetch(from.url)).arrayBuffer());
+        const whole = new Uint8Array(await fetchArrayBuffer(from.url));
         const cut = trimBytes(whole, type, only.from, only.to);
 
         // Nothing back: the parser found nothing to remove, which for a segment
@@ -7020,7 +7050,7 @@ export function ClipStudio({ onClose, initial }: { onClose(): void; initial?: st
                                                                     {gain === 0
                                                                         ? separated.has(person.id)
                                                                             ? "muted - lifted out of the mix"
-                                                                            : `muted - dips ${Math.round(mutedFraction(person) * 100)}% of the clip`
+                                                                            : `muted - dips ${Math.round((mutePrices.get(person.id) ?? 0) * 100)}% of the clip`
                                                                         : `${Math.round(gain * 100)}%`}
                                                                 </b>
                                                             </label>

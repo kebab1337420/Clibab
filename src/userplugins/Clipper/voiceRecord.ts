@@ -317,21 +317,28 @@ class VoiceBuffers {
         await Promise.all(lanes.map(lane => this.flush(lane)));
 
         /*
-         * Every lane at once rather than one after another.
+         * One lane after another, not every lane at once.
          *
-         * The rebase below is the slow part of a save, and it is per person: a
-         * full call used to pay for all of them in a row while the clip waited.
-         * Nothing here reads another lane, and `Promise.all` hands the results
-         * back in the order they were asked for.
+         * Each lane is a call's worth of audio copied twice (arrayBuffer, then
+         * the rebase emit); running all of them concurrently stacked those
+         * copies on top of each other for no gain, since nothing here reads
+         * another lane. Order is unchanged: lanes are visited in map order.
          */
-        const harvested = await Promise.all(lanes.map(async (lane): Promise<VoiceLaneClip | null> => {
+        const harvested: (VoiceLaneClip | null)[] = [];
+        for (const lane of lanes) {
             const { userId, name } = lane.tap;
-            if (!userId || !lane.header) return null;
+            if (!userId || !lane.header) {
+                harvested.push(null);
+                continue;
+            }
 
             // A chunk covers [at - TIMESLICE, at], so it belongs to the clip if
             // that span meets the clip's own at all.
             const kept = lane.chunks.filter(c => c.at > start && c.at - TIMESLICE < end);
-            if (!kept.length) return null;
+            if (!kept.length) {
+                harvested.push(null);
+                continue;
+            }
 
             const raw = new Blob([lane.header, ...kept.map(c => c.blob)], { type: lane.mimeType });
 
@@ -367,14 +374,14 @@ class VoiceBuffers {
                 logger.warn(`Could not rebase the voice track for ${name || userId}`, e);
             }
 
-            return {
+            harvested.push({
                 userId,
                 name: name || userId,
                 blob,
                 mimeType: lane.mimeType,
                 offset: (kept[0].at - TIMESLICE - start) / 1000 + cutOff
-            };
-        }));
+            });
+        }
 
         return harvested.filter((clip): clip is VoiceLaneClip => clip !== null);
     }

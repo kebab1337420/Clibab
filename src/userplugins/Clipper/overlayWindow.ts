@@ -24,7 +24,7 @@
  */
 
 import { app, BrowserWindow, screen } from "electron";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { pathToFileURL } from "url";
 
@@ -127,6 +127,27 @@ export function writePage(name: string, html: string): string {
     writeFileSync(file, html, "utf8");
 
     return file;
+}
+
+/**
+ * A page name nobody else is using.
+ *
+ * Two shows in a row used to rewrite the same clip.html while the dying
+ * window was still loading it, so the new window played the old clip - or a
+ * black rectangle sat over the game until the cap timer fired. Each show gets
+ * its own file, deleted when its window closes.
+ */
+function uniquePage(stem: string): string {
+    return `${stem}-${Date.now()}-${process.pid}.html`;
+}
+
+/** Best effort: the folder is a cache, and a leftover page is harmless. */
+function dropPage(file: string): void {
+    try {
+        unlinkSync(file);
+    } catch {
+        // Gone already, or locked by a window still loading it. Either way fine.
+    }
 }
 
 /**
@@ -327,10 +348,13 @@ export function showOverlay(path: string, look: OverlayLook): boolean {
     const width = Math.max(200, Math.round(look.width));
     const height = Math.round(width * 9 / 16);
 
-    const made = spawn(writePage("clip.html", clipPage(path, look)), width, height, look.corner);
+    const page = writePage(uniquePage("clip"), clipPage(path, look));
+    const made = spawn(page, width, height, look.corner);
     clipWin = made;
 
     made.on("closed", () => {
+        dropPage(page);
+
         if (clipWin !== made) return;
 
         clipWin = null;
@@ -364,10 +388,13 @@ export function showToast(title: string, note: string, corner: OverlayCorner): b
 
     hideToast();
 
-    const made = spawn(writePage("toast.html", toastPage(title, note)), TOAST_WIDTH, TOAST_HEIGHT, corner);
+    const page = writePage(uniquePage("toast"), toastPage(title, note));
+    const made = spawn(page, TOAST_WIDTH, TOAST_HEIGHT, corner);
     toastWin = made;
 
     made.on("closed", () => {
+        dropPage(page);
+
         if (toastWin !== made) return;
 
         toastWin = null;

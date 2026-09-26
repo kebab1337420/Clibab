@@ -31,13 +31,13 @@ import {
     typeOfClip,
     writeClipCopy
 } from "../clips";
-import { probeAudioTracks } from "../mp4";
-import { trimBytes } from "../repair";
-import { logger } from "../recorder";
 import { readMeta } from "../library";
+import { shareClipLink } from "../linkShare";
+import { probeAudioTracks } from "../mp4";
+import { logger } from "../recorder";
+import { trimBytes } from "../repair";
 import { sendClipFitted } from "../send";
 import { settings } from "../settings";
-import { shareClipLink } from "../linkShare";
 import {
     DEFAULT_CAPTION_STYLE,
     DEFAULT_EFFECTS,
@@ -48,7 +48,7 @@ import {
 } from "../studio";
 import { writeThumbnail } from "../thumbnail";
 import { toast } from "../toasts";
-import { formatBytes, chaptersOf, formatTime } from "../utils";
+import { chaptersOf, fetchArrayBuffer, formatBytes, formatTime } from "../utils";
 
 /** Clamp a trim point to the file's own range. */
 function clampPoint(point: number, min: number, max: number): number {
@@ -306,7 +306,7 @@ export function SimpleStudio({ onClose, initial }: { onClose(): void; initial?: 
 
         let data: Uint8Array;
         try {
-            data = new Uint8Array(await (await fetch(src.url)).arrayBuffer());
+            data = new Uint8Array(await fetchArrayBuffer(src.url));
         } catch (e) {
             logger.warn("Fast trim could not read the file, rendering instead", e);
             return null;

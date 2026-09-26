@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { lengthBytes, repairBytes, trimBytes } from "../src/userplugins/Clipper/repair.ts";
-import { lengthWebm, rebaseWebm, trimWebm } from "../src/userplugins/Clipper/webm.ts";
+import { lengthWebm, repairWebm, trimWebm } from "../src/userplugins/Clipper/webm.ts";
 
 /** Hostile inputs: nothing here is a WebM, and none may throw. */
 const HOSTILE: Array<[string, Uint8Array]> = [
@@ -22,7 +22,7 @@ const HOSTILE: Array<[string, Uint8Array]> = [
 for (const [label, data] of HOSTILE) {
     test(`webm readers answer for ${label} without throwing`, () => {
         assert.equal(lengthWebm(data), 0);
-        assert.equal(rebaseWebm(data), null);
+        assert.equal(repairWebm(data).bytes, null);
         assert.equal(trimWebm(data, 0, 10_000), null);
     });
 }

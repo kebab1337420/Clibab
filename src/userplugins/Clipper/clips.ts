@@ -17,8 +17,8 @@
 
 import type { PluginNative } from "@utils/types";
 
-import type { StoredClip } from "./native";
 import { dropMeta, readMeta, setMeta } from "./library";
+import type { StoredClip } from "./native";
 import { logger } from "./recorder";
 import { extensionFor, settings } from "./settings";
 

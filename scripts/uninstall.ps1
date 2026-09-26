@@ -33,7 +33,12 @@ foreach ($root in $roots) {
         $asar = Join-Path $resources "app.asar"
         $original = Join-Path $resources "_app.asar"
 
-        if (-not (Test-Path $original)) { continue }
+        if (-not (Test-Path $original)) {
+            # Leftover of an interrupted run: the original is intact under .bak.
+            if (Test-Path "$asar.bak") {
+                Move-Item "$asar.bak" $original -Force
+            } else { continue }
+        }
 
         # Only remove app.asar when it is the patch stub, never a real bundle.
         if (Test-Path $asar) {
@@ -44,9 +49,20 @@ foreach ($root in $roots) {
             Remove-Item $asar -Force
         }
 
-        Move-Item $original $asar -Force
-        Write-Host "      $name unpatched."
-        $restored++
+        # Through a backup, never a gap: a crash between removing the stub
+        # and restoring the original would leave no app.asar at all, and
+        # Discord would not start.
+        try {
+            Move-Item $original "$asar.bak" -Force
+            Move-Item "$asar.bak" $asar -Force
+            Write-Host "      $name unpatched."
+            $restored++
+        } catch {
+            if ((Test-Path "$asar.bak") -and -not (Test-Path $asar)) {
+                Move-Item "$asar.bak" $asar -Force
+            }
+            Write-Host "      [!] $name could not be unpatched - $($_.Exception.Message)"
+        }
     }
 }
 

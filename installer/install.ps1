@@ -114,6 +114,15 @@ function Test-Bundle([string] $repoRoot) {
 
         Test-OneFile (Join-Path $repoRoot $name) $entry.Value.size $entry.Value.sha256 $entry.Name
     }
+
+    # Fail closed on the scripts this installer is about to run (verified
+    # above, each with size and hash): a manifest that checks the dist files
+    # but omits these would execute unchecked code.
+    foreach ($required in @("scripts/install-prebuilt.ps1", "VRinstaller.bat")) {
+        if (-not $root.PSObject.Properties[$required]) {
+            throw "The bundle does not verify $required, refusing to install it unchecked."
+        }
+    }
 }
 
 function Invoke-Prebuilt([string] $repoRoot) {

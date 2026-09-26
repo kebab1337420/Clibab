@@ -21,12 +21,12 @@
 import { getCurrentChannel } from "@utils/discord";
 import type { PluginNative } from "@utils/types";
 
-import { deleteClip, readClipBytes, typeOfClip, trashClip, writeClipBytes } from "./clips";
+import { deleteClip, readClipBytes, trashClip, typeOfClip, writeClipBytes } from "./clips";
 import { dropMeta, readMeta, setMeta } from "./library";
+import { shareClipLink } from "./linkShare";
 import { logger, recorder } from "./recorder";
 import { trimBytes } from "./repair";
 import { sendClipRange } from "./send";
-import { shareClipLink } from "./linkShare";
 import type { StudioAction } from "./studioOverlay";
 import { errorMessage } from "./utils";
 
@@ -66,7 +66,7 @@ async function cut(action: StudioAction): Promise<Outcome> {
     const stem = clip.replace(/\.[^.]+$/, "");
     const extension = clip.split(".").pop() || "webm";
 
-    const path = await writeClipBytes(trimmed, `${stem}-cut.${extension}`);
+    const path = await writeClipBytes(trimmed.bytes, `${stem}-cut.${extension}`);
     const saved = path.split(/[\\/]/).pop() || clip;
 
     // The markers move with the footage. The cut lands on the keyframe at or

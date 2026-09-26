@@ -170,8 +170,10 @@ async function readyWorker(): Promise<Worker | null> {
 /**
  * Sends the measurement to the worker, or answers null when none can run.
  *
- * The track bytes are copied rather than transferred: the same decoded buffers
- * answer every later slider movement and the render, so they have to stay here.
+ * The track bytes travel as throwaway copies, transferred rather than cloned:
+ * the same decoded buffers answer every later slider movement and the render,
+ * so their AudioBuffers have to stay here, but the copies handed over are
+ * neutred on arrival instead of walked and cloned by structured clone.
  */
 export async function prepareRemote(
     bed: AudioBuffer | null,
@@ -183,15 +185,21 @@ export async function prepareRemote(
     if (!ready) return null;
 
     const id = nextId++;
+    const transfer: ArrayBuffer[] = [];
+    const take = (samples: Float32Array): Float32Array => {
+        const copy = samples.slice();
+        transfer.push(copy.buffer);
+        return copy;
+    };
     const input: WorkerInput = {
-        bed: bed ? bed.getChannelData(0) : null,
+        bed: bed ? take(bed.getChannelData(0)) : null,
         bedRate: bed?.sampleRate ?? 0,
         bedOffset,
         points,
         lanes: raw.map(lane => ({
             offset: lane.offset,
             rate: lane.buffer.sampleRate,
-            samples: lane.buffer.getChannelData(0)
+            samples: take(lane.buffer.getChannelData(0))
         }))
     };
 
@@ -209,7 +217,7 @@ export async function prepareRemote(
         });
 
         try {
-            worker!.postMessage({ id, input });
+            worker!.postMessage({ id, input }, transfer);
         } catch (e) {
             clearTimeout(timer);
             pending.delete(id);
