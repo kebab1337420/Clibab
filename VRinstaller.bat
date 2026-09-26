@@ -320,7 +320,10 @@ function Set-ClipperSetting([string] $file, [hashtable] $values) {
     # rewritten because the disc filled up would take every other plugin's
     # settings with it. No BOM, because that is how Vencord writes it and a
     # BOM appearing from nowhere is the kind of thing that breaks a reader.
-    $temp = "$file.clipper-vr"
+    # Unique per run (PID + GUID, like installer/install.ps1): a fixed name
+    # collides between concurrent runs, and a pre-planted file or symlink at
+    # a predictable path would hijack the settings write.
+    $temp = "$file.clipper-vr-$PID-$([Guid]::NewGuid().ToString('N'))"
     [IO.File]::WriteAllText($temp, $patched, [Text.UTF8Encoding]::new($false))
     Move-Item $temp $file -Force
 

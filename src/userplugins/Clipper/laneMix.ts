@@ -71,6 +71,7 @@ import { Logger } from "@utils/Logger";
 import { loadVoiceTrack } from "./clips";
 import { prepareRemote } from "./laneMix.worker";
 import { hasVoiceTracks, readNativeAudio } from "./nativeTracks";
+import { fetchArrayBuffer } from "./utils";
 import { type VoiceFileMeta, voiceGainOf, type VoiceLevels } from "./voice";
 import { cascade, LOW_HZ, SECTIONS } from "./voiceBand";
 import type { MixTarget, VoiceMix } from "./voiceMix";
@@ -328,6 +329,30 @@ const bare = new Set<string>();
  * start a duplicate decode of the first instead of waiting on it.
  */
 const loading = new Map<string, Promise<Held | null>>();
+
+/*
+ * Decoded beds by clip id, so the voice-print learner does not fetch and
+ * decode the same file the mix above just did. Two slots: a render touches
+ * one clip at a time, and a 60 s bed is ~12 MB a slot. Dropped with the rest
+ * when the studio closes.
+ */
+const bedCache = new Map<string, AudioBuffer>();
+
+function keepBed(id: string, bed: AudioBuffer | null): void {
+    if (!bed) return;
+    bedCache.delete(id);
+    bedCache.set(id, bed);
+    while (bedCache.size > 2) {
+        const oldest = bedCache.keys().next();
+        if (oldest.done) break;
+        bedCache.delete(oldest.value);
+    }
+}
+
+/** A bed decoded while building a mix, for the print learner to reuse. */
+export function bedFor(id: string): AudioBuffer | undefined {
+    return bedCache.get(id);
+}
 
 /**
  * Speech-band RMS per hop of one channel, on the clip's clock.
@@ -1172,7 +1197,7 @@ export async function nativeLaneMixFor(
     const named = new Map(target.voices.map(voice => [voice.id, voice.name]));
 
     const found = await heldFor(`${target.id}:native`, async () => {
-        const data = new Uint8Array(await (await fetch(target.url)).arrayBuffer());
+        const data = new Uint8Array(await fetchArrayBuffer(target.url));
         const tracks = readNativeAudio(data);
 
         if (!hasVoiceTracks(tracks)) return null;
@@ -1253,6 +1278,8 @@ export async function nativeLaneMixFor(
         };
     });
 
+    if (found?.bed) keepBed(target.id, found.bed);
+
     if (!found) return null;
 
     return await render(target.id, found, levels, [...named.keys()], onProgress);
@@ -1284,7 +1311,7 @@ export async function laneMixFor(
          * in memory together in any case, so the only thing the queue was
          * buying was the wait.
          */
-        const readBed = async () => decode(ctx, new Uint8Array(await (await fetch(target.url)).arrayBuffer()));
+        const readBed = async () => decode(ctx, new Uint8Array(await fetchArrayBuffer(target.url)));
 
         const readLane = async (meta: VoiceFileMeta): Promise<RawLane | null> => {
             try {
@@ -1303,6 +1330,7 @@ export async function laneMixFor(
         };
 
         const [bed, lanes] = await Promise.all([readBed(), Promise.all(metas.map(readLane))]);
+        keepBed(target.id, bed);
 
         // The same four cases as the engine's file, in this path's own words:
         // here a person has no track because the client never opened a receiver
@@ -1334,6 +1362,7 @@ export async function laneMixFor(
 export function forgetLaneMixes(): void {
     held = null;
     bare.clear();
+    bedCache.clear();
     // In-flight decodes too, or their result lands in `held` on a clip the
     // studio has already left - and the whole recording stays decoded.
     loading.clear();

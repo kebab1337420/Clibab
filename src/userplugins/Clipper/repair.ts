@@ -23,7 +23,7 @@ import { lengthWebm, repairWebm, trimWebm } from "./webm";
 interface Parser {
     /** Rebases the clip to start at zero, in one pass over the buffer. */
     repair(data: Uint8Array): { bytes: Uint8Array | null; dropped: number; length: number };
-    trim(data: Uint8Array, fromMs: number, toMs: number): Uint8Array | null;
+    trim(data: Uint8Array, fromMs: number, toMs: number): { bytes: Uint8Array; length: number } | null;
     length(data: Uint8Array): number;
 }
 
@@ -60,9 +60,11 @@ export function repairBytes(data: Uint8Array, mimeType: string): { bytes: Uint8A
  *
  * Null means the container is not one this understands, or that the range
  * already covers the whole clip, so a caller holding the original can keep it
- * rather than being handed a copy of what it already has.
+ * rather than being handed a copy of what it already has. Otherwise the kept
+ * bytes plus their real length, so the caller never walks the buffer again to
+ * weigh what came back.
  */
-export function trimBytes(data: Uint8Array, mimeType: string, from: number, to: number): Uint8Array | null {
+export function trimBytes(data: Uint8Array, mimeType: string, from: number, to: number): { bytes: Uint8Array; length: number } | null {
     const parser = parserFor(mimeType);
     if (!parser || !(to > from)) return null;
 

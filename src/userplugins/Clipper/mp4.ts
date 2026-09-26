@@ -440,8 +440,9 @@ export function repairMp4(data: Uint8Array): { bytes: Uint8Array | null; dropped
  *
  * Returns null when the data is not a fragmented MP4 or when the range covers
  * the whole of it, in which case the caller keeps the original bytes.
+ * Otherwise the kept bytes plus their real length, measured in the same pass.
  */
-export function trimMp4(data: Uint8Array, fromMs: number, toMs: number): Uint8Array | null {
+export function trimMp4(data: Uint8Array, fromMs: number, toMs: number): { bytes: Uint8Array; length: number } | null {
     const scanned = scan(data);
     if (!scanned) return null;
 
@@ -464,7 +465,10 @@ export function trimMp4(data: Uint8Array, fromMs: number, toMs: number): Uint8Ar
 
     if (start === 0 && end === fragments.length - 1) return null;
 
-    return emit(data, scanned, start, end);
+    return {
+        bytes: emit(data, scanned, start, end),
+        length: Math.max(0, at(end) - at(start)) / 1000
+    };
 }
 
 /** An audio track a file declares, and the name its handler carries. */

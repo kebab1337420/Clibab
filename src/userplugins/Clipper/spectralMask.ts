@@ -21,20 +21,21 @@
  * never built and the notch path runs exactly as before.
  */
 
-import type { VoiceTrack } from "./voice";
-import { VOICE_HZ } from "./voice";
 import { Logger } from "@utils/Logger";
+
+import { fetchArrayBuffer } from "./utils";
+import { VOICE_HZ, type VoiceTrack } from "./voice";
 
 const logger = new Logger("Clipper", "#f0b132");
 
 /** STFT frame, in samples. Bins follow as frame/2 + 1. */
-export const MASK_FRAME = 1024;
+const MASK_FRAME = 1024;
 /** Hop between frames, in samples. */
-export const MASK_HOP = 256;
+const MASK_HOP = 256;
 /** Floor of the mask: what leaks through is game under speech, not a voice. */
-export const MASK_FLOOR = 0.05;
+const MASK_FLOOR = 0.05;
 /** Per-hop smoothing of the gains: sudden bins read as musical noise. */
-export const MASK_SMOOTH = 0.3;
+const MASK_SMOOTH = 0.3;
 /** Cosine past which two voice prints count as the same voice. */
 const SIMILARITY_LIMIT = 0.93;
 /** Solo stretch shorter than this teaches nothing (a few hundred ms). */
@@ -43,7 +44,7 @@ const MIN_SOLO_FRAMES = 30;
 const ACTIVE_AT = 0.12;
 
 /** In-place radix-2 FFT over separate real/imaginary arrays. */
-export function fft(re: Float32Array, im: Float32Array, invert: boolean): void {
+function fft(re: Float32Array, im: Float32Array, invert: boolean): void {
     const n = re.length;
 
     for (let i = 1, j = 0; i < n; i++) {
@@ -99,34 +100,7 @@ function hannWindow(size: number): Float32Array {
     return window;
 }
 
-/** Average magnitude spectrum of one channel, for learning and tests. */
-export function averageSpectrum(pcm: Float32Array): Float32Array {
-    const bins = MASK_FRAME / 2 + 1;
-    const out = new Float32Array(bins);
-    const window = hannWindow(MASK_FRAME);
-
-    const re = new Float32Array(MASK_FRAME);
-    const im = new Float32Array(MASK_FRAME);
-    let frames = 0;
-
-    for (let s = 0; s + MASK_FRAME <= pcm.length; s += MASK_HOP) {
-        for (let n = 0; n < MASK_FRAME; n++) {
-            re[n] = pcm[s + n] * window[n];
-            im[n] = 0;
-        }
-
-        fft(re, im, false);
-
-        for (let k = 0; k < bins; k++) out[k] += Math.hypot(re[k], im[k]);
-        frames++;
-    }
-
-    if (frames) for (let k = 0; k < bins; k++) out[k] /= frames;
-
-    return out;
-}
-
-export interface LaneInput {
+interface LaneInput {
     userId: string;
     /** Activity samples at hz per second, 0-255 like the voice lanes. */
     levels: Uint8Array;
@@ -139,7 +113,7 @@ export interface LaneInput {
  * than one body, is active teach nothing. People without enough solo time
  * get no print rather than a bad one.
  */
-export function learnProfiles(
+function learnProfiles(
     pcm: Float32Array,
     sampleRate: number,
     lanes: LaneInput[],
@@ -199,7 +173,7 @@ export function learnProfiles(
 }
 
 /** Cosine similarity of two spectra, for the same-voice guard. */
-export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     let dot = 0;
     let aa = 0;
     let bb = 0;
@@ -227,44 +201,6 @@ function summed(profiles: Map<string, Float32Array>, ids: string[]): Float32Arra
     }
 
     return out;
-}
-
-/**
- * Per-bin keep gains for an overlap: what is likely the others stays.
- *
- * Pure, so the worklet below mirrors it and the tests pin it: same inputs,
- * same gains, no drift between the two copies.
- */
-export function maskGains(
-    profiles: Map<string, Float32Array>,
-    muted: string[],
-    others: string[],
-    floor = MASK_FLOOR
-): Float32Array | null {
-    const first = profiles.values().next();
-    if (first.done) return null;
-
-    const bins = first.value.length;
-    const x = summed(profiles, muted);
-    if (!x) return null;
-
-    const o = summed(profiles, others);
-    if (!o) {
-        // Nobody else in the print set: whatever is audible is the muted
-        // voice (and the game, which lives outside every print).
-        return new Float32Array(bins);
-    }
-
-    const gains = new Float32Array(bins);
-    for (let k = 0; k < bins; k++) {
-        const xx = x[k] * x[k];
-        const oo = o[k] * o[k];
-        const gain = oo / (xx + oo + 1e-12);
-
-        gains[k] = Math.min(1, Math.max(floor, gain));
-    }
-
-    return gains;
 }
 
 export interface MaskPlan {
@@ -303,8 +239,8 @@ export function planMask(profiles: Map<string, Float32Array>, levels: Record<str
  * The worklet twin of the math above.
  *
  * An AudioWorklet module cannot import this file, so the constants below are
- * injected into the source and the FFT and gain rule mirror `fft` and
- * `maskGains` - same inputs, same gains. Touched together or not at all.
+ * injected into the source and the FFT mirrors `fft` above - same inputs,
+ * same gains. Touched together or not at all.
  *
  * Two deliberate properties: the windowed overlap-add divides by the summed
  * window (a Hann applied twice is a gain, not unity), and the whole mix
@@ -554,7 +490,8 @@ function mixMono(buffer: AudioBuffer): Float32Array {
  */
 export async function learnRenderProfiles(
     sources: { id: string; url: string; voices?: VoiceTrack[]; }[],
-    ctx: BaseAudioContext
+    ctx: BaseAudioContext,
+    beds?: (id: string) => AudioBuffer | undefined
 ): Promise<Map<string, Float32Array>> {
     const merged = new Map<string, { sum: Float32Array; count: number; }>();
 
@@ -566,16 +503,36 @@ export async function learnRenderProfiles(
             // One unreadable file must not disable the mask for every other
             // source: skip it and keep what was learned so far.
             try {
-                const data = await (await fetch(source.url)).arrayBuffer();
-                const decoded = await ctx.decodeAudioData(data);
+                /*
+                 * The mix builder just fetched and decoded this same file when
+                 * somebody is muted, and its bed is still in memory: learn off
+                 * that instead of pulling the whole file a second time. Only
+                 * when the rates line up, or the print would be learned at the
+                 * wrong resolution - then the fetch below decodes at the
+                 * context's own rate as before.
+                 */
+                const reuse = beds?.(source.id);
+
+                let samples: Float32Array;
+                let rate: number;
+
+                if (reuse && reuse.sampleRate === ctx.sampleRate) {
+                    samples = mixMono(reuse);
+                    rate = reuse.sampleRate;
+                } else {
+                    const decoded = await ctx.decodeAudioData(await fetchArrayBuffer(source.url));
+                    samples = mixMono(decoded);
+                    rate = decoded.sampleRate;
+                }
+
                 const learned = learnProfiles(
-                    mixMono(decoded),
-                    decoded.sampleRate,
+                    samples,
+                    rate,
                     source.voices.map(voice => ({ userId: voice.id, levels: voice.levels })),
                     VOICE_HZ
                 );
 
-                cached = { rate: decoded.sampleRate, profiles: learned };
+                cached = { rate, profiles: learned };
                 profileCache.set(source.id, cached);
 
                 while (profileCache.size > 8) {

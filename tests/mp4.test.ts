@@ -193,7 +193,7 @@ test("trimMp4 keeps the fragments a range covers", () => {
         fragment([{ id: 1, decodeTime: 4000 }])
     ]);
 
-    const out = trimMp4(data, 1000, 2500)!;
+    const out = trimMp4(data, 1000, 2500)!.bytes;
 
     // The cut lands on fragment boundaries, so the result is never shorter than
     // what was asked for - here 1000 to 2000, kept whole.
@@ -208,7 +208,7 @@ test("trimMp4 asks its range in clip time, not in capture time", () => {
         fragment([{ id: 1, decodeTime: 602_000 }])
     ]);
 
-    const out = trimMp4(data, 1000, 1500)!;
+    const out = trimMp4(data, 1000, 1500)!.bytes;
 
     assert.equal(fragments(out), 1);
     assert.deepEqual(decodeTimes(out), [0]);
@@ -225,7 +225,7 @@ test("trimMp4 backs the start up to the last keyframe before it", () => {
 
     // Asked for 2500, but the only keyframe at or before it is the very first
     // fragment: starting anywhere else decodes into garbage.
-    const out = trimMp4(data, 2500, 3500)!;
+    const out = trimMp4(data, 2500, 3500)!.bytes;
 
     assert.equal(fragments(out), 4);
     assert.deepEqual(decodeTimes(out), [0, 1000, 2000, 3000]);

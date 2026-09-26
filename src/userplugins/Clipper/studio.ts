@@ -25,12 +25,13 @@
 
 import { type AudioClip, type AudioSource, type DuckCurve, type Ending, scheduleClips, stretchToRate } from "./audio";
 import type { ChatLine } from "./chat";
+import { bedFor } from "./laneMix";
 import { buildMixBus, logger } from "./recorder";
 import { pickMimeType, settings } from "./settings";
-import { seekVideo, captureVideoBitrate } from "./utils";
+import { createMaskNode, dropMaskModule, learnRenderProfiles, type MaskHandle,planMask } from "./spectralMask";
+import { captureVideoBitrate, fetchArrayBuffer,seekVideo } from "./utils";
 import { maskActors, speakingAt, VOICE_HZ, voiceDuckAt, type VoiceFileMeta, type VoiceLevels, voiceLevelsTouched, type VoiceTrack } from "./voice";
 import { createVoiceBand, type VoiceBand } from "./voiceBand";
-import { createMaskNode, dropMaskModule, learnRenderProfiles, planMask, type MaskHandle } from "./spectralMask";
 import { type VoiceMix, voiceMixFor } from "./voiceMix";
 
 export interface Effects {
@@ -1649,6 +1650,27 @@ export type AvatarCache = Map<string, CanvasImageSource>;
 /** Speaker name widths, keyed on font and name: measured once, not per frame. */
 const speakerWidthCache = new Map<string, number>();
 
+/*
+ * The last speaker lookup, keyed on 200 ms buckets: badges already move at
+ * the 5 Hz rhythm of the level data, so recomputing the map-filter-sort on
+ * every painted frame buys nothing at 144 Hz preview.
+ */
+let speakerBucket = -1;
+let speakerVoices: VoiceTrack[] | null = null;
+let speakerLevels: VoiceLevels | undefined;
+let speakerHit: VoiceTrack[] = [];
+
+function speakersAt(voices: VoiceTrack[], levels: VoiceLevels | undefined, seconds: number): VoiceTrack[] {
+    const bucket = Math.floor(seconds * 5);
+    if (bucket === speakerBucket && speakerVoices === voices && speakerLevels === levels) return speakerHit;
+
+    speakerBucket = bucket;
+    speakerVoices = voices;
+    speakerLevels = levels;
+    speakerHit = speakingAt(voices, levels, bucket / 5);
+    return speakerHit;
+}
+
 /**
  * Draws the people talking right now, stacked down the top-left corner.
  *
@@ -1794,7 +1816,30 @@ function chatLayout(ctx: CanvasRenderingContext2D, font: number, box: number, na
  * than clipped, because a message cut off mid-word is worse than no message.
  */
 function drawChat(ctx: CanvasRenderingContext2D, width: number, height: number, chat: ChatLine[], seconds: number): void {
-    const live = chat.filter(line => line.at <= seconds && seconds - line.at <= CHAT_HOLD).slice(-CHAT_LINES);
+    /*
+     * The log is append-only in arrival order, so the visible window is found
+     * with two fingers instead of a walk: the first line newer than the hold,
+     * then forward while still behind the playhead. Filtering all 400 lines
+     * per painted frame was the only O(n) left in this function.
+     */
+    const floor = seconds - CHAT_HOLD;
+    let low = 0;
+    let high = chat.length;
+    while (low < high) {
+        const mid = (low + high) >> 1;
+        if (chat[mid].at <= floor) low = mid + 1;
+        else high = mid;
+    }
+
+    const live: ChatLine[] = [];
+    for (let i = low; i < chat.length; i++) {
+        if (chat[i].at > seconds) break;
+        live.push(chat[i]);
+
+        // Newest wins, as the slice below used to: the window is a handful
+        // of lines, so dropping the oldest off the front costs nothing.
+        if (live.length > CHAT_LINES) live.shift();
+    }
     if (!live.length) return;
 
     const font = Math.max(11, Math.round(height * 0.026));
@@ -2102,7 +2147,7 @@ export function paintFrame(ctx: CanvasRenderingContext2D, video: HTMLVideoElemen
      * read a minute in, whatever the montage did with it.
      */
     if (frame.showSpeakers && frame.voices?.length) {
-        drawSpeakers(ctx, width, height, speakingAt(frame.voices, frame.voiceLevels, video.currentTime), frame.avatars);
+        drawSpeakers(ctx, width, height, speakersAt(frame.voices, frame.voiceLevels, video.currentTime), frame.avatars);
     }
 
     // Same clock as the badges, and for the same reason: a message was sent at
@@ -2260,7 +2305,7 @@ async function decodeVideoOverlay(id: string, name: string, url: string, ctx?: B
  */
 async function decodeOverlayAudio(name: string, url: string, ctx: BaseAudioContext): Promise<AudioBuffer | undefined> {
     try {
-        const data = await (await fetch(url)).arrayBuffer();
+        const data = await fetchArrayBuffer(url);
         return await ctx.decodeAudioData(data);
     } catch (e) {
         logger.debug(`No usable sound in the overlay "${name}"`, e);
@@ -2285,7 +2330,12 @@ export async function decodeImage(id: string, name: string, url: string, ctx?: B
     const image = new Image();
     image.src = url;
 
-    await image.decode();
+    // Same bound as the avatars below: a corrupt import must fail, not park
+    // the import forever.
+    await Promise.race([
+        image.decode(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("That picture took too long to load")), 15_000))
+    ]);
 
     const width = image.naturalWidth || 1;
     const height = image.naturalHeight || 1;
@@ -2608,7 +2658,7 @@ export async function renderProject(project: Project, sources: StudioSource[], o
 
     if (voiceLevelsTouched(project.voiceLevels)) {
         try {
-            const prints = await learnRenderProfiles(sources, audioCtx);
+            const prints = await learnRenderProfiles(sources, audioCtx, bedFor);
             maskPlan = planMask(prints, project.voiceLevels);
 
             if (maskPlan.engaged) {

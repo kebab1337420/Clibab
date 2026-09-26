@@ -1913,9 +1913,18 @@ function httpGet(url: string, redirects = 0): Promise<Fetched> {
             const chunks: Buffer[] = [];
             let received = 0;
 
+            // The 60s request timeout below only fires while nothing at all
+            // happens: a one-byte-per-second drip would hold the download for
+            // hours. This idle timer restarts on every chunk instead.
+            let idle = setTimeout(onIdle, 20_000);
+            function onIdle() {
+                response.destroy(new Error(`${url} stalled mid-download`));
+            }
+
             // Refuse on the header when it gives the size away up front.
             const { "content-length": contentLength } = response.headers;
             if (contentLength && Number(contentLength) > MAX_DOWNLOAD_BYTES) {
+                clearTimeout(idle);
                 response.destroy(new Error(`${url} answered ${contentLength} bytes, over the ${MAX_DOWNLOAD_BYTES} byte cap`));
                 return;
             }
@@ -1923,6 +1932,8 @@ function httpGet(url: string, redirects = 0): Promise<Fetched> {
             // And cap as it streams, in case the length was hidden or a
             // redirect target grew.
             response.on("data", (chunk: Buffer) => {
+                clearTimeout(idle);
+                idle = setTimeout(onIdle, 20_000);
                 received += chunk.length;
                 if (received > MAX_DOWNLOAD_BYTES) {
                     response.destroy(new Error(`${url} exceeded the ${MAX_DOWNLOAD_BYTES} byte cap`));
@@ -1930,8 +1941,8 @@ function httpGet(url: string, redirects = 0): Promise<Fetched> {
                 }
                 chunks.push(chunk);
             });
-            response.on("end", () => resolve({ status, body: Buffer.concat(chunks) }));
-            response.on("error", reject);
+            response.on("end", () => { clearTimeout(idle); resolve({ status, body: Buffer.concat(chunks) }); });
+            response.on("error", e => { clearTimeout(idle); reject(e); });
         });
 
         request.setTimeout(60_000, () => request.destroy(new Error(`${url} timed out`)));

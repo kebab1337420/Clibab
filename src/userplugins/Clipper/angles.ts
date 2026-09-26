@@ -98,13 +98,22 @@ export function postedAngles(): PostedAngle[] {
 
 /** Pulls one posted angle down as a blob the timeline can play. */
 export async function fetchAngle(angle: PostedAngle): Promise<{ url: string; bytes: ArrayBuffer; }> {
-    const response = await fetch(angle.url);
-    if (!response.ok) throw new Error(`${angle.name} could not be downloaded (${response.status})`);
+    // The content type rides along for the blob, so this does its own fetch
+    // with the same 30s bound as the shared helper rather than using it.
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), 30_000);
 
-    const bytes = await response.arrayBuffer();
+    try {
+        const response = await fetch(angle.url, { signal: control.signal });
+        if (!response.ok) throw new Error(`${angle.name} could not be downloaded (${response.status})`);
 
-    // The blob keeps its own snapshot of the bytes, so the buffer can still be
-    // handed to the alignment afterwards - which detaches it - and the element
-    // will go on playing from a copy the decode never touched.
-    return { url: URL.createObjectURL(new Blob([bytes], { type: response.headers.get("content-type") || "video/mp4" })), bytes };
+        const bytes = await response.arrayBuffer();
+
+        // The blob keeps its own snapshot of the bytes, so the buffer can still be
+        // handed to the alignment afterwards - which detaches it - and the element
+        // will go on playing from a copy the decode never touched.
+        return { url: URL.createObjectURL(new Blob([bytes], { type: response.headers.get("content-type") || "video/mp4" })), bytes };
+    } finally {
+        clearTimeout(timer);
+    }
 }

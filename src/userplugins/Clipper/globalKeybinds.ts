@@ -170,7 +170,12 @@ async function pump(mine: number): Promise<void> {
         let action: ShortcutAction | null = null;
 
         try {
-            action = await Native.waitForShortcut();
+            // Same reasoning as the game pump: the native park never settles
+            // on its own, so the race lets a stop be noticed within 30s.
+            action = await Promise.race([
+                Native.waitForShortcut(),
+                new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000))
+            ]);
         } catch (e) {
             logger.warn("Global keybind listener failed, retrying", e);
             await new Promise(r => setTimeout(r, 2000));

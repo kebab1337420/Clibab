@@ -20,7 +20,6 @@ import { FluxDispatcher, Toasts, UserStore } from "@webpack/common";
 import { type ChatLine, chatLog, shiftChat } from "./chat";
 import { playClipSound } from "./clipSound";
 import { runningGame, watchRunningGame } from "./game";
-import { applyProfile } from "./profiles";
 import { highlights } from "./highlights";
 import { dropMeta, readMeta, setMeta, tagSavedClip } from "./library";
 import { MicInput } from "./micInput";
@@ -30,6 +29,7 @@ import { muxNativeAudio } from "./mux";
 import type { CaptureSource } from "./native";
 import { arm, canRecord, disarm, engineTornDown, goLiveActive, nativeAvailability, saveNativeClip, setOnIdleCallback, setRecordUser, watchRecording } from "./nativeClips";
 import { hasVideoTrack } from "./nativeTracks";
+import { applyProfile } from "./profiles";
 import { lengthBytes, repairBytes, trimBytes } from "./repair";
 import { Container, extensionFor, mimeTypeChain, settings } from "./settings";
 import { writeThumbnail } from "./thumbnail";
@@ -466,6 +466,9 @@ class ClipRecorder {
     /** First chunk emitted by the recorder: holds the container header. */
     private header: Blob | null = null;
     private chunks: TimedChunk[] = [];
+    // Running byte total of the chunks above: bufferedBytes is read in hot
+    // loops (spill, prune), and re-reducing the whole array there is O(n^2).
+    private bufferedTotal = 0;
     private spillRunning = false;
     private spillFailed = false;
     /** Consecutive failing spill ticks before giving up for this buffer. */
@@ -585,7 +588,7 @@ class ClipRecorder {
     }
 
     get bufferedBytes() {
-        return this.chunks.reduce((sum, c) => sum + c.size, 0) + (this.header?.size ?? 0);
+        return this.bufferedTotal + (this.header?.size ?? 0);
     }
 
     /** Markers currently inside the buffer, for the overlay's counter. */
@@ -1123,6 +1126,7 @@ class ClipRecorder {
                 this.header = blob;
             } else {
                 this.chunks.push({ blob, file: null, size: blob.size, at: Date.now() });
+                this.bufferedTotal += blob.size;
                 this.prune();
                 void this.spillIfNeeded();
             }
@@ -1206,6 +1210,7 @@ class ClipRecorder {
         const cutoff = Date.now() - (clipRetentionSeconds(settings.store.clipLength) * 1000 + TIMESLICE);
         while (this.chunks.length && this.chunks[0].at < cutoff) {
             const gone = this.chunks.shift();
+            this.bufferedTotal -= gone?.size ?? 0;
             if (gone?.file) dropped.push(gone.file);
         }
 
@@ -1215,6 +1220,7 @@ class ClipRecorder {
         let held = this.bufferedBytes;
         while (held > MAX_BUFFER_BYTES && this.chunks.length > 1) {
             const gone = this.chunks.shift();
+            this.bufferedTotal -= gone?.size ?? 0;
             held -= gone?.size ?? 0;
             if (gone?.file) dropped.push(gone.file);
         }
@@ -1351,6 +1357,7 @@ class ClipRecorder {
         this.mimeType = mime;
         this.header = null;
         this.chunks = [];
+        this.bufferedTotal = 0;
 
         recorder.ondataavailable = e => this.onChunk(e.data);
         recorder.onerror = e => this.onEncoderFailure(e);
@@ -1879,6 +1886,7 @@ class ClipRecorder {
         this.recorder = null;
         this.header = null;
         this.chunks = [];
+        this.bufferedTotal = 0;
         this.marks = [];
         this.pendingStop = false;
         // The engine's file belongs to a save, not to the buffer: without
@@ -2108,19 +2116,23 @@ class ClipRecorder {
                 : seconds ? this.chunksSince(Date.now() - seconds * 1000) : this.chunks;
 
             const parts: BlobPart[] = [this.header as Blob];
-            for (const c of kept) {
-                if (c.blob) parts.push(c.blob);
-                else if (c.file) {
+            // Spilled chunks are read in parallel, in order: sequential IPC
+            // round-trips cost ~15ms each exactly when the buffer is biggest.
+            const spilled = await Promise.all(kept.map(async c => {
+                if (c.blob) return c.blob;
+                if (c.file) {
                     // One orphan spill file must not cost the clip: the RAM
                     // around it still saves, with a gap where the chunk was.
                     try {
-                        parts.push(new Blob([await Native.spillRead(c.file) as BlobPart]));
+                        return new Blob([await Native.spillRead(c.file) as BlobPart]);
                     } catch (e) {
                         logger.warn("Skipped an unreadable spill chunk in the save", e);
+                        return null;
                     }
                 }
-                else throw new Error("Clip chunk is neither in memory nor spilled to disk");
-            }
+                throw new Error("Clip chunk is neither in memory nor spilled to disk");
+            }));
+            for (const part of spilled) if (part) parts.push(part);
             const raw = new Blob(parts, { type: this.mimeType });
             const name = `${timestampName()}.${extensionFor(this.mimeType)}`;
 
@@ -2198,9 +2210,10 @@ class ClipRecorder {
                 if (overrun > 0.5) {
                     const cut = trimBytes(bytes, this.mimeType, overrun, real);
                     if (cut) {
-                        const gone = real - lengthBytes(cut, this.mimeType);
+                        // Measured in the trim's own pass, not re-walked.
+                        const gone = real - cut.length;
                         if (gone > 0) {
-                            bytes = cut;
+                            bytes = cut.bytes;
                             cutOff += gone;
                         }
                     }
@@ -2659,8 +2672,8 @@ class ClipRecorder {
         if (actual - wanted > NATIVE_LENGTH_SLACK_S) {
             const cut = trimMp4(data, (actual - wanted) * 1000, actual * 1000);
             if (cut) {
-                await Native.saveClip(settings.store.saveDirectory, saved, cut);
-                data = cut;
+                await Native.saveClip(settings.store.saveDirectory, saved, cut.bytes);
+                data = cut.bytes;
                 logger.info(`Native clip came back ${Math.round(actual)}s for ${wanted}s asked - trimmed to the tail.`);
             } else {
                 logger.warn(`Native clip came back ${Math.round(actual)}s for ${wanted}s asked and resisted trimming - keeping it whole.`);
@@ -2840,15 +2853,15 @@ class ClipRecorder {
                 return;
             }
 
-            const cut = new Blob([trimmed as any], { type: last.mimeType });
+            const cut = new Blob([trimmed.bytes as any], { type: last.mimeType });
 
             const base = last.name.replace(/\.[^.]+$/, "");
-            const path = await writeClip(trimmed, `${base}-last${Math.round(seconds)}s.${extensionFor(last.mimeType)}`, cut);
+            const path = await writeClip(trimmed.bytes, `${base}-last${Math.round(seconds)}s.${extensionFor(last.mimeType)}`, cut);
             const saved = path.split(/[\\/]/).pop() || base;
 
             // The cut lands on a keyframe at or before the point asked for, so
             // measure what was really taken off rather than assuming.
-            const gone = total - lengthBytes(trimmed, last.mimeType);
+            const gone = total - trimmed.length;
             const { markers, labels: markerLabels } = shiftLabeled(last.markers, last.markerLabels ?? [], gone);
             const voices = shiftTracks(last.voices, gone);
             const chat = shiftChat(last.chat ?? [], gone);
@@ -3279,7 +3292,18 @@ async function writeClip(data: Uint8Array, name: string, blob: Blob): Promise<st
     a.href = url;
     a.download = name;
     a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+
+    // Revoked only once the download is surely done: 10s truncates a large
+    // clip still streaming, and the user believes a broken file saved fine.
+    // The window regaining focus means the save dialog closed; the 120s timer
+    // is the backstop for a dialog left open or a dropped focus event.
+    const drop = () => {
+        URL.revokeObjectURL(url);
+        a.remove();
+        window.removeEventListener("focus", drop);
+    };
+    window.addEventListener("focus", drop);
+    setTimeout(drop, 120_000);
     return name;
 }
 
