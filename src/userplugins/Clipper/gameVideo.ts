@@ -164,8 +164,10 @@ class GameVideoWatcher {
         if (this.starting) return;
         this.starting = true;
 
+        let video: HTMLVideoElement | null = null;
+
         try {
-            const video = document.createElement("video");
+            video = document.createElement("video");
             video.srcObject = new MediaStream([track]);
             video.muted = true;
             video.playsInline = true;
@@ -204,6 +206,15 @@ class GameVideoWatcher {
             this.ctx = ctx;
             this.track = track;
         } catch (e) {
+            // The element plays the live track into the media pipeline even
+            // though it never resolves: without this it stays held by the
+            // renderer forever (one orphan per retry, out of the JS heap), so
+            // the memory report's Tab keeps climbing at the track's byte rate.
+            if (!video) return;
+            video.pause();
+            video.srcObject = null;
+            video.removeAttribute("src");
+            video.load();
             logger.warn("Could not watch the captured picture", e);
         } finally {
             this.starting = false;
