@@ -34,15 +34,53 @@ if (-not (Test-Path (Join-Path $dist "patcher.js"))) {
     exit 1
 }
 
-# The version comes from the same manifest the updater reads, so the asset
-# name matches what a client already on that version expects to download.
-if (-not $Version) {
-    $infoPath = Join-Path $prebuilt "build-info.json"
-    if (Test-Path $infoPath) {
-        $info = Get-Content $infoPath -Raw | ConvertFrom-Json
-        $Version = $info.clipperVersion
+# ---------------------------------------------------------- drift guard -------
+# build-info.json hashes every file in prebuilt\dist and the install scripts,
+# the way the in-client updater will: LF-normalized bytes for text, raw bytes
+# for the exe. A file on disk that no longer matches its manifest entry was
+# regenerated without a fresh build - which is exactly how 6.5.7 first shipped
+# (a rebuilt patcher.js whose bytes disagreed with the committed manifest, so
+# every client refused to install it). The updater refuses such a bundle, so a
+# zip built from one is a zip nobody can install: refuse to package it instead.
+function Get-ManifestEntry([string] $path) {
+    $bytes = [IO.File]::ReadAllBytes($path)
+
+    if ([IO.Path]::GetExtension($path) -in ".bat", ".ps1", ".js", ".css", ".txt", ".json", ".md") {
+        $text = [Text.Encoding]::UTF8.GetString($bytes) -replace "`r`n", "`n"
+        $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+    }
+
+    $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return @{ size = $bytes.Length; sha256 = ([BitConverter]::ToString($hash) -replace '-', '').ToLower() }
+}
+
+$info = Get-Content (Join-Path $prebuilt "build-info.json") -Raw | ConvertFrom-Json
+
+$drift = @()
+foreach ($file in Get-ChildItem $dist -File) {
+    $entry = $info.files.($file.Name)
+    if (-not $entry) {
+        $drift += "$($file.Name): not listed in build-info.json"
+        continue
+    }
+
+    $actual = Get-ManifestEntry $file.FullName
+    if ($actual.size -ne $entry.size -or $actual.sha256 -ne $entry.sha256) {
+        $drift += "$($file.Name): $($actual.size) bytes / $($actual.sha256.Substring(0, 8))... on disk"
+        $drift += "        manifest says: $($entry.size) bytes / $($entry.sha256.Substring(0, 8))..."
     }
 }
+
+if ($drift.Count -gt 0) {
+    Write-Host "[ERROR] prebuilt\dist drifted from build-info.json:"
+    $drift | ForEach-Object { Write-Host "        $_" }
+    Write-Host "        Regenerate everything with scripts\build-prebuilt.ps1, then commit all of prebuilt\."
+    exit 1
+}
+
+# The version comes from the same manifest the updater reads, so the asset
+# name matches what a client already on that version expects to download.
+if (-not $Version) { $Version = $info.clipperVersion }
 if (-not $Version) { $Version = ((git describe --tags --abbrev=0 2>$null) -replace '^v', '') }
 if (-not $Version) { $Version = "0" }
 
@@ -84,7 +122,8 @@ Compress-Archive -Path (Join-Path $stage "clipper-bundle-v$Version") -Destinatio
 Remove-Item $stage -Recurse -Force
 
 $size = "{0:N1} MB" -f ((Get-Item $zip).Length / 1MB)
-$sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+$hash = [Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($zip))
+$sha = ([BitConverter]::ToString($hash) -replace '-', '').ToLower()
 
 Write-Host "Bundle asset packaged: $zip ($size)"
 Write-Host "sha256: $sha"
