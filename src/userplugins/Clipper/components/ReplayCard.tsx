@@ -151,7 +151,7 @@ export function ReplayCard({ clip, onStudio, onRefresh, onClose }: {
                 </button>
                 <button
                     disabled={busy}
-                    title="Upload the whole clip to 0x0.st and copy a link that plays in chat"
+                    title="Upload the whole clip to the link host and copy a link that plays in chat"
                     onClick={act(() => shareClipLink(clip.name, setStep))}
                 >
                     Link

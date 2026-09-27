@@ -46,9 +46,16 @@ const IS_WAYLAND = process.platform === "linux"
 /** The largest clip the editor will pull over IPC, so a bad file cannot fill the renderer's memory. */
 const MAX_CLIP_BYTES = 500 * 1024 * 1024;
 
-/** The host a clip is shared to, and the most it will take. */
-const SHARE_ENDPOINT = "https://0x0.st";
-const MAX_SHARE_BYTES = 512 * 1024 * 1024;
+/**
+ * The host a clip is shared to, and the most it will take.
+ *
+ * 0x0.st was the host until it disabled uploads (September 2026: "uploads
+ * disabled because it's been almost nothing but AI botnet spam"). Catbox is
+ * the replacement: no account, no key, a 200 MB cap, and its file domain is
+ * already inside Discord's CSP so the embed proxy streams it back.
+ */
+const SHARE_ENDPOINT = "https://catbox.moe/user/api.php";
+const SHARE_MAX_BYTES = 200 * 1024 * 1024;
 
 /**
  * Vesktop (and its forks) install their own display-media handler at startup
@@ -507,7 +514,7 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
 /**
  * Puts a clip on the link host so the renderer never has to.
  *
- * The renderer cannot reach 0x0.st: Discord's content security policy stops a
+ * The renderer cannot reach the host: Discord's content security policy stops a
  * renderer-side fetch to anywhere but Discord, and the host answers no CORS
  * headers, so the old XHR upload was refused before it left the page. The main
  * process answers to neither rule, so the POST lives here - a plain HTTPS
@@ -523,9 +530,9 @@ export async function shareClipToHost(_: IpcMainInvokeEvent, dir: string, name: 
     let data: Buffer;
     try {
         const { size } = fstatSync(fd);
-        if (size > MAX_SHARE_BYTES) throw new Error("That clip is too large to share");
+        if (size > SHARE_MAX_BYTES) throw new Error("That clip is too large to share");
         data = readFileSync(fd);
-        if (data.length > MAX_SHARE_BYTES) throw new Error("That clip is too large to share");
+        if (data.length > SHARE_MAX_BYTES) throw new Error("That clip is too large to share");
     } finally {
         closeSync(fd);
     }
@@ -533,14 +540,25 @@ export async function shareClipToHost(_: IpcMainInvokeEvent, dir: string, name: 
     return postClipToHost(safe, data);
 }
 
-/** One multipart POST, the link back as plain text - mirroring linkShare's parser. */
+/**
+ * One multipart POST, the link back as plain text - mirroring linkShare's parser.
+ *
+ * Catbox's API wants the file under `fileToUpload` (not `file`), preceded by a
+ * `reqtype=fileupload` field, and answers with a bare certificate URL on
+ * 200. Discord's CSP already whitelists that file domain, so the pasted link
+ * streams. The name below keeps its extension for the host's sniffing - a
+ * renamed clip must still look like the video it is.
+ */
 function postClipToHost(name: string, data: Buffer): Promise<string> {
     return new Promise((resolve, reject) => {
         const boundary = `----vencord${randomBytes(16).toString("hex")}`;
 
         const head = Buffer.from(
             `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+            "Content-Disposition: form-data; name=\"reqtype\"\r\n\r\n" +
+            "fileupload\r\n" +
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="fileToUpload"; filename="${name}"\r\n` +
             "Content-Type: application/octet-stream\r\n\r\n",
             "utf8",
         );
@@ -573,7 +591,7 @@ function postClipToHost(name: string, data: Buffer): Promise<string> {
                 clearTimeout(idle);
                 if (status !== 200) return reject(new Error(`The host answered ${status}`));
                 const answer = Buffer.concat(chunks).toString("utf8").trim();
-                const url = /^https:\/\/0x0\.st\/\S+$/.test(answer) ? answer : null;
+                const url = /^https:\/\/files\.catbox\.moe\/\S+$/.test(answer) ? answer : null;
                 if (!url) return reject(new Error("The host did not return a link"));
                 resolve(url);
             });

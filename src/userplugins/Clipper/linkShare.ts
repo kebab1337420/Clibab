@@ -12,11 +12,11 @@
  * the user wants whole goes up to a file host instead, with the link pasted
  * where the file would have gone.
  *
- * The host is 0x0.st, deliberately, not catbox: Discord's embed proxy only
- * streams a link inline when the server answers fast, with the right
- * content-type and with range requests, and catbox answers slowly enough that
- * the player spins. A direct 0x0.st URL unfurls into a player that starts.
- * No account, no key: one multipart POST, one URL back as plain text.
+ * The host is catbox, which answers a bare URL back from one multipart POST,
+ * no account and no key, and whose file domain Discord's embed proxy already
+ * streams. (0x0.st was this module's host until it disabled uploads.) The
+ * embedded player needs the server to answer fast, with the right content-type
+ * and with range requests; catbox's file domain does.
  *
  * The POST itself lives in the main process, not here: Discord's content
  * security policy refuses a renderer-side request to anywhere but Discord,
@@ -46,7 +46,7 @@ type Progress = (step: string) => void;
  */
 export function parseShareUrl(answer: string): string | null {
     const url = answer.trim();
-    return /^https:\/\/0x0\.st\/\S+$/.test(url) ? url : null;
+    return /^https:\/\/files\.catbox\.moe\/\S+$/.test(url) ? url : null;
 }
 
 /**
@@ -66,8 +66,8 @@ function upload(name: string, onProgress?: Progress): Promise<string> {
 /**
  * Uploads a clip whole and copies the link, ready to paste in chat.
  *
- * The link outlives the session by design: the host keeps small files up to a
- * year, thirty days at worst, so a clip linked tonight still plays next month.
+ * The link outlives the session by design: catbox keeps files up while they
+ * are in use, so a clip linked tonight still plays for weeks.
  */
 export async function shareClipLink(name: string, onProgress?: Progress): Promise<boolean> {
     if (!CLIPS_AVAILABLE) {
@@ -85,12 +85,12 @@ export async function shareClipLink(name: string, onProgress?: Progress): Promis
             // link either way, so a denial is not a failure.
         }
 
-        toast(`Link ready, good for 30+ days - paste it in chat, it plays right there: ${url}`, Toasts.Type.SUCCESS);
+        toast(`Link ready - paste it in chat, it plays right there: ${url}`, Toasts.Type.SUCCESS);
         return true;
     } catch (e) {
         const tooLarge = e instanceof Error && /too large to share/.test(e.message);
         if (tooLarge) {
-            toast("That clip is too large - the link host takes 512MB at most. Trim it or make a GIF first.", Toasts.Type.FAILURE);
+            toast("That clip is too large - the link host takes 200MB at most. Trim it or make a GIF first.", Toasts.Type.FAILURE);
             return false;
         }
 
