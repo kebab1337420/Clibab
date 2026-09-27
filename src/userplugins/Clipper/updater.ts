@@ -40,7 +40,7 @@ const logger = new Logger("Clipper");
  * this one under that same tag, or the clients already running it are offered
  * it again.
  */
-export const CLIPPER_VERSION = "6.5.7";
+export const CLIPPER_VERSION = "6.5.8";
 
 interface UpdateState {
     /** A check is in flight. */
