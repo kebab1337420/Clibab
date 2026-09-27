@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from "crypto";
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, type IpcMainInvokeEvent, screen, session, shell } from "electron";
 import { accessSync, closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { get as httpsGet } from "https";
+import { get as httpsGet, request as httpsRequest } from "https";
 import { tmpdir } from "os";
 import { basename, extname, isAbsolute, join, normalize } from "path";
 
@@ -45,6 +45,10 @@ const IS_WAYLAND = process.platform === "linux"
 
 /** The largest clip the editor will pull over IPC, so a bad file cannot fill the renderer's memory. */
 const MAX_CLIP_BYTES = 500 * 1024 * 1024;
+
+/** The host a clip is shared to, and the most it will take. */
+const SHARE_ENDPOINT = "https://0x0.st";
+const MAX_SHARE_BYTES = 512 * 1024 * 1024;
 
 /**
  * Vesktop (and its forks) install their own display-media handler at startup
@@ -498,6 +502,88 @@ export function readClip(_: IpcMainInvokeEvent, dir: string, name: string): Uint
     } finally {
         closeSync(fd);
     }
+}
+
+/**
+ * Puts a clip on the link host so the renderer never has to.
+ *
+ * The renderer cannot reach 0x0.st: Discord's content security policy stops a
+ * renderer-side fetch to anywhere but Discord, and the host answers no CORS
+ * headers, so the old XHR upload was refused before it left the page. The main
+ * process answers to neither rule, so the POST lives here - a plain HTTPS
+ * request, the same pipe the updater already trusts.
+ */
+export async function shareClipToHost(_: IpcMainInvokeEvent, dir: string, name: string): Promise<string> {
+    const safe = clipName(name);
+    if (!safe) throw new Error("That is not a clip name");
+
+    const path = join(resolveDirectory(dir), safe);
+
+    const fd = openSync(path, "r");
+    let data: Buffer;
+    try {
+        const { size } = fstatSync(fd);
+        if (size > MAX_SHARE_BYTES) throw new Error("That clip is too large to share");
+        data = readFileSync(fd);
+        if (data.length > MAX_SHARE_BYTES) throw new Error("That clip is too large to share");
+    } finally {
+        closeSync(fd);
+    }
+
+    return postClipToHost(safe, data);
+}
+
+/** One multipart POST, the link back as plain text - mirroring linkShare's parser. */
+function postClipToHost(name: string, data: Buffer): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const boundary = `----vencord${randomBytes(16).toString("hex")}`;
+
+        const head = Buffer.from(
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+            "Content-Type: application/octet-stream\r\n\r\n",
+            "utf8",
+        );
+        const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+        const body = Buffer.concat([head, data, tail], head.length + data.length + tail.length);
+
+        const request = httpsRequest(SHARE_ENDPOINT, {
+            method: "POST",
+            headers: {
+                "User-Agent": UPDATE_AGENT,
+                "Content-Type": `multipart/form-data; boundary=${boundary}`,
+                "Content-Length": body.length,
+                Accept: "*/*"
+            }
+        }, response => {
+            const status = response.statusCode ?? 0;
+            const chunks: Buffer[] = [];
+            let received = 0;
+            let idle = setTimeout(onIdle, 20_000);
+            function onIdle() { response.destroy(new Error("The host stalled mid-upload")); }
+
+            response.on("data", (chunk: Buffer) => {
+                clearTimeout(idle);
+                idle = setTimeout(onIdle, 20_000);
+                received += chunk.length;
+                if (received > 1024 * 1024) { response.destroy(new Error("The host answered too much")); return; }
+                chunks.push(chunk);
+            });
+            response.on("end", () => {
+                clearTimeout(idle);
+                if (status !== 200) return reject(new Error(`The host answered ${status}`));
+                const answer = Buffer.concat(chunks).toString("utf8").trim();
+                const url = /^https:\/\/0x0\.st\/\S+$/.test(answer) ? answer : null;
+                if (!url) return reject(new Error("The host did not return a link"));
+                resolve(url);
+            });
+            response.on("error", e => { clearTimeout(idle); reject(e); });
+        });
+
+        request.setTimeout(10 * 60 * 1000, () => request.destroy(new Error("The upload took too long")));
+        request.on("error", reject);
+        request.end(body);
+    });
 }
 
 /**
