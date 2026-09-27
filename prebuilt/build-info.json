@@ -2,9 +2,9 @@
   "vencordVersion": "1.15.6",
   "vencordCommit": "59a5428",
   "plugin": "Clipper",
-  "clipperVersion": "6.5.5",
-  "clipperCommit": "d0e4dda",
-  "builtAt": "2026-09-26T12:36:35",
+  "clipperVersion": "6.5.6",
+  "clipperCommit": "aebbaf2",
+  "builtAt": "2026-09-27T14:34:57",
   "files": {
     "discord-voice-capture.exe": {
       "size": 2013184,
@@ -27,8 +27,8 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "renderer.js": {
-      "size": 1164577,
-      "sha256": "df148f59dc3f4df7ca5d3d1fdbf79311c80b88eabd67eb9b4e94c9b069ea6c25"
+      "size": 1164662,
+      "sha256": "a745792f73f1f510f0a0a637973c897f130f415162485e7d4d4eacf246162a9a"
     },
     "renderer.js.LEGAL.txt": {
       "size": 1880,
@@ -51,8 +51,8 @@
       "sha256": "861f40ea0556d6fb31f992f97173485441d57dbc8a90ed7be7c4ae797c8d7ed1"
     },
     "vencordDesktopRenderer.js": {
-      "size": 1173625,
-      "sha256": "6a8443c223c28ff1ad0dfb5727709d06c3b3f4a38458d939adf37f4aa5ab8018"
+      "size": 1173710,
+      "sha256": "621b5c0b86bc4d6d747372ea82edd27c7c2215216558c73dfb5eed63e63ff105"
     },
     "vencordDesktopRenderer.js.LEGAL.txt": {
       "size": 1880,
